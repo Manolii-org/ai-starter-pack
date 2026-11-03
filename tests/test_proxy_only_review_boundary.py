@@ -107,36 +107,60 @@ def test_broad_never_dispatches_without_safe_proxy(base, key, monkeypatch):
     transport.assert_not_called()
 
 
-@pytest.mark.parametrize("base,key,policy", [("", "synthetic", ""), ("https://api.anthropic.com", "synthetic", ""),
-    ("https://proxy.example", "sk-ant-synthetic", ""), ("https://proxy.example", "synthetic", "required")])
-def test_stop_critic_rejects_direct_paths_before_client_creation(base, key, policy, monkeypatch):
+@pytest.fixture
+def stop_code():
     text = (TEMPLATES / "session-stop-checklist.sh").read_text()
     section = text[text.index('_run_intent_drift() {'):]
-    code = section.split("python3 - <<'PYEOF'", 1)[1].split("\n", 1)[1].split("\nPYEOF", 1)[0]
-    client = Mock(side_effect=AssertionError("must not create client"))
-    monkeypatch.setitem(sys.modules, "anthropic", SimpleNamespace(Anthropic=client))
+    return section.split("python3 - <<'PYEOF'", 1)[1].split("\n", 1)[1].split("\nPYEOF", 1)[0]
+
+
+@pytest.mark.parametrize("base,key,policy", [("", "synthetic", ""), ("https://api.anthropic.com", "synthetic", ""),
+    ("https://proxy.example", "sk-ant-synthetic", ""), ("https://proxy.example", "synthetic", "required"),
+    ("https://proxy.example?extra=1", "synthetic", ""), ("https://proxy.example/#fragment", "synthetic", "")])
+def test_stop_critic_rejects_direct_paths_before_client_creation(base, key, policy, monkeypatch, stop_code):
+    transport = Mock(side_effect=AssertionError("must not create transport"))
+    monkeypatch.setattr("urllib.request.build_opener", transport)
     monkeypatch.setenv("LITELLM_PROXY_URL", base)
     monkeypatch.setenv("LLM_API_KEY", key)
     monkeypatch.setenv("CLIENT_AI_POLICY", policy)
     with pytest.raises(RuntimeError, match="requires"):
-        exec(compile(code, "template-stop-critic", "exec"), {})
-    client.assert_not_called()
+        exec(compile(stop_code, "template-stop-critic", "exec"), {})
+    transport.assert_not_called()
 
 
-def test_stop_critic_preserves_proxy_and_uses_alias(monkeypatch):
-    text = (TEMPLATES / "session-stop-checklist.sh").read_text()
-    section = text[text.index('_run_intent_drift() {'):]
-    code = section.split("python3 - <<'PYEOF'", 1)[1].split("\n", 1)[1].split("\nPYEOF", 1)[0]
-    create = Mock(return_value=SimpleNamespace(content=[SimpleNamespace(type="text", text='{"classification":"on-scope"}')]))
-    client = Mock(return_value=SimpleNamespace(messages=SimpleNamespace(create=create)))
-    monkeypatch.setitem(sys.modules, "anthropic", SimpleNamespace(Anthropic=client))
+def test_stop_critic_preserves_proxy_and_uses_only_proxy_auth(monkeypatch, stop_code, capsys):
+    response = Mock()
+    response.__enter__ = Mock(return_value=response)
+    response.__exit__ = Mock(return_value=False)
+    response.read.return_value = json.dumps({"content": [
+        {"type": "thinking", "thinking": "synthetic reasoning"},
+        {"type": "text", "text": '{"classification":'},
+        {"type": "text", "text": '"on-scope"}'},
+    ]}).encode()
+    opener = Mock()
+    opener.open.return_value = response
+    build = Mock(return_value=opener)
+    monkeypatch.setattr("urllib.request.build_opener", build)
+    # Older SDKs independently inherit this first-party bearer credential.
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "synthetic-provider-auth")
+    sdk = Mock(side_effect=AssertionError("SDK authentication must not run"))
+    monkeypatch.setitem(sys.modules, "anthropic", SimpleNamespace(Anthropic=sdk))
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://proxy.example")
     monkeypatch.setenv("LLM_API_KEY", "Bearer <placeholder>")
-    exec(compile(code, "template-stop-critic", "exec"), {})
-    assert client.call_count == 1
-    assert client.call_args.kwargs == {"api_key": "<placeholder>", "base_url": "https://proxy.example"}
-    assert create.call_args.kwargs["model"] == "sonnet"
-    assert create.call_args.kwargs["timeout"] == 15.0
+    exec(compile(stop_code, "template-stop-critic", "exec"), {})
+    sdk.assert_not_called()
+    assert "unavailable" not in capsys.readouterr().out
+    assert opener.open.call_count == 1
+    request = opener.open.call_args.args[0]
+    assert request.full_url == "https://proxy.example/v1/messages"
+    assert request.get_header("Authorization") == "Bearer <placeholder>"
+    assert request.get_header("X-api-key") is None
+    assert "synthetic-provider-auth" not in str(request.header_items())
+    assert json.loads(request.data)["model"] == "sonnet"
+    assert 0 < opener.open.call_args.kwargs["timeout"] <= 15.0
+    assert json.loads(request.data)["max_tokens"] == 4196
+    redirect = build.call_args.args[0]
+    assert redirect.redirect_request(request, None, 302, "redirect", {}, "https://other.example") is None
     assert __import__("os").environ["ANTHROPIC_BASE_URL"] == "https://proxy.example"
 
 
@@ -148,3 +172,84 @@ def test_classifier_dispatch_guidance_keeps_restricted_data_off_models(monkeypat
     assert "never dispatch restricted data to any model" in rule
     assert "restricted/client" not in rule
     assert "haiku=" in rule and "sonnet=" in rule
+
+
+@pytest.mark.parametrize("outcome", ["recovered", "starved", "deadline"])
+def test_stop_critic_reasoning_retry_is_bounded(outcome, tmp_path, monkeypatch, capsys, stop_code):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("LITELLM_PROXY_URL", "https://proxy.example/v1")
+    monkeypatch.setenv("LLM_API_KEY", "synthetic-proxy-key")
+    ticks = iter([100.0, 100.0, 116.0] if outcome == "deadline" else [100.0, 100.0, 101.0, 101.0, 102.0])
+    monkeypatch.setattr("time.monotonic", lambda: next(ticks))
+    calls = []
+
+    def transport(request, **kwargs):
+        calls.append((request, kwargs))
+        data = {"stop_reason": "max_tokens", "content": [{"type": "thinking", "thinking": "synthetic"}]}
+        if len(calls) == 2 and outcome == "recovered":
+            data = {"stop_reason": "end_turn", "content": [{"type": "text", "text": json.dumps({
+                "classification": "scope-creep", "reason": "synthetic scope expansion"})}]}
+        response = Mock()
+        response.__enter__ = Mock(return_value=response)
+        response.__exit__ = Mock(return_value=False)
+        response.read.return_value = json.dumps(data).encode()
+        return response
+
+    monkeypatch.setattr("urllib.request.build_opener", lambda *args: SimpleNamespace(open=transport))
+    exec(compile(stop_code, "template-stop-critic", "exec"), {})
+    expected = 1 if outcome == "deadline" else 2
+    assert len(calls) == expected
+    assert [json.loads(request.data)["max_tokens"] for request, _ in calls] == [4196, 8392][:expected]
+    assert [kwargs["timeout"] for _, kwargs in calls] == [15.0, 14.0][:expected]
+    assert all(request.full_url == "https://proxy.example/v1/messages" for request, _ in calls)
+    alerts = list((tmp_path / ".ai/drift-alerts").glob("*.json"))
+    output = capsys.readouterr().out
+    if outcome == "recovered":
+        assert len(alerts) == 1
+        assert json.loads(alerts[0].read_text())["classification"] == "scope-creep"
+        assert "unavailable" not in output
+    else:
+        assert alerts == []
+        assert "Critic unavailable; no scope verdict recorded" in output
+
+
+@pytest.mark.parametrize("delay", ["late-result", "trickling-body"])
+def test_stop_critic_rejects_late_results_and_interrupts_blocking_reads(delay, tmp_path, monkeypatch, capsys, stop_code):
+    import signal
+    import time
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("LITELLM_PROXY_URL", "https://proxy.example")
+    monkeypatch.setenv("LLM_API_KEY", "synthetic-proxy-key")
+    previous = signal.getsignal(signal.SIGALRM)
+    original_timer = signal.setitimer
+    armed = []
+    if delay == "late-result":
+        ticks = iter([100.0, 100.0, 116.0])
+        monkeypatch.setattr(time, "monotonic", lambda: next(ticks))
+    else:
+        def short_real_timer(kind, seconds, interval=0.0):
+            armed.append(seconds)
+            return original_timer(kind, 0.01 if seconds else 0.0, interval)
+        monkeypatch.setattr(signal, "setitimer", short_real_timer)
+    body = json.dumps({"content": [{"type": "text", "text": json.dumps({
+        "classification": "scope-creep", "reason": "synthetic late response"})}], "stop_reason": "end_turn"}).encode()
+    def read():
+        if delay == "trickling-body":
+            time.sleep(0.1)
+        return body
+    response = Mock()
+    response.__enter__ = Mock(return_value=response)
+    response.__exit__ = Mock(return_value=False)
+    response.read.side_effect = read
+    opener = Mock()
+    opener.open.return_value = response
+    monkeypatch.setattr("urllib.request.build_opener", lambda *args: opener)
+    exec(compile(stop_code, "template-stop-critic", "exec"), {})
+    assert opener.open.call_count == 1
+    assert not (tmp_path / ".ai/drift-alerts").exists()
+    assert "Critic unavailable; no scope verdict recorded" in capsys.readouterr().out
+    assert signal.getsignal(signal.SIGALRM) == previous
+    assert signal.getitimer(signal.ITIMER_REAL) == (0.0, 0.0)
+    if delay == "trickling-body":
+        assert armed == [15.0, 0.0]

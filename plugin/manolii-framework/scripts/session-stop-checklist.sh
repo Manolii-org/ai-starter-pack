@@ -258,7 +258,9 @@ _run_intent_drift() {
     export _DRIFT_STATS="$diff_summary"
 
     python3 - <<'PYEOF' 2>/dev/null || true
-import anthropic, json, os
+import json, os, time, signal
+from contextlib import contextmanager
+from urllib.request import Request, HTTPRedirectHandler, build_opener
 from urllib.parse import urlparse
 from datetime import datetime, timezone
 
@@ -269,7 +271,8 @@ _diff_stats = os.environ.get("_DRIFT_STATS", "")
 proxy_url = os.environ.get("LITELLM_PROXY_URL") or os.environ.get("ANTHROPIC_BASE_URL")
 parsed = urlparse(proxy_url or "")
 if (os.environ.get("CLIENT_AI_POLICY") or parsed.scheme != "https" or not parsed.hostname
-        or parsed.username or parsed.password or parsed.hostname.lower().rstrip(".") == "api.anthropic.com"):
+        or parsed.username or parsed.password or parsed.query or parsed.fragment
+        or parsed.hostname.lower().rstrip(".") == "api.anthropic.com"):
     raise RuntimeError("session critic requires the governed LiteLLM proxy")
 auth = os.environ.get("LLM_API_KEY") or os.environ.get("LITELLM_MASTER_KEY") or os.environ.get("ANTHROPIC_API_KEY")
 auth = (auth or "").strip()
@@ -277,11 +280,31 @@ if auth.lower().startswith("bearer "):
     auth = auth[7:].strip()
 if not auth or auth.lower() == "bearer" or auth.lower().startswith("sk-ant-"):
     raise RuntimeError("session critic requires a LiteLLM proxy credential")
-api_key = auth
-client = anthropic.Anthropic(
-    api_key=api_key,
-    base_url=proxy_url,
-)
+# Send only the validated proxy credential. SDK defaults can independently
+# inherit provider authentication, even when an explicit API key is supplied.
+class _NoRedirect(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+@contextmanager
+def _wall_budget(seconds):
+    # This heredoc runs on the main thread of its own POSIX Python process.
+    # A socket timeout alone does not stop a peer trickling response bytes.
+    if signal.getitimer(signal.ITIMER_REAL) != (0.0, 0.0):
+        raise RuntimeError("critic cannot replace an active deadline")
+    def expired(signum, frame):
+        raise TimeoutError("critic time budget exhausted")
+    previous = signal.signal(signal.SIGALRM, expired)
+    try:
+        signal.setitimer(signal.ITIMER_REAL, seconds)
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0.0)
+        signal.signal(signal.SIGALRM, previous)
+
+opener = build_opener(_NoRedirect())
+base = proxy_url.rstrip("/")
+endpoint = base + ("/messages" if base.endswith("/v1") else "/v1/messages")
 _prompt_text = (
     "Original intent: " + _original_prompt + "\n\n"
     "Session diff stats:\n" + _diff_stats + "\n\n"
@@ -290,17 +313,35 @@ _prompt_text = (
 )
 
 try:
-    r = client.messages.create(
-        model="sonnet",
-        max_tokens=100,
-        timeout=15.0,
-        messages=[{"role": "user", "content": _prompt_text}]
-    )
-    _text = "".join(
-        getattr(_b, "text", "") for _b in r.content
-        if getattr(_b, "type", "text") == "text"
-    )
-    _result = json.loads(_text)
+    with _wall_budget(15.0):
+        # Proxied reasoning shares the output allowance. Retry only starvation,
+        # once, with more headroom and the remainder of the original time budget.
+        deadline = time.monotonic() + 15.0
+        budget = 100 + 4096
+        for attempt in range(2):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("critic time budget exhausted")
+            payload = {"model": "sonnet", "max_tokens": budget,
+                       "messages": [{"role": "user", "content": _prompt_text}]}
+            request = Request(endpoint, data=json.dumps(payload).encode(), headers={
+                "Content-Type": "application/json", "Authorization": "Bearer " + auth,
+                "anthropic-version": "2023-06-01",
+            }, method="POST")
+            with opener.open(request, timeout=remaining) as response:
+                r = json.loads(response.read())
+            if time.monotonic() >= deadline:
+                raise TimeoutError("critic response exceeded deadline")
+            _text = "".join(
+                block.get("text", "") for block in r.get("content", [])
+                if isinstance(block, dict) and block.get("type") == "text"
+            )
+            if _text.strip() and r.get("stop_reason") != "max_tokens":
+                break
+            if attempt:
+                raise ValueError("critic output remained incomplete")
+            budget *= 2
+        _result = json.loads(_text)
     if _result.get("classification") in ("significant-drift", "scope-creep"):
         os.makedirs(".ai/drift-alerts", exist_ok=True)
         _fname = f".ai/drift-alerts/{datetime.now(timezone.utc):%Y%m%d-%H%M%S}.json"
@@ -313,7 +354,7 @@ try:
         print(f"[intent-drift] {_result['classification']}: {_result['reason']}")
         print(f"[intent-drift] Alert written to {_fname}")
 except Exception:
-    pass
+    print("[intent-drift] Critic unavailable; no scope verdict recorded.")
 PYEOF
 }
 
