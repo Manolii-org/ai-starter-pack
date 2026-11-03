@@ -135,15 +135,17 @@ def answer(f, decision="keep", investigations=()):
 
 
 @pytest.mark.parametrize("line", [3, None])
-def test_immutable_head_not_dirty_worktree(repo, line):
+@pytest.mark.parametrize("path", ["policy.py", "./policy.py", "././policy.py"])
+def test_immutable_head_not_dirty_worktree(repo, line, path):
     root, head = repo
-    f = finding(line=line)
+    f = finding(path, line)
     (root / "policy.py").write_text("SECRET DIRTY WORKTREE CONTENT")
     e = j._judge_evidence([f], head)
     assert e["tree"] == git(root, "rev-parse", head + "^{tree}")
     assert "null intentionally allowed" in e["locations"][loc(f)]["text"]
     assert "SECRET" not in json.dumps(e)
     assert e["locations"][loc(f)]["blob"] == git(root, "rev-parse", head + ":policy.py")
+    assert e["locations"][loc(f)]["file"] == path
     assert e["diff"]["status"] == "available"
     if line is None:
         row = e["locations"][loc(f)]
@@ -155,8 +157,14 @@ def test_immutable_head_not_dirty_worktree(repo, line):
     "path,line,status",
     [
         ("../secret", 1, "invalid_location"),
+        ("./../secret", 1, "invalid_location"),
+        ("nested/../policy.py", 1, "invalid_location"),
         ("/etc/passwd", 1, "invalid_location"),
         ("link.py", 1, "absent_or_nonregular_at_head"),
+        ("./link.py", 1, "absent_or_nonregular_at_head"),
+        ("./.env", 1, "sensitive_path_refused"),
+        ("./.aws/credentials", 1, "sensitive_path_refused"),
+        ("./private.pem", 1, "sensitive_path_refused"),
         ("missing.py", 1, "absent_or_nonregular_at_head"),
         ("policy.py", 999, "line_out_of_range"),
         ("policy.py", False, "invalid_location"),
@@ -218,6 +226,31 @@ def test_source_justified_all_drop_is_valid(repo):
     )
     result = j._validate_judge_decisions(a, [f], j._judge_evidence([f], head), [])
     assert result["complete"] and result["surviving"] == []
+
+
+def test_equivalent_paths_preserve_original_identities_and_require_investigation(repo):
+    _, head = repo
+    f = finding()
+    same = finding("./policy.py")
+    other = finding("./policy.py", source="independent-reviewer")
+    assert f.comparison_key() == same.comparison_key()
+    assert f.finding_id != same.finding_id and loc(f) != loc(same)
+    assert same.to_dict()["file"] == "./policy.py"
+    assert j._comparison_location(finding("nested/../policy.py")) != j._comparison_location(f)
+    investigations = j._investigations([f, other], [])
+    assert len(investigations) == 1
+    assert set(investigations[0]["finding_ids"]) == {f.finding_id, other.finding_id}
+    evidence = j._judge_evidence([f, other], head)
+    result = answer(f)
+    result["decisions"].extend(answer(other)["decisions"])
+    with pytest.raises(ValueError, match="disagreement resolution missing"):
+        j._validate_judge_decisions(result, [f, other], evidence, investigations)
+    result["investigations"] = [{"id": investigations[0]["id"], "status": "resolved",
+                                  "reason": "Both original locations verified", "evidence_ids": [loc(f)]}]
+    assert not j._validate_judge_decisions(result, [f, other], evidence, investigations)["complete"]
+    result["investigations"][0]["evidence_ids"].append(loc(other))
+    verified = j._validate_judge_decisions(result, [f, other], evidence, investigations)
+    assert verified["complete"] and verified["surviving"] == [f.to_dict(), other.to_dict()]
 
 
 @pytest.mark.parametrize(
@@ -751,17 +784,18 @@ def test_reference_only_git_source_survives_numbering_and_real_request(repo, mon
     _assert_reference_only_git_request(repo, monkeypatch, source)
 
 
-def _assert_reference_only_git_request(repo, monkeypatch, source):
+def _assert_reference_only_git_request(repo, monkeypatch, source, path="policy.py"):
     root, _ = repo
     (root / "policy.py").write_text(source)
     (root / "link.py").unlink()
     git(root, "add", "-A")
     git(root, "commit", "-m", "Reference-only immutable source")
     head = git(root, "rev-parse", "HEAD")
-    f = finding(line=None)
+    f = finding(path, line=None)
     evidence = j._judge_evidence([f], head)
     row = evidence["locations"][loc(f)]
     assert row["status"] == "available" and row["whole_file"]
+    assert row["file"] == path
     assert row["content_sha256"] == hashlib.sha256(source.encode()).hexdigest()
     assert row["text"] == "\n".join(
         f"{number}: {line}" for number, line in enumerate(source.removesuffix("\n").split("\n"), 1)
@@ -785,6 +819,12 @@ def _assert_reference_only_git_request(repo, monkeypatch, source):
     monkeypatch.setattr(j, "_urlopen_https", transport)
     result = judge.invoke_judge_agent([f])
     assert len(sent) == 1 and result["complete"] and result["surviving"] == [f.to_dict()]
+
+
+@pytest.mark.parametrize("path", ["./policy.py", "././policy.py"])
+def test_prefixed_producer_location_reaches_real_judge(repo, monkeypatch, path):
+    source = _fixture_text('@auth@ = os.getenv("OFFLINE_REFERENCE", "")\n')
+    _assert_reference_only_git_request(repo, monkeypatch, source, path)
 
 
 @pytest.mark.parametrize("source", [
@@ -987,10 +1027,14 @@ def test_catalog_works_in_normal_rendered_and_plugin_layout(
             j._require_safe_packet({"candidate": _fixture_text('@CREDENTIAL@ = "offline-fixture-value"')})
 
 
-def test_mixed_specificity_conflict_cannot_publish_survivor(repo, monkeypatch):
+@pytest.mark.parametrize("good_path,bad_path", [
+    ("policy.py", "policy.py"), ("policy.py", "./policy.py"),
+    ("./policy.py", "policy.py"), ("././policy.py", "./policy.py"),
+])
+def test_mixed_specificity_conflict_cannot_publish_survivor(repo, monkeypatch, good_path, bad_path):
     root, head = repo
-    f = finding()
-    bad = finding(source="codex-adversarial", message="Opposing original claim")
+    f = finding(good_path)
+    bad = finding(bad_path, source="codex-adversarial", message="Opposing original claim")
     bad.fix = ""
     judge = j.Judge(str(root), 1, head)
     judge.judge_log_dir = root / "logs"
@@ -1023,6 +1067,7 @@ def test_mixed_specificity_conflict_cannot_publish_survivor(repo, monkeypatch):
     )
     judge.run()
     assert judge._adjudication_incomplete and not posted and advisories
+    assert judge._specificity_conflicted_locations == {("policy.py", f.line)}
     log = next((root / "logs").glob("*.jsonl")).read_text()
     assert bad.finding_id in log and "MUST_INVESTIGATE" in log
 
@@ -1166,8 +1211,9 @@ def test_sensitive_old_path_rename_refused_before_content(repo, monkeypatch):
 
 
 @pytest.mark.parametrize("line", [2, None])
+@pytest.mark.parametrize("path", ["test_policy.py", "./test_policy.py", "././test_policy.py"])
 def test_deleted_file_is_bound_to_real_base_and_requires_diff_citation(
-    repo, monkeypatch, line
+    repo, monkeypatch, line, path
 ):
     root, base = safe_subject(repo)
     (root / "test_policy.py").unlink()
@@ -1175,10 +1221,11 @@ def test_deleted_file_is_bound_to_real_base_and_requires_diff_citation(
     git(root, "commit", "-m", "Delete test file")
     head = git(root, "rev-parse", "HEAD")
     monkeypatch.setenv("PR_BASE_SHA", base)
-    f = finding("test_policy.py", line)
+    f = finding(path, line)
     e = j._judge_evidence([f], head)
     row = e["locations"][loc(f)]
     assert row["status"] == "available" and row["source_state"] == "deleted_at_head"
+    assert row["file"] == path
     assert row["revision"] == base and row["head"] == head
     assert row["blob"] == git(root, "rev-parse", base + ":test_policy.py")
     assert "-    assert allowed('tenant-b') is False" in e["diff"]["text"]
@@ -1186,7 +1233,7 @@ def test_deleted_file_is_bound_to_real_base_and_requires_diff_citation(
     assert not j._validate_judge_decisions(a, [f], e, [])["complete"]
     a["decisions"][0]["evidence_ids"].append(e["diff"]["id"])
     assert j._validate_judge_decisions(a, [f], e, [])["complete"]
-    bogus = finding("test_policy.py", 999)
+    bogus = finding(path, 999)
     assert (
         j._judge_evidence([bogus], head)["locations"][loc(bogus)]["status"]
         != "available"

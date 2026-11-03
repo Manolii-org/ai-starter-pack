@@ -288,7 +288,7 @@ class Finding:
 
     def comparison_key(self) -> tuple:
         """Local reviewer agreement, independent of IDs and confidence scores."""
-        return (self.source, self.file, self.line, self.severity, self.message, self.fix)
+        return (self.source, *_comparison_location(self), self.severity, self.message, self.fix)
 
     def to_dict(self) -> dict:
         return {
@@ -301,6 +301,20 @@ class Finding:
             "fix": self.fix,
             "confidence": self.confidence,
         }
+
+
+def _comparison_location(finding: Finding) -> tuple:
+    """Compare safe relative spellings without resolving the working tree.
+
+    Producer filenames, finding IDs and evidence IDs remain unchanged. Invalid
+    paths retain their spelling and still fail evidence validation.
+    """
+    name = finding.file
+    if isinstance(name, str) and name:
+        path = PurePosixPath(name)
+        if not path.is_absolute() and ".." not in path.parts and "\\" not in name:
+            return path.as_posix(), finding.line
+    return name, finding.line
 
 
 def _sensitive_evidence_path(name: str) -> bool:
@@ -715,12 +729,13 @@ def _judge_evidence(findings: list[Finding], head: str) -> dict:
         if _sensitive_evidence_path(finding.file):
             row["status"] = "sensitive_path_refused"
             continue
+        lookup = path.as_posix()
         try:
-            entries = _git(root, "ls-tree", "-z", head, "--", finding.file).split(b"\0")
+            entries = _git(root, "ls-tree", "-z", head, "--", lookup).split(b"\0")
             matches = [
                 e.split(b"\t", 1)[0].split()
                 for e in entries
-                if b"\t" in e and e.split(b"\t", 1)[1].decode() == finding.file
+                if b"\t" in e and e.split(b"\t", 1)[1].decode() == lookup
             ]
             if len(matches) != 1 or matches[0][0] not in {b"100644", b"100755"}:
                 row["status"] = "absent_or_nonregular_at_head"
@@ -772,10 +787,13 @@ def _judge_evidence(findings: list[Finding], head: str) -> dict:
         try:
             deleted = set(_git_bounded(root, "diff", "--no-ext-diff", "--no-textconv", "--no-renames", "--name-only", "--diff-filter=D", "-z", base + "..." + head, limit=20000).split(b"\0"))
             for row in packet["locations"].values():
-                if row["status"] != "absent_or_nonregular_at_head" or row["file"].encode() not in deleted:
+                if row["status"] != "absent_or_nonregular_at_head":
                     continue
-                entries = _git_bounded(root, "ls-tree", "-z", base, "--", row["file"], limit=20000).split(b"\0")
-                match = [e.split(b"\t", 1)[0].split() for e in entries if b"\t" in e and e.split(b"\t", 1)[1] == row["file"].encode()]
+                lookup = PurePosixPath(row["file"]).as_posix()
+                if lookup.encode() not in deleted:
+                    continue
+                entries = _git_bounded(root, "ls-tree", "-z", base, "--", lookup, limit=20000).split(b"\0")
+                match = [e.split(b"\t", 1)[0].split() for e in entries if b"\t" in e and e.split(b"\t", 1)[1] == lookup.encode()]
                 if len(match) != 1 or match[0][0] not in {b"100644", b"100755"}:
                     continue
                 body = _git_bounded(root, "cat-file", "blob", match[0][2].decode(), limit=min(20000, _EVIDENCE_MAX_FILE_BYTES))
@@ -795,7 +813,7 @@ def _investigations(findings: list[Finding], observations: list[dict]) -> list[d
     groups = {}
     aliases = {}
     for finding in findings:
-        groups.setdefault((finding.file, finding.line), []).append(finding)
+        groups.setdefault(_comparison_location(finding), []).append(finding)
         for alias in (finding.finding_id, finding.legacy_id()):
             aliases.setdefault(alias, set()).add(finding.comparison_key())
     result = []
@@ -1390,7 +1408,7 @@ Only keep original IDs that pass all four gates. Never post to GitHub yourself."
 
             judge_result = _parse_judge_verdict(response_text)
             adjudicated = _validate_judge_decisions(judge_result, findings, evidence, investigations)
-            blocked = {f.finding_id for f in findings if (f.file, f.line) in self._specificity_conflicted_locations}
+            blocked = {f.finding_id for f in findings if _comparison_location(f) in self._specificity_conflicted_locations}
             if blocked:
                 adjudicated["complete"] = False
                 adjudicated["surviving"] = [f for f in adjudicated["surviving"] if f["finding_id"] not in blocked]
@@ -1801,9 +1819,9 @@ Only keep original IDs that pass all four gates. Never post to GitHub yourself."
             self._adjudication_incomplete = True
             kept_ids = {f.finding_id for f in findings}
             removed = [f for f in originals if f.finding_id not in kept_ids]
-            self._specificity_conflicted_locations = {(f.file, f.line) for f in removed} & {(f.file, f.line) for f in findings}
+            self._specificity_conflicted_locations = {_comparison_location(f) for f in removed} & {_comparison_location(f) for f in findings}
             for investigation in _investigations(originals, self._review_observations):
-                if any((f.file, f.line) in self._specificity_conflicted_locations and f.finding_id in investigation["finding_ids"] for f in originals):
+                if any(_comparison_location(f) in self._specificity_conflicted_locations and f.finding_id in investigation["finding_ids"] for f in originals):
                     self.write_log_entry(investigation["id"], "investigate", "specificity", json.dumps(investigation, sort_keys=True))
         logger.info(f"{len(findings)} findings remain after specificity gate")
 
