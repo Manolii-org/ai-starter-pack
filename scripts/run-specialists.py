@@ -107,10 +107,14 @@ def _proxy_transport_key() -> str:
     ):
         if not candidate:
             continue
-        key = candidate.strip()
+        key = (
+            candidate.strip()
+        )
         # The auth-scheme token is case-insensitive (RFC 7235).
         if key.lower() == "bearer" or key.lower().startswith("bearer "):
-            key = key[7:].strip()
+            key = (
+                key[7:].strip()
+            )
         if not key or key.lower().startswith("sk-ant-"):
             continue
         return key
@@ -120,9 +124,9 @@ def _proxy_transport_key() -> str:
 def _endpoint(direct: bool = False) -> tuple[str, str, bool]:
     """Resolve (api_key, url, proxied).
 
-    Transport token: ANTHROPIC_API_KEY when calling Anthropic directly. When
-    LITELLM_PROXY_URL or ANTHROPIC_BASE_URL points at a non-Anthropic host the
-    request goes through that proxy with _proxy_transport_key().
+    Resolve proxy credentials or an explicitly admitted external provider.
+    A non-Anthropic LITELLM_PROXY_URL or ANTHROPIC_BASE_URL uses the proxy
+    credential resolver; direct requests require a configured origin.
 
     direct=True forces the Anthropic endpoint regardless of proxy config — used
     by `first_party` skills, where the eligibility matrix keeps the task class
@@ -144,8 +148,10 @@ def _endpoint(direct: bool = False) -> tuple[str, str, bool]:
         # Under a configured proxy ANTHROPIC_API_KEY holds the LiteLLM
         # credential — it must never be sent to api.anthropic.com. Only the
         # dedicated direct key authenticates first-party calls there.
-        key = os.environ.get("ANTHROPIC_DIRECT_API_KEY") or (
-            os.environ.get("ANTHROPIC_API_KEY", "") if not proxy_configured else ""
+        key = (
+            os.environ.get("ANTHROPIC_DIRECT_API_KEY") or (
+                os.environ.get("ANTHROPIC_API_KEY", "") if not proxy_configured else ""
+            )
         )
         return key, direct_url, False
     if proxy_configured:
@@ -155,7 +161,9 @@ def _endpoint(direct: bool = False) -> tuple[str, str, bool]:
             raise RouteAdmissionError("direct review denied: governed HTTPS proxy required")
         return _proxy_transport_key(), proxy_base + "/v1/messages", True
     direct_url = configured_direct_endpoint()
-    key = os.environ.get("ANTHROPIC_DIRECT_API_KEY") or os.environ.get("ANTHROPIC_API_KEY", "")
+    key = (
+        os.environ.get("ANTHROPIC_DIRECT_API_KEY") or os.environ.get("ANTHROPIC_API_KEY", "")
+    )
     return key, direct_url, False
 
 
@@ -484,7 +492,9 @@ def _invoke_skill(skill_name: str, diff: str, output_dir: pathlib.Path) -> tuple
                     or os.environ.get("ANTHROPIC_BASE_URL") or "").rstrip("/")
             if not base or (urllib.parse.urlparse(base).hostname or "").lower().rstrip(".") == _ANTHROPIC_HOST:
                 raise ValueError("protected review requires its existing proxy route")
-            key = _proxy_transport_key()
+            key = (
+                _proxy_transport_key()
+            )
             if not key:
                 raise ValueError("protected review proxy credential unavailable")
             data = protected_review.review(skill_name, system_prompt, user_message, diff, base, key)

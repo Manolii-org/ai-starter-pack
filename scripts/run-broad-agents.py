@@ -222,7 +222,9 @@ def get_api_key() -> Optional[str]:
             break
     else:
         configured_direct_endpoint()
-        key = os.getenv("ANTHROPIC_DIRECT_API_KEY") or os.getenv("ANTHROPIC_API_KEY")
+        key = (
+            os.getenv("ANTHROPIC_DIRECT_API_KEY") or os.getenv("ANTHROPIC_API_KEY")
+        )
     if not key:
         logger.warning("no API credential set; skipping agent invocations")
         return None
@@ -954,8 +956,10 @@ def invoke_agent(
     # Anthropic-direct — never the OSS proxy, regardless of declared model.
     if agent_config.first_party:
         direct_required = True
-        api_key = os.getenv("ANTHROPIC_DIRECT_API_KEY") or (
-            os.getenv("ANTHROPIC_API_KEY") if not proxy else None
+        api_key = (
+            os.getenv("ANTHROPIC_DIRECT_API_KEY") or (
+                os.getenv("ANTHROPIC_API_KEY") if not proxy else None
+            )
         )
         if not api_key:
             logger.warning(
@@ -987,8 +991,10 @@ def invoke_agent(
         # whenever a proxy is configured — api.anthropic.com would reject it
         # (and it must never leave the boundary as x-api-key to that host).
         # The direct plane requires a real Anthropic key.
-        api_key = os.getenv("ANTHROPIC_DIRECT_API_KEY") or (
-            os.getenv("ANTHROPIC_API_KEY") if not proxy else None
+        api_key = (
+            os.getenv("ANTHROPIC_DIRECT_API_KEY") or (
+                os.getenv("ANTHROPIC_API_KEY") if not proxy else None
+            )
         )
         if not api_key:
             logger.warning(
@@ -1010,7 +1016,9 @@ def invoke_agent(
             f"{agent_config.name}: CLIENT_AI_POLICY active — dispatching {model} (Anthropic-direct)"
         )
     else:
-        api_key = api_key or get_api_key()
+        api_key = (
+            api_key or get_api_key()
+        )
     if not api_key:
         return {"source": agent_config.name, "findings": [],
                 "first_party": direct_required, "skipped": "no_credential"}

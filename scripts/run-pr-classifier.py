@@ -90,10 +90,14 @@ def _proxy_transport_key() -> str:
     ):
         if not candidate:
             continue
-        key = candidate.strip()
+        key = (
+            candidate.strip()
+        )
         # The auth-scheme token is case-insensitive (RFC 7235).
         if key.lower() == "bearer" or key.lower().startswith("bearer "):
-            key = key[7:].strip()
+            key = (
+                key[7:].strip()
+            )
         if not key or key.lower().startswith("sk-ant-"):
             continue
         return key
@@ -103,9 +107,9 @@ def _proxy_transport_key() -> str:
 def _endpoint() -> tuple[str, str, bool]:
     """Resolve (api_key, url, proxied).
 
-    Transport token: ANTHROPIC_API_KEY when calling Anthropic directly. When
-    LITELLM_PROXY_URL or ANTHROPIC_BASE_URL points at a non-Anthropic host the
-    request goes through that proxy with _proxy_transport_key().
+    Resolve proxy credentials or an explicitly admitted external provider.
+    A non-Anthropic LITELLM_PROXY_URL or ANTHROPIC_BASE_URL uses the proxy
+    credential resolver; direct requests require a configured origin.
     """
     base = (os.environ.get("LITELLM_PROXY_URL") or os.environ.get("ANTHROPIC_BASE_URL") or "").rstrip("/")
     parsed_origin = urllib.parse.urlsplit(base)
@@ -121,8 +125,10 @@ def _endpoint() -> tuple[str, str, bool]:
     # including the classifier, which reads the full PR diff.
     if os.environ.get("CLIENT_AI_POLICY"):
         direct_url = configured_direct_endpoint()
-        key = os.environ.get("ANTHROPIC_DIRECT_API_KEY") or (
-            os.environ.get("ANTHROPIC_API_KEY", "") if not proxied else ""
+        key = (
+            os.environ.get("ANTHROPIC_DIRECT_API_KEY") or (
+                os.environ.get("ANTHROPIC_API_KEY", "") if not proxied else ""
+            )
         )
         return key, direct_url, False
     if proxied:

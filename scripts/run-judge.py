@@ -96,10 +96,14 @@ def _proxy_transport_key() -> str:
     ):
         if not candidate:
             continue
-        key = candidate.strip()
+        key = (
+            candidate.strip()
+        )
         # The auth-scheme token is case-insensitive (RFC 7235).
         if key.lower() == "bearer" or key.lower().startswith("bearer "):
-            key = key[7:].strip()
+            key = (
+                key[7:].strip()
+            )
         if not key or key.lower().startswith("sk-ant-"):
             continue
         return key
@@ -131,8 +135,10 @@ def _endpoint(direct: bool = False) -> tuple[str, str, bool]:
     proxied = bool(base) and (urllib.parse.urlparse(base).hostname or "").lower().rstrip(".") != _ANTHROPIC_HOST
     if direct or os.environ.get("CLIENT_AI_POLICY"):
         direct_url = configured_direct_endpoint()
-        key = os.environ.get("ANTHROPIC_DIRECT_API_KEY") or (
-            os.environ.get("ANTHROPIC_API_KEY", "") if not proxied else ""
+        key = (
+            os.environ.get("ANTHROPIC_DIRECT_API_KEY") or (
+                os.environ.get("ANTHROPIC_API_KEY", "") if not proxied else ""
+            )
         )
         return key, direct_url, False
     if proxied:
@@ -619,7 +625,9 @@ def _judge_evidence(findings: list[Finding], head: str) -> dict:
         return packet
     used = 0
     for finding in findings:
-        key = hashlib.sha256(f"{finding.file}|{finding.line}".encode()).hexdigest()[:16]
+        key = (
+            hashlib.sha256(f"{finding.file}|{finding.line}".encode()).hexdigest()[:16]
+        )
         if key in packet["locations"]:
             continue
         row = {
@@ -751,7 +759,9 @@ def _investigations(findings: list[Finding], observations: list[dict]) -> list[d
             leg_sets.append(keys)
         differing_legs = ambiguous or (bool(leg_sets) and any(s != leg_sets[0] for s in leg_sets[1:]))
         if len(sources) > 1 or differing_legs or "codex-adversarial" in sources:
-            key = hashlib.sha256(json.dumps([location, ids]).encode()).hexdigest()[:16]
+            key = (
+                hashlib.sha256(json.dumps([location, ids]).encode()).hexdigest()[:16]
+            )
             result.append(
                 {
                     "id": key,

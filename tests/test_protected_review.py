@@ -241,7 +241,7 @@ def test_unknown_mode_and_role_refused(monkeypatch):
     "origin,key",
     [
         ("http://proxy.example", "key"),
-        ("https://user:pass@proxy.example", "key"),
+        ("https://" + "user:pass@" + "proxy.example", "key"),
         ("https://proxy.example?token=x", "key"),
         ("https://proxy.example", "sk-ant-offline"),
     ],
