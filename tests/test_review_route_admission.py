@@ -33,8 +33,9 @@ def external(tmp_path, monkeypatch):
     monkeypatch.delenv('CLIENT_AI_POLICY', raising=False)
     for name in SECRET_NAMES:
         monkeypatch.delenv(name, raising=False)
-    for name in ['LITELLM_PROXY_URL', 'ANTHROPIC_BASE_URL']:
+    for name in ['LITELLM_PROXY_URL', 'ANTHROPIC_BASE_URL', 'ANTHROPIC_DIRECT_BASE_URL']:
         monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv('ANTHROPIC_DIRECT_BASE_URL', 'https://api.anthropic.com')
     subprocess.run(['git', 'init', '-q'], check=True)
     manifest = {'version': 1, 'mode': 'capabilities', 'capabilities': ['llm-anthropic'],
                 'consumer_scope': 'external', 'consumer_repository': 'ExternalExample/project'}
@@ -546,3 +547,57 @@ def test_external_pr_policy_base_requires_nonshallow_checkout(external, monkeypa
     # Only a local fixture is fetched; admission itself must never lazy-fetch.
     subprocess.run(['git', 'fetch', '-q', '--unshallow', 'origin'], check=True)
     assert policy.require_direct_llm_admission() is None
+
+
+def test_external_admission_does_not_create_an_implicit_endpoint(external, monkeypatch):
+    root, manifest, commit = external
+    commit()
+    monkeypatch.delenv("ANTHROPIC_DIRECT_BASE_URL")
+    monkeypatch.setenv("ANTHROPIC_DIRECT_API_KEY", "offline-direct")
+    assert policy.require_direct_llm_admission() is None
+    with pytest.raises(policy.RouteAdmissionError, match="explicit HTTPS Anthropic origin"):
+        policy.configured_direct_endpoint()
+    for name in ("run-specialists.py", "run-judge.py", "run-pr-classifier.py"):
+        module = load(name)
+        with pytest.raises(module.RouteAdmissionError, match="explicit HTTPS Anthropic origin"):
+            module._endpoint()
+
+
+@pytest.mark.parametrize("base", ["http://api.anthropic.com", "https://other.example",
+    "https://" + "user:password@" + "api.anthropic.com", "https://api.anthropic.com/?query=1",
+    "https://api.anthropic.com/#fragment", "https://api.anthropic.com/v1",
+    "https://api.anthropic.com:8443", "https://api.anthropic.com:invalid"])
+def test_explicit_direct_origin_is_validated_after_admission(external, monkeypatch, base):
+    root, manifest, commit = external
+    commit()
+    monkeypatch.setenv("ANTHROPIC_DIRECT_BASE_URL", base)
+    with pytest.raises(policy.RouteAdmissionError, match="explicit HTTPS Anthropic origin"):
+        policy.configured_direct_endpoint()
+
+
+def test_explicit_direct_origin_preserves_admitted_first_party_origin(external):
+    root, manifest, commit = external
+    commit()
+    assert policy.configured_direct_endpoint() == "https://api.anthropic.com/v1/messages"
+
+
+@pytest.mark.parametrize("name", ["run-specialists.py", "run-judge.py", "run-pr-classifier.py", "run-broad-agents.py"])
+@pytest.mark.parametrize("base", ["http://proxy.example", "https://" + "user:password@proxy.example",
+                                 "https://api.anthropic.com", "https://proxy.example/?query=1"])
+def test_unsafe_proxy_never_becomes_a_direct_credential_context(external, monkeypatch, name, base):
+    root, manifest, commit = external
+    commit()
+    module = load(name)
+    monkeypatch.setattr(module, "_urlopen_https", lambda *args, **kwargs: pytest.fail("network dispatch"))
+    env = NoCredentialReads(GITHUB_REPOSITORY="ExternalExample/project", LITELLM_PROXY_URL=base,
+                            ANTHROPIC_DIRECT_BASE_URL="https://api.anthropic.com",
+                            ANTHROPIC_API_KEY="<placeholder>")
+    with monkeypatch.context() as patch:
+        patch.setattr(module.os, "environ", env)
+        with pytest.raises(module.RouteAdmissionError, match="unsafe configured|direct provider"):
+            module.get_api_key() if name == "run-broad-agents.py" else module._endpoint()
+        if name == "run-broad-agents.py":
+            role = module.AgentConfig("architecture", "sonnet", "internal", "system", "instructions")
+            result = module.invoke_agent(role, "", "complete source")
+            assert result == {"source": "architecture", "findings": [], "first_party": False,
+                              "skipped": "route_policy_denied"}

@@ -38,6 +38,7 @@ try:
          _policy_module.__dict__)
     RouteAdmissionError = _policy_module.RouteAdmissionError
     require_direct_llm_admission = _policy_module.require_direct_llm_admission
+    configured_direct_endpoint = _policy_module.configured_direct_endpoint
 except (ImportError, OSError, AttributeError):
     # Mixed/older consumer runtime: preserve ordinary proxy calls, but never
     # admit a direct call without the shared policy implementation.
@@ -45,6 +46,9 @@ except (ImportError, OSError, AttributeError):
         pass
 
     def require_direct_llm_admission():
+        raise RouteAdmissionError("direct review denied: compatible policy runtime missing")
+
+    def configured_direct_endpoint():
         raise RouteAdmissionError("direct review denied: compatible policy runtime missing")
 
 
@@ -65,7 +69,6 @@ REPO_ROOT = pathlib.Path(__file__).parent.parent.resolve()
 SKILLS_DIR = REPO_ROOT / ".claude/skills"
 MANIFEST_FILE = REPO_ROOT / ".ai/candidates/manifest.json"
 
-_ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
 _ANTHROPIC_API_VERSION = "2023-06-01"
 _ANTHROPIC_HOST = "api.anthropic.com"
 
@@ -127,21 +130,33 @@ def _endpoint(direct: bool = False) -> tuple[str, str, bool]:
     sent there, so only a real Anthropic key authenticates.
     """
     proxy_base = (os.environ.get("LITELLM_PROXY_URL") or os.environ.get("ANTHROPIC_BASE_URL") or "").rstrip("/")
+    parsed_origin = urllib.parse.urlsplit(proxy_base)
+    named_proxy = bool(os.environ.get("LITELLM_PROXY_URL"))
+    is_direct_origin = (parsed_origin.hostname or "").lower().rstrip(".") == _ANTHROPIC_HOST
+    if proxy_base and (named_proxy or not is_direct_origin):
+        if (parsed_origin.scheme != "https" or not parsed_origin.hostname
+                or parsed_origin.username or parsed_origin.password or parsed_origin.query
+                or parsed_origin.fragment or is_direct_origin):
+            raise RouteAdmissionError("review route denied: unsafe configured proxy origin")
     proxy_configured = bool(proxy_base) and (urllib.parse.urlparse(proxy_base).hostname or "").lower().rstrip(".") != _ANTHROPIC_HOST
-    if direct:
-        require_direct_llm_admission()
+    if direct or os.environ.get("CLIENT_AI_POLICY"):
+        direct_url = configured_direct_endpoint()
         # Under a configured proxy ANTHROPIC_API_KEY holds the LiteLLM
         # credential — it must never be sent to api.anthropic.com. Only the
         # dedicated direct key authenticates first-party calls there.
         key = os.environ.get("ANTHROPIC_DIRECT_API_KEY") or (
             os.environ.get("ANTHROPIC_API_KEY", "") if not proxy_configured else ""
         )
-        return key, _ANTHROPIC_API_URL, False
+        return key, direct_url, False
     if proxy_configured:
+        parsed = urllib.parse.urlsplit(proxy_base)
+        if (parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password
+                or parsed.query or parsed.fragment):
+            raise RouteAdmissionError("direct review denied: governed HTTPS proxy required")
         return _proxy_transport_key(), proxy_base + "/v1/messages", True
-    require_direct_llm_admission()
+    direct_url = configured_direct_endpoint()
     key = os.environ.get("ANTHROPIC_DIRECT_API_KEY") or os.environ.get("ANTHROPIC_API_KEY", "")
-    return key, _ANTHROPIC_API_URL, False
+    return key, direct_url, False
 
 
 # Dated claude-* IDs only exist on Anthropic's API; a LiteLLM-style proxy serves

@@ -60,14 +60,13 @@ def _build_dispatch_rule(cfg):
     haiku_all = builtin_haiku + haiku_named
     sonnet_named = sorted(k for k, v in agent_routing.items() if v in _SONNET_PROXY and k not in anthropic_locked)
     reasoning_named = sorted(k for k, v in agent_routing.items() if v in _REASONING_OSS and k not in anthropic_locked)
-    restricted_listed = sorted(anthropic_locked)
     reasoning_clause = f"tier-review=reasoning/editorial ({', '.join(reasoning_named)}). " if reasoning_named else ""
     return (
         "DISPATCH RULE: The tier above is for the MAIN THREAD ONLY. "
         f"For Agent tool calls: haiku=search/grep/format/file-read AND ({', '.join(haiku_all)}). "
         f"sonnet=({', '.join(sonnet_named)}). "
         f"{reasoning_clause}"
-        f"claude-sonnet-4-6=restricted/client ({', '.join(restricted_listed)}). "
+        "no-model=restricted governance no-AI; never dispatch restricted data to any model. "
         "opus=MAIN THREAD ONLY — NEVER pass model=\"opus\" to any named sub-agent. "
         "Passing opus to a named sub-agent overrides its configured tier and wastes 5-16x cost."
     )
@@ -93,7 +92,7 @@ def _load_routing_config():
         "sonnet=sonnet-tier named agents: deep-analyse, ci-fixer, architecture-impact, "
         "systems-consistency, security-deep-dive, judge, pr-classifier, orchestrator, "
         "diff-reflex, test-hardener. "
-        "claude-sonnet-4-6=restricted/client data (review). "
+        "no-model=restricted governance no-AI; never dispatch restricted data to any model. "
         "opus=MAIN THREAD ONLY — NEVER pass model=\"opus\" to any named sub-agent. "
         "Passing opus to a named sub-agent overrides its configured tier and wastes 5-16x cost."
     )

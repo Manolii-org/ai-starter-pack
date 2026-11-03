@@ -16,6 +16,7 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+import urllib.parse
 
 VALID_SOURCES = {"env", "doppler", "broker", "mcp"}
 VALID_RETRIEVAL = {"eager", "deferred"}
@@ -330,6 +331,23 @@ def main():
         for name in sorted(resolved):
             print(name)
     return 0
+
+
+def configured_direct_endpoint() -> str:
+    """Admit an explicit external provider origin; never invent a fallback."""
+    require_direct_llm_admission()
+    base = os.environ.get("ANTHROPIC_DIRECT_BASE_URL") or os.environ.get("ANTHROPIC_BASE_URL") or ""
+    try:
+        parsed = urllib.parse.urlsplit(base)
+        valid = (parsed.scheme == "https" and parsed.hostname
+                 and parsed.hostname.lower().rstrip(".") == "api.anthropic.com"
+                 and parsed.port in (None, 443) and not parsed.username and not parsed.password
+                 and not parsed.query and not parsed.fragment and parsed.path in ("", "/"))
+    except ValueError:
+        valid = False
+    if not valid:
+        raise RouteAdmissionError("direct review denied: explicit HTTPS Anthropic origin required")
+    return base.rstrip("/") + "/v1/messages"
 
 
 if __name__ == "__main__":

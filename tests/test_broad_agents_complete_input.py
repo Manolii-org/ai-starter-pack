@@ -202,7 +202,8 @@ def test_direct_attempt_budget_does_not_gain_proxy_headroom(runner, monkeypatch)
     monkeypatch.delenv('LITELLM_PROXY_URL')
     monkeypatch.delenv('ANTHROPIC_BASE_URL', raising=False)
     monkeypatch.setenv('ANTHROPIC_DIRECT_API_KEY', 'offline-direct')
-    monkeypatch.setattr(runner, 'require_direct_llm_admission', lambda: None)
+    monkeypatch.setattr(runner, 'configured_direct_endpoint',
+                        lambda: 'https://api.anthropic.com/v1/messages')
     sent = replies(monkeypatch, runner, [response(stop='max_tokens')])
     result = runner.invoke_agent(config(runner), '', 'source')
     assert result['skipped'] == 'output_limit' and len(sent) == 1

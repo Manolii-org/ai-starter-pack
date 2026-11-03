@@ -638,6 +638,7 @@ def test_unqualified_broad_role_stays_incomplete_and_client_policy_stays_direct(
     subprocess.run(["git", "add", ".ai/capabilities.json"], check=True)
     subprocess.run(["git", "-c", "user.email=offline@example.invalid", "-c", "user.name=Offline",
                     "commit", "-qm", "External policy fixture"], check=True)
+    monkeypatch.setenv("ANTHROPIC_DIRECT_BASE_URL", "https://api.anthropic.com")
     monkeypatch.setenv("CLIENT_AI_POLICY", "us_weights_ok")
     result = module.invoke_agent(agent, "offline", DIFF)
     assert result["skipped"] == "no_direct_key"
