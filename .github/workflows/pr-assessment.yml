@@ -125,6 +125,7 @@ jobs:
           LITELLM_MASTER_KEY: ${{ secrets.LITELLM_MASTER_KEY || secrets.LLM_API_KEY }}
           LLM_API_KEY: ${{ secrets.LLM_API_KEY || secrets.LITELLM_MASTER_KEY }}
           ANTHROPIC_BASE_URL: ${{ vars.LITELLM_PROXY_URL || vars.ANTHROPIC_BASE_URL }}
+          ANTHROPIC_DIRECT_BASE_URL: ${{ vars.ANTHROPIC_DIRECT_BASE_URL }}
           CLIENT_AI_POLICY: ${{ vars.CLIENT_AI_POLICY }}
           # CLIENT_AI_POLICY routes the classifier Anthropic-direct too — the
           # proxy credential cannot authenticate api.anthropic.com.
@@ -458,6 +459,7 @@ jobs:
           LITELLM_MASTER_KEY: ${{ secrets.LITELLM_MASTER_KEY || secrets.LLM_API_KEY }}
           LLM_API_KEY: ${{ secrets.LLM_API_KEY || secrets.LITELLM_MASTER_KEY }}
           ANTHROPIC_BASE_URL: ${{ vars.LITELLM_PROXY_URL || vars.ANTHROPIC_BASE_URL }}
+          ANTHROPIC_DIRECT_BASE_URL: ${{ vars.ANTHROPIC_DIRECT_BASE_URL }}
           # first_party specialist skills run Anthropic-direct; without this
           # key they skip-with-warning under proxy mode.
           ANTHROPIC_DIRECT_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -550,6 +552,7 @@ jobs:
           LITELLM_MASTER_KEY: ${{ secrets.LITELLM_MASTER_KEY || secrets.LLM_API_KEY }}
           LLM_API_KEY: ${{ secrets.LLM_API_KEY || secrets.LITELLM_MASTER_KEY }}
           ANTHROPIC_BASE_URL: ${{ vars.LITELLM_PROXY_URL || vars.ANTHROPIC_BASE_URL }}
+          ANTHROPIC_DIRECT_BASE_URL: ${{ vars.ANTHROPIC_DIRECT_BASE_URL }}
           # Engagement policy gate: when set, agents declaring
           # client_policy_model escalate Anthropic-direct and need a real key
           # (the transport slot above carries the proxy token in proxy mode).
@@ -664,6 +667,7 @@ jobs:
           LITELLM_MASTER_KEY: ${{ secrets.LITELLM_MASTER_KEY || secrets.LLM_API_KEY }}
           LLM_API_KEY: ${{ secrets.LLM_API_KEY || secrets.LITELLM_MASTER_KEY }}
           ANTHROPIC_BASE_URL: ${{ vars.LITELLM_PROXY_URL || vars.ANTHROPIC_BASE_URL }}
+          ANTHROPIC_DIRECT_BASE_URL: ${{ vars.ANTHROPIC_DIRECT_BASE_URL }}
           # Judge adjudicates first_party candidates Anthropic-direct.
           ANTHROPIC_DIRECT_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           CLIENT_AI_POLICY: ${{ vars.CLIENT_AI_POLICY }}

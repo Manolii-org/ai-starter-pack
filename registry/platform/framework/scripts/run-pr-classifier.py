@@ -35,6 +35,7 @@ try:
          _policy_module.__dict__)
     RouteAdmissionError = _policy_module.RouteAdmissionError
     require_direct_llm_admission = _policy_module.require_direct_llm_admission
+    configured_direct_endpoint = _policy_module.configured_direct_endpoint
 except (ImportError, OSError, AttributeError):
     # Mixed/older consumer runtime: preserve ordinary proxy calls, but never
     # admit a direct call without the shared policy implementation.
@@ -44,11 +45,13 @@ except (ImportError, OSError, AttributeError):
     def require_direct_llm_admission():
         raise RouteAdmissionError("direct review denied: compatible policy runtime missing")
 
+    def configured_direct_endpoint():
+        raise RouteAdmissionError("direct review denied: compatible policy runtime missing")
+
 
 REPO_ROOT = pathlib.Path(__file__).parent.parent.resolve()
 CLASSIFIER_AGENT = REPO_ROOT / ".claude/agents/pr-classifier.md"
 
-_ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
 _ANTHROPIC_API_VERSION = "2023-06-01"
 _ANTHROPIC_HOST = "api.anthropic.com"
 
@@ -87,10 +90,14 @@ def _proxy_transport_key() -> str:
     ):
         if not candidate:
             continue
-        key = candidate.strip()
+        key = (
+            candidate.strip()
+        )
         # The auth-scheme token is case-insensitive (RFC 7235).
         if key.lower() == "bearer" or key.lower().startswith("bearer "):
-            key = key[7:].strip()
+            key = (
+                key[7:].strip()
+            )
         if not key or key.lower().startswith("sk-ant-"):
             continue
         return key
@@ -100,24 +107,38 @@ def _proxy_transport_key() -> str:
 def _endpoint() -> tuple[str, str, bool]:
     """Resolve (api_key, url, proxied).
 
-    Transport token: ANTHROPIC_API_KEY when calling Anthropic directly. When
-    LITELLM_PROXY_URL or ANTHROPIC_BASE_URL points at a non-Anthropic host the
-    request goes through that proxy with _proxy_transport_key().
+    Resolve proxy credentials or an explicitly admitted external provider.
+    A non-Anthropic LITELLM_PROXY_URL or ANTHROPIC_BASE_URL uses the proxy
+    credential resolver; direct requests require a configured origin.
     """
     base = (os.environ.get("LITELLM_PROXY_URL") or os.environ.get("ANTHROPIC_BASE_URL") or "").rstrip("/")
+    parsed_origin = urllib.parse.urlsplit(base)
+    named_proxy = bool(os.environ.get("LITELLM_PROXY_URL"))
+    is_direct_origin = (parsed_origin.hostname or "").lower().rstrip(".") == _ANTHROPIC_HOST
+    if base and (named_proxy or not is_direct_origin):
+        if (parsed_origin.scheme != "https" or not parsed_origin.hostname
+                or parsed_origin.username or parsed_origin.password or parsed_origin.query
+                or parsed_origin.fragment or is_direct_origin):
+            raise RouteAdmissionError("review route denied: unsafe configured proxy origin")
     proxied = bool(base) and (urllib.parse.urlparse(base).hostname or "").lower().rstrip(".") != _ANTHROPIC_HOST
     # CLIENT_AI_POLICY engagements keep every pipeline call Anthropic-direct —
     # including the classifier, which reads the full PR diff.
     if os.environ.get("CLIENT_AI_POLICY"):
-        require_direct_llm_admission()
-        key = os.environ.get("ANTHROPIC_DIRECT_API_KEY") or (
-            os.environ.get("ANTHROPIC_API_KEY", "") if not proxied else ""
+        direct_url = configured_direct_endpoint()
+        key = (
+            os.environ.get("ANTHROPIC_DIRECT_API_KEY") or (
+                os.environ.get("ANTHROPIC_API_KEY", "") if not proxied else ""
+            )
         )
-        return key, _ANTHROPIC_API_URL, False
+        return key, direct_url, False
     if proxied:
+        parsed = urllib.parse.urlsplit(base)
+        if (parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password
+                or parsed.query or parsed.fragment):
+            raise RouteAdmissionError("direct review denied: governed HTTPS proxy required")
         return _proxy_transport_key(), base + "/v1/messages", True
-    require_direct_llm_admission()
-    return os.environ.get("ANTHROPIC_API_KEY", ""), _ANTHROPIC_API_URL, False
+    direct_url = configured_direct_endpoint()
+    return os.environ.get("ANTHROPIC_API_KEY", ""), direct_url, False
 
 
 # Dated claude-* IDs only exist on Anthropic's API; a LiteLLM-style proxy serves

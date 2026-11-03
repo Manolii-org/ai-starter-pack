@@ -249,7 +249,7 @@ _run_intent_drift() {
     [ -n "$original_prompt" ] || return 0
 
     # Only run if API key available and drift check enabled
-    [ -n "${ANTHROPIC_API_KEY:-}" ] || return 0
+    { [ -n "${LLM_API_KEY:-}" ] || [ -n "${LITELLM_MASTER_KEY:-}" ] || [ -n "${ANTHROPIC_API_KEY:-}" ]; } || return 0
     [ "${PR_ASSESSMENT_DRIFT_ENABLED:-0}" = "1" ] || return 0
 
     # Export as env vars — avoids shell injection into Python source (triple-quote termination,
@@ -259,16 +259,29 @@ _run_intent_drift() {
 
     python3 - <<'PYEOF' 2>/dev/null || true
 import anthropic, json, os
+from urllib.parse import urlparse
 from datetime import datetime, timezone
 
 _original_prompt = os.environ.get("_DRIFT_PROMPT", "")
 _diff_stats = os.environ.get("_DRIFT_STATS", "")
 
-# Explicitly route to Anthropic direct — never proxy.
-# ANTHROPIC_BASE_URL may point to the LiteLLM proxy; clearing it here
-# prevents silent rerouting of this restricted-intent call to an OSS backend.
-os.environ.pop("ANTHROPIC_BASE_URL", None)
-client = anthropic.Anthropic(base_url="https://api.anthropic.com")
+# Resolve only the governed LiteLLM endpoint; never clear its compatibility alias.
+proxy_url = os.environ.get("LITELLM_PROXY_URL") or os.environ.get("ANTHROPIC_BASE_URL")
+parsed = urlparse(proxy_url or "")
+if (os.environ.get("CLIENT_AI_POLICY") or parsed.scheme != "https" or not parsed.hostname
+        or parsed.username or parsed.password or parsed.hostname.lower().rstrip(".") == "api.anthropic.com"):
+    raise RuntimeError("session critic requires the governed LiteLLM proxy")
+auth = os.environ.get("LLM_API_KEY") or os.environ.get("LITELLM_MASTER_KEY") or os.environ.get("ANTHROPIC_API_KEY")
+auth = (auth or "").strip()
+if auth.lower().startswith("bearer "):
+    auth = auth[7:].strip()
+if not auth or auth.lower() == "bearer" or auth.lower().startswith("sk-ant-"):
+    raise RuntimeError("session critic requires a LiteLLM proxy credential")
+api_key = auth
+client = anthropic.Anthropic(
+    api_key=api_key,
+    base_url=proxy_url,
+)
 _prompt_text = (
     "Original intent: " + _original_prompt + "\n\n"
     "Session diff stats:\n" + _diff_stats + "\n\n"
@@ -278,13 +291,11 @@ _prompt_text = (
 
 try:
     r = client.messages.create(
-        model="claude-sonnet-4-6",
+        model="sonnet",
         max_tokens=100,
         timeout=15.0,
         messages=[{"role": "user", "content": _prompt_text}]
     )
-    # Reasoning models (e.g. DeepSeek via a LiteLLM proxy alias) prepend a
-    # `thinking` block — select text blocks, not content[0].
     _text = "".join(
         getattr(_b, "text", "") for _b in r.content
         if getattr(_b, "type", "text") == "text"

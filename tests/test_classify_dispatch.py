@@ -58,10 +58,11 @@ class TestReasoningTierBucket(unittest.TestCase):
         rule = build(_cfg({"reviewer": "sonnet"}))
         self.assertIn("sonnet=(reviewer)", rule)
 
-    def test_anthropic_locked_agent_listed_restricted(self):
-        """Regression: an agent on a non-OSS model is Anthropic-locked."""
+    def test_locked_model_does_not_authorize_restricted_dispatch(self):
+        """A model selection never authorizes governance-restricted data."""
         rule = build(_cfg({"secrets": "claude-sonnet-4-6"}))
-        self.assertIn("claude-sonnet-4-6=restricted/client (secrets)", rule)
+        self.assertIn("no-model=restricted governance no-AI", rule)
+        self.assertNotIn("restricted/client", rule)
 
 
 class TestRobustness(unittest.TestCase):

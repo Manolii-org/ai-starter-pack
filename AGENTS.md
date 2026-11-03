@@ -72,7 +72,7 @@ This document defines how AI agents interact with this repository.
 
 ## Agent Types
 
-Read the [agent routing catalogue](docs/agent-routing.md) before choosing an agent.
+Read the [agent routing catalogue](docs/model-plane-boundary.md#agent-routing-catalogue) before choosing an agent.
 It defines each agent’s access, purpose and model. Sub-agent definitions remain in
 `.claude/agents/`.
 

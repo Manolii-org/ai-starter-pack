@@ -601,3 +601,22 @@ def test_unsafe_proxy_never_becomes_a_direct_credential_context(external, monkey
             result = module.invoke_agent(role, "", "complete source")
             assert result == {"source": "architecture", "findings": [], "first_party": False,
                               "skipped": "route_policy_denied"}
+
+
+def test_explicit_direct_origin_is_forwarded_in_all_workflow_phases():
+    import yaml
+    def envs(value):
+        if isinstance(value, dict):
+            if isinstance(value.get("env"), dict) and "ANTHROPIC_BASE_URL" in value["env"]:
+                yield value["env"]
+            for child in value.values():
+                yield from envs(child)
+        elif isinstance(value, list):
+            for child in value:
+                yield from envs(child)
+    for name in ("pr-assessment.yml", "pr-assessment-reusable.yml"):
+        document = yaml.safe_load((ROOT / ".github/workflows" / name).read_text())
+        phases = list(envs(document))
+        assert len(phases) == 4
+        assert all(phase["ANTHROPIC_DIRECT_BASE_URL"] == "${{ vars.ANTHROPIC_DIRECT_BASE_URL }}"
+                   for phase in phases)
