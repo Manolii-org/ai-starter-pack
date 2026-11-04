@@ -884,7 +884,7 @@ def _validate_judge_decisions(
     decisions = result.get("decisions")
     if not isinstance(decisions, list) or len(decisions) != len(originals):
         raise ValueError("every candidate needs a disposition")
-    seen, surviving = set(), []
+    seen, surviving, unsupported_ids = set(), [], set()
     for row in decisions:
         if not isinstance(row, dict):
             raise ValueError("invalid disposition")
@@ -910,6 +910,7 @@ def _validate_judge_decisions(
         supporting = evidence["locations"].get(required, {}).get("evidence_ref")
         if row["decision"] == "investigate" or required not in refs or (supporting and supporting not in refs):
             complete = False
+            unsupported_ids.add(fid)
         elif row["decision"] == "drop" and row["gate"] == "passed":
             raise ValueError("dropped finding needs its failed gate")
         elif row["decision"] == "keep":
@@ -920,7 +921,7 @@ def _validate_judge_decisions(
     if not isinstance(resolutions, list) or len(resolutions) != len(investigations):
         raise ValueError("disagreement resolution missing")
     expected = {r["id"]: r for r in investigations}
-    resolved, unresolved_ids = set(), set()
+    resolved, unresolved_ids = set(), unsupported_ids
     for row in resolutions:
         if (
             not isinstance(row, dict)
