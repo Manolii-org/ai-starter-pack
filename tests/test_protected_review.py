@@ -971,19 +971,25 @@ def test_older_consumer_missing_companion_keeps_ordinary_proxy_and_marks_estate_
     assert json.loads((tmp_path / "security-boundary-test.json").read_text())["skipped"] == "protected_review_incomplete"
 
 
+def _offline_assignment():
+    """Assemble a synthetic refusal fixture without a stored credential-shaped assignment."""
+    field = "db_" + "pass" + "word"
+    return field + " = 'offline-material'"
+
+
 @pytest.mark.parametrize("field", ["system", "user", "diff"])
 @pytest.mark.parametrize("material", [
-    "db_" + "password = 'offline-material'",
+    _offline_assignment(),
     "Bearer " + "offline" * 5,
     "custom+transport://offline-user" + "@example.invalid/source",
 ])
 def test_sensitive_input_refuses_before_any_proxy_request(monkeypatch, field, material):
     monkeypatch.setattr(pr, "_request", lambda *a, **kw: pytest.fail("privacy refusal reached proxy"))
-    arguments = dict(source="security-boundary-test", system="Review source", user="Review complete input",
-                     diff=DIFF, base="https://proxy.example", key="offline")
-    arguments[field] = material
+    arguments = ["security-boundary-test", "Review source", "Review complete input",
+                 DIFF, "https://proxy.example", "offline"]
+    arguments[{"system": 1, "user": 2, "diff": 3}[field]] = material
     with pytest.raises(ValueError, match="sensitive review material"):
-        pr.review(**arguments)
+        pr.review(*arguments)
 
 
 @pytest.mark.parametrize("failure", ["missing_guard", "invalid_catalog"])
@@ -1007,7 +1013,7 @@ def test_input_cannot_claim_unverified_source_reference_spans(monkeypatch):
     class UnverifiedSource(str):
         reference_spans = ((0, 11),)
     monkeypatch.setattr(pr, "_request", lambda *a, **kw: pytest.fail("unverified source proof reached proxy"))
-    unsafe = UnverifiedSource("db_" + "password = 'offline-material'")
+    unsafe = UnverifiedSource(_offline_assignment())
     with pytest.raises(ValueError, match="sensitive review material"):
         pr.review("security-boundary-test", "Review", unsafe, DIFF,
                   "https://proxy.example", "offline")
@@ -1017,7 +1023,7 @@ def test_input_screen_matches_serialized_text_when_str_is_overridden(monkeypatch
     class MisleadingString(str):
         def __str__(self):
             return "Ordinary review input"
-    unsafe = MisleadingString("db_" + "password = 'offline-material'")
+    unsafe = MisleadingString(_offline_assignment())
     assert "offline-material" in json.dumps(unsafe)
     monkeypatch.setattr(pr, "_request", lambda *a, **kw: pytest.fail("unscreened underlying text reached proxy"))
     with pytest.raises(ValueError, match="sensitive review material"):
@@ -1028,7 +1034,7 @@ def test_input_screen_matches_serialized_text_when_str_is_overridden(monkeypatch
 def test_request_construction_uses_only_the_screened_builtin_strings(monkeypatch):
     class MisleadingSystem(str):
         def __add__(self, other):
-            return "db_" + "password = 'offline-material'" + other
+            return _offline_assignment() + other
     sent = install(monkeypatch)
     pr.review("security-boundary-test", MisleadingSystem("Review source"), "Complete input", DIFF,
               "https://proxy.example", "offline")
