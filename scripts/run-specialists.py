@@ -136,6 +136,12 @@ def _endpoint(direct: bool = False, role: Optional[str] = None) -> tuple[str, st
     proxy_base = (os.environ.get("LITELLM_PROXY_URL") or os.environ.get("ANTHROPIC_BASE_URL") or "").rstrip("/")
     proxy_configured = bool(proxy_base) and (urllib.parse.urlparse(proxy_base).hostname or "").lower().rstrip(".") != _ANTHROPIC_HOST
     if direct:
+        # Estate read-only reviewers stay on the CI proxy even when a direct
+        # key is present. Decide that before admission and before the key read.
+        if (role and proxy_configured
+                and _policy_module.readonly_proxy_fallback(role)
+                and _proxy_transport_key()):
+            return _proxy_transport_key(), proxy_base + "/v1/messages", True
         require_direct_llm_admission(role=role)
         # Under a configured proxy ANTHROPIC_API_KEY holds the LiteLLM
         # credential — it must never be sent to api.anthropic.com. Only the
@@ -143,14 +149,6 @@ def _endpoint(direct: bool = False, role: Optional[str] = None) -> tuple[str, st
         key = os.environ.get("ANTHROPIC_DIRECT_API_KEY") or (
             os.environ.get("ANTHROPIC_API_KEY", "") if not proxy_configured else ""
         )
-        if key:
-            return key, _ANTHROPIC_API_URL, False
-        # The pack publishes no direct key. An admitted read-only reviewer
-        # still runs, on the CI proxy that is already configured. The proxy
-        # credential is never sent to api.anthropic.com.
-        if (role and proxy_configured and _proxy_transport_key()
-                and _policy_module.readonly_proxy_fallback(role)):
-            return _proxy_transport_key(), proxy_base + "/v1/messages", True
         return key, _ANTHROPIC_API_URL, False
     if proxy_configured:
         return _proxy_transport_key(), proxy_base + "/v1/messages", True

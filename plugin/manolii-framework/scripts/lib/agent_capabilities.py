@@ -207,9 +207,10 @@ def require_direct_llm_admission(repo_root=None, environ=None, role=None):
             and isinstance(repo_name, str)
             and repo_name.lower() == repository.lower()
         )
-        # Estate read-only policy admits one named reviewer and no credentials.
-        # A missing role does not blanket-admit the direct lane.
-        if not (legacy or _readonly_estate_admission(manifest, repository, role)):
+        # Estate read-only reviewers are not admitted here. This function
+        # authorizes direct Anthropic credits for the external lane only.
+        # A missing role does not blanket-admit that lane.
+        if not legacy:
             raise RouteAdmissionError("direct review denied: invalid or conflicting consumer policy evidence")
 
 

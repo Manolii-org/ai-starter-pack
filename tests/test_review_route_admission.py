@@ -569,8 +569,10 @@ def test_estate_readonly_policy_admits_only_named_roles(external):
         'consumer_scope': 'estate', 'consumer_repository': 'ExternalExample/project',
         'direct_review': sorted(policy.READ_ONLY_DIRECT_REVIEWERS),
     })
+    # The estate allowlist is a proxy grant. It must not admit direct credits.
     for role in policy.READ_ONLY_DIRECT_REVIEWERS:
-        assert policy.require_direct_llm_admission(role=role) is None
+        with pytest.raises(policy.RouteAdmissionError, match='policy evidence'):
+            policy.require_direct_llm_admission(role=role)
     with pytest.raises(policy.RouteAdmissionError, match='policy evidence'):
         policy.require_direct_llm_admission()
     with pytest.raises(policy.RouteAdmissionError, match='policy evidence'):
@@ -620,3 +622,59 @@ def test_admitted_readonly_reviewer_runs_on_proxy_without_direct_key(external, m
     assert 'direct review denied' in denied
     denied_marker = json.loads((out / 'sast-scan.json').read_text())
     assert denied_marker['skipped'] == 'route_policy_denied'
+
+
+def test_estate_readonly_reviewer_stays_on_proxy_when_direct_key_exists(external, monkeypatch):
+    """A direct key must not pull an estate reviewer onto api.anthropic.com."""
+    root, _manifest, commit = external
+    commit({
+        'version': 1, 'mode': 'capabilities', 'capabilities': [],
+        'consumer_scope': 'estate', 'consumer_repository': 'ExternalExample/project',
+        'direct_review': sorted(policy.READ_ONLY_DIRECT_REVIEWERS),
+    })
+    monkeypatch.setenv('ANTHROPIC_BASE_URL', 'https://proxy.example')
+    monkeypatch.setenv('LLM_API_KEY', 'offline-proxy-key')
+    monkeypatch.setenv('ANTHROPIC_DIRECT_API_KEY', 'sk-ant-offline-direct')
+    for role in ('security-boundary-test', 'security-deep-dive'):
+        with pytest.raises(policy.RouteAdmissionError, match='policy evidence'):
+            policy.require_direct_llm_admission(role=role)
+
+    class _Response:
+        def __enter__(self):
+            return self
+        def __exit__(self, *_args):
+            return False
+        def read(self):
+            return json.dumps({'content': [{'type': 'text', 'text':
+                '{"source":"security-boundary-test","findings":[]}'}]}).encode()
+
+    seen = []
+
+    def _open(req, *, timeout, host):
+        seen.append(host)
+        assert 'x-api-key' not in {k.lower() for k in req.headers}
+        return _Response()
+
+    specialists = load('run-specialists.py')
+    monkeypatch.setattr(specialists, '_urlopen_https', _open)
+    out = root / 'candidates'
+    out.mkdir()
+    _name, error = specialists._invoke_skill('security-boundary-test', 'diff line\n', out)
+    assert error is None and seen == ['proxy.example']
+    marker = json.loads((out / 'security-boundary-test.json').read_text())
+    assert marker.get('first_party') is not True
+
+    seen.clear()
+    broad = load('run-broad-agents.py')
+    monkeypatch.setattr(broad, '_urlopen_https', _open)
+
+    def _read(self):
+        return json.dumps({'content': [{'type': 'text', 'text':
+            '{"source":"security-deep-dive","findings":[]}'}]}).encode()
+    _Response.read = _read
+    config = broad.AgentConfig(
+        'security-deep-dive', 'sonnet', 'internal', 'sys', 'instructions', first_party=True)
+    result = broad.invoke_agent(config, '', 'diff line\n')
+    assert seen == ['proxy.example']
+    assert result.get('skipped') is None
+    assert result.get('first_party') is not True

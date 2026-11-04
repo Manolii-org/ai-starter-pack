@@ -919,17 +919,32 @@ def invoke_agent(
         # unqualified role through either the proxy or a direct fallback.
         return {"source": agent_config.name, "findings": [],
                 "first_party": True, "skipped": "protected_review_incomplete"}
+    # Estate read-only reviewers stay on the CI proxy even when a direct key
+    # is present. Decide that before admission and before the key read.
+    readonly_proxy = bool(
+        agent_config.first_party
+        and proxy
+        and not os.environ.get("CLIENT_AI_POLICY")
+        and _policy_module.readonly_proxy_fallback(agent_config.name)
+    )
     try:
-        if agent_config.first_party or os.environ.get("CLIENT_AI_POLICY") or not proxy:
+        if not readonly_proxy and (agent_config.first_party or os.environ.get("CLIENT_AI_POLICY") or not proxy):
             require_direct_llm_admission(role=agent_config.name)
     except RouteAdmissionError as exc:
         logger.warning("%s: %s", agent_config.name, exc)
         return {"source": agent_config.name, "findings": [],
                 "first_party": bool(agent_config.first_party or os.environ.get("CLIENT_AI_POLICY")),
                 "skipped": "route_policy_denied"}
-    # first_party agents (security review per the eligibility matrix) always go
+    # first_party agents (security review per the eligibility matrix) go
     # Anthropic-direct — never the OSS proxy, regardless of declared model.
-    if agent_config.first_party:
+    # The estate read-only allowlist is the one proxy exception above.
+    if readonly_proxy:
+        direct_required = False
+        api_key = api_key or get_api_key()
+        logger.info(
+            "%s: admitted read-only reviewer on the CI proxy", agent_config.name
+        )
+    elif agent_config.first_party:
         direct_key = os.getenv("ANTHROPIC_DIRECT_API_KEY") or (
             os.getenv("ANTHROPIC_API_KEY") if not proxy else None
         )
@@ -940,14 +955,6 @@ def invoke_agent(
             model = agent_config.client_policy_model or DIRECT_MODEL_MAP.get(model, model)
             logger.info(
                 f"{agent_config.name}: first_party — dispatching {model} (Anthropic-direct)"
-            )
-        elif proxy and _policy_module.readonly_proxy_fallback(agent_config.name):
-            # Admitted read-only reviewer, no direct key: the CI proxy is the
-            # configured transport. This does not grant a write credential.
-            direct_required = False
-            api_key = api_key or get_api_key()
-            logger.info(
-                "%s: admitted read-only reviewer on the CI proxy", agent_config.name
             )
         else:
             logger.warning(
