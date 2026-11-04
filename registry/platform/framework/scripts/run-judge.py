@@ -329,16 +329,16 @@ _CREDENTIAL_SUFFIXES = (
     "KEY", "TOKEN", "SECRET", "PASSWORD", "PASSWD", "AUTHORIZATION",
     "CREDENTIAL", "PASSPHRASE", "JWT", "DSN",
 )
-_ASSIGNMENT_HEADER = re.compile(r"(?<![A-Za-z0-9_.+\-])([A-Za-z0-9_.+\-]++)[\"']?\s*(?::=|[:=])\s*")
+_FIELD_PART = re.compile(r"[A-Za-z0-9_.+\-]+")
+_ASSIGNMENT_SEPARATOR = re.compile(r"[\"']?\s*(?::=|[:=])\s*")
 _ASSIGNMENT_VALUE = re.compile(r"[\"']?[^\s\"']{8,}")
+_URI_SCHEME_PART = re.compile(r"[A-Za-z0-9+.\-]+", re.IGNORECASE)
+_URI_USERINFO = re.compile(r"://[^\s/\"'`@]+@[^\s/\"'`]+")
 # Independent generic classes from the existing canonical screening contract.
 # Reference-only source proofs apply to assignment identifiers alone; these
 # checks always see the complete original string, including source literals.
 _GENERIC_EVIDENCE_PATTERNS = (
     re.compile(r"(?i)(bearer|basic)\s+[A-Za-z0-9._\-+/=]{20,}"),
-    # Include a diff's leading +/- marker in the maximal URI-like token.
-    # Restricting its first character to a letter would miss added/removed URLs.
-    re.compile(r"(?i)(?<![a-z0-9+.\-])[a-z0-9+.\-]++://[^\s/\"'`@]+@[^\s/\"'`]+"),
     re.compile(r"(?i)(postgres(?:ql)?|mysql|mongodb|redis|rediss|amqp|amqps)(?:\+[a-z0-9_.\-]+)?://[^\s'\"`]+"),
     re.compile(r"(?i)https?://[a-zA-Z0-9._\-]+\.(fly\.dev|vercel\.app|supabase\.co|neon\.tech|railway\.app|render\.com)(?:/[^\s]*)?"),
     re.compile(r"-----BEGIN (?:[A-Z0-9 ]*PRIVATE KEY|CERTIFICATE)-----"),
@@ -346,16 +346,26 @@ _GENERIC_EVIDENCE_PATTERNS = (
 
 
 def _credential_field(name: str) -> bool:
-    return bool(re.fullmatch(r"[A-Za-z0-9_.+\-]++", name)
+    return bool(_FIELD_PART.fullmatch(name)
                 and name.upper().endswith(_CREDENTIAL_SUFFIXES))
 
 
 def _credential_assignment(text: str) -> bool:
     # Consume only headers, never a noncredential field's value: a second
     # sensitive assignment can occur inside that value on the same line.
-    return any(_credential_field(match.group(1))
-               and _ASSIGNMENT_VALUE.match(text, match.end())
-               for match in _ASSIGNMENT_HEADER.finditer(text))
+    for token in _FIELD_PART.finditer(text):
+        if _credential_field(token.group()):
+            separator = _ASSIGNMENT_SEPARATOR.match(text, token.end())
+            if separator and _ASSIGNMENT_VALUE.match(text, separator.end()):
+                return True
+    return False
+
+
+def _uri_userinfo(text: str) -> bool:
+    # Maximal, nonoverlapping tokens preserve linear scanning on Python 3.10,
+    # without possessive quantifiers. Include diff +/- markers in each token.
+    return any(_URI_USERINFO.match(text, token.end())
+               for token in _URI_SCHEME_PART.finditer(text))
 
 
 class _VerifiedSourceText(str):
@@ -530,6 +540,7 @@ def _require_safe_packet(value) -> None:
             pieces.append(item[offset:])
             generic_text = "".join(pieces)
             if (any(pattern.search(item) for pattern in (*patterns, *_GENERIC_EVIDENCE_PATTERNS))
+                    or _uri_userinfo(item)
                     or _credential_assignment(generic_text)):
                 raise ValueError("sensitive review material requires approved sanitized evidence")
         elif isinstance(item, dict):
