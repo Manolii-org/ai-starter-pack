@@ -44,7 +44,14 @@ except (ImportError, OSError, AttributeError):
     class RouteAdmissionError(ValueError):
         pass
 
-    def require_direct_llm_admission():
+    class _MissingPolicy:
+        @staticmethod
+        def readonly_proxy_fallback(*_args, **_kwargs):
+            return False
+
+    _policy_module = _MissingPolicy
+
+    def require_direct_llm_admission(*_args, **_kwargs):
         raise RouteAdmissionError("direct review denied: compatible policy runtime missing")
 
 
@@ -114,7 +121,7 @@ def _proxy_transport_key() -> str:
     return ""
 
 
-def _endpoint(direct: bool = False) -> tuple[str, str, bool]:
+def _endpoint(direct: bool = False, role: Optional[str] = None) -> tuple[str, str, bool]:
     """Resolve (api_key, url, proxied).
 
     Transport token: ANTHROPIC_API_KEY when calling Anthropic directly. When
@@ -129,13 +136,21 @@ def _endpoint(direct: bool = False) -> tuple[str, str, bool]:
     proxy_base = (os.environ.get("LITELLM_PROXY_URL") or os.environ.get("ANTHROPIC_BASE_URL") or "").rstrip("/")
     proxy_configured = bool(proxy_base) and (urllib.parse.urlparse(proxy_base).hostname or "").lower().rstrip(".") != _ANTHROPIC_HOST
     if direct:
-        require_direct_llm_admission()
+        require_direct_llm_admission(role=role)
         # Under a configured proxy ANTHROPIC_API_KEY holds the LiteLLM
         # credential — it must never be sent to api.anthropic.com. Only the
         # dedicated direct key authenticates first-party calls there.
         key = os.environ.get("ANTHROPIC_DIRECT_API_KEY") or (
             os.environ.get("ANTHROPIC_API_KEY", "") if not proxy_configured else ""
         )
+        if key:
+            return key, _ANTHROPIC_API_URL, False
+        # The pack publishes no direct key. An admitted read-only reviewer
+        # still runs, on the CI proxy that is already configured. The proxy
+        # credential is never sent to api.anthropic.com.
+        if (role and proxy_configured and _proxy_transport_key()
+                and _policy_module.readonly_proxy_fallback(role)):
+            return _proxy_transport_key(), proxy_base + "/v1/messages", True
         return key, _ANTHROPIC_API_URL, False
     if proxy_configured:
         return _proxy_transport_key(), proxy_base + "/v1/messages", True
@@ -189,9 +204,9 @@ def _load_skill(skill_name: str) -> tuple[dict, str]:
     return frontmatter, system_prompt
 
 
-def _call_api(system_prompt: str, user_message: str, model: str, max_tokens: int, *, first_party: bool = False, validate=None) -> str:
+def _call_api(system_prompt: str, user_message: str, model: str, max_tokens: int, *, first_party: bool = False, role: Optional[str] = None, validate=None) -> str:
     """Call the Messages API via urllib (Anthropic direct or LiteLLM proxy)."""
-    api_key, api_url, proxied = _endpoint(direct=first_party)
+    api_key, api_url, proxied = _endpoint(direct=first_party, role=role)
     if not api_key:
         if first_party:
             raise RuntimeError(
@@ -394,7 +409,7 @@ def _invoke_skill(skill_name: str, diff: str, output_dir: pathlib.Path) -> tuple
     estate_requested = (first_party and not os.environ.get("CLIENT_AI_POLICY")
                         and os.environ.get("SECURITY_REVIEW_MODE", "direct") != "direct")
     try:
-        api_key, _, _ = (None, "", True) if estate_requested else _endpoint(direct=first_party)
+        api_key, _, proxied_preview = (None, "", False) if estate_requested else _endpoint(direct=first_party, role=skill_name)
     except RouteAdmissionError as exc:
         writer = _write_skip_marker if first_party else _write_skipped_marker
         writer(skill_name, output_dir, "route_policy_denied")
@@ -475,7 +490,7 @@ def _invoke_skill(skill_name: str, diff: str, output_dir: pathlib.Path) -> tuple
             data = protected_review.review(skill_name, system_prompt, user_message, diff, base, key)
         else:
             raw = _call_api(system_prompt, user_message, model, max_tokens,
-                            first_party=first_party, validate=_parse_ok)
+                            first_party=first_party, role=skill_name, validate=_parse_ok)
             data = _parse_findings(raw)
 
         # Validate structure. A first-party skill returning a malformed
@@ -502,7 +517,7 @@ def _invoke_skill(skill_name: str, diff: str, output_dir: pathlib.Path) -> tuple
                 _write_skipped_marker(skill_name, output_dir, "api_error")
             return skill_name, f"'findings' is not a list of objects: {type(data['findings'])}"
 
-        if first_party and data.get("findings"):
+        if first_party and not proxied_preview and data.get("findings"):
             # Marks the candidate set for run-judge: first-party findings must
             # be adjudicated on a first-party model, not the OSS proxy. Empty
             # results stay unmarked so they never force a direct key.

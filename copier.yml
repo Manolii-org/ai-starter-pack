@@ -197,6 +197,9 @@ _exclude:
   # The pack's own leaf context manifest (master context governance); a rendered
   # instance must author its own, never inherit the template's identity.
   - /.ai/repo-context.yaml
+  # Pack estate policy. consumer_repository is this repo; a rendered consumer
+  # must commit its own admission file rather than inherit this one.
+  - /.ai/capabilities.json
   # Renovate preset: consumers extend it remotely via
   # "github>Manolii-org/ai-starter-pack" — copying it into a rendered repo
   # would shadow the shared preset with a stale local snapshot.

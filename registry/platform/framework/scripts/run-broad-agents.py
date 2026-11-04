@@ -54,7 +54,14 @@ except (ImportError, OSError, AttributeError):
     class RouteAdmissionError(ValueError):
         pass
 
-    def require_direct_llm_admission():
+    class _MissingPolicy:
+        @staticmethod
+        def readonly_proxy_fallback(*_args, **_kwargs):
+            return False
+
+    _policy_module = _MissingPolicy
+
+    def require_direct_llm_admission(*_args, **_kwargs):
         raise RouteAdmissionError("direct review denied: compatible policy runtime missing")
 
 
@@ -914,7 +921,7 @@ def invoke_agent(
                 "first_party": True, "skipped": "protected_review_incomplete"}
     try:
         if agent_config.first_party or os.environ.get("CLIENT_AI_POLICY") or not proxy:
-            require_direct_llm_admission()
+            require_direct_llm_admission(role=agent_config.name)
     except RouteAdmissionError as exc:
         logger.warning("%s: %s", agent_config.name, exc)
         return {"source": agent_config.name, "findings": [],
@@ -923,11 +930,26 @@ def invoke_agent(
     # first_party agents (security review per the eligibility matrix) always go
     # Anthropic-direct — never the OSS proxy, regardless of declared model.
     if agent_config.first_party:
-        direct_required = True
-        api_key = os.getenv("ANTHROPIC_DIRECT_API_KEY") or (
+        direct_key = os.getenv("ANTHROPIC_DIRECT_API_KEY") or (
             os.getenv("ANTHROPIC_API_KEY") if not proxy else None
         )
-        if not api_key:
+        if direct_key:
+            direct_required = True
+            api_key = direct_key
+            proxy = None
+            model = agent_config.client_policy_model or DIRECT_MODEL_MAP.get(model, model)
+            logger.info(
+                f"{agent_config.name}: first_party — dispatching {model} (Anthropic-direct)"
+            )
+        elif proxy and _policy_module.readonly_proxy_fallback(agent_config.name):
+            # Admitted read-only reviewer, no direct key: the CI proxy is the
+            # configured transport. This does not grant a write credential.
+            direct_required = False
+            api_key = api_key or get_api_key()
+            logger.info(
+                "%s: admitted read-only reviewer on the CI proxy", agent_config.name
+            )
+        else:
             logger.warning(
                 f"{agent_config.name}: first_party agent needs "
                 "ANTHROPIC_DIRECT_API_KEY (the proxy credential cannot "
@@ -942,11 +964,6 @@ def invoke_agent(
                 "first_party": True,
                 "skipped": "no_direct_key",
             }
-        proxy = None
-        model = agent_config.client_policy_model or DIRECT_MODEL_MAP.get(model, model)
-        logger.info(
-            f"{agent_config.name}: first_party — dispatching {model} (Anthropic-direct)"
-        )
     # Engagement carrying client_ai_policy is Anthropic-direct for EVERY
     # agent — the proxy/OSS route is bypassed entirely. Agents declaring
     # client_policy_model pin that model; the rest dispatch on their declared

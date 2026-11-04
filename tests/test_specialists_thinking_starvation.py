@@ -39,7 +39,7 @@ def admitted_transport_fixture(monkeypatch):
     monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
     # These are transport/input unit tests with fake responses, not authority
     # evidence. test_review_route_admission exercises real policy admission.
-    monkeypatch.setattr(MODULE, "require_direct_llm_admission", lambda: None)
+    monkeypatch.setattr(MODULE, "require_direct_llm_admission", lambda *args, **kwargs: None)
 
 
 class _FakeResponse(io.BytesIO):

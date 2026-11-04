@@ -500,7 +500,8 @@ def test_valid_first_policy_plus_failed_second_blob_denied(external, monkeypatch
     original = policy.subprocess.run
     reads = []
     def fail_second(args, **kwargs):
-        assert '--no-lazy-fetch' in args
+        assert kwargs["env"]["GIT_NO_LAZY_FETCH"] == "1"
+        assert kwargs["env"]["GIT_ALLOW_PROTOCOL"] == ""
         if 'cat-file' in args:
             reads.append(args[-1])
             if len(reads) == 2:
@@ -546,3 +547,76 @@ def test_external_pr_policy_base_requires_nonshallow_checkout(external, monkeypa
     # Only a local fixture is fetched; admission itself must never lazy-fetch.
     subprocess.run(['git', 'fetch', '-q', '--unshallow', 'origin'], check=True)
     assert policy.require_direct_llm_admission() is None
+
+
+def test_committed_pack_policy_admits_exactly_the_readonly_reviewers():
+    manifest = json.loads((ROOT / '.ai/capabilities.json').read_text(encoding='utf-8'))
+    assert policy.resolve_manifest(manifest) == {}
+    assert policy.admitted_reviewers(manifest) == policy.READ_ONLY_DIRECT_REVIEWERS
+
+
+def test_write_capability_is_not_a_readonly_review_grant():
+    manifest = {'version': 1, 'mode': 'capabilities', 'capabilities': ['deploy-vercel'],
+                'direct_review': sorted(policy.READ_ONLY_DIRECT_REVIEWERS)}
+    with pytest.raises(ValueError, match='credentials'):
+        policy.admitted_reviewers(manifest)
+
+
+def test_estate_readonly_policy_admits_only_named_roles(external):
+    root, _manifest, commit = external
+    commit({
+        'version': 1, 'mode': 'capabilities', 'capabilities': [],
+        'consumer_scope': 'estate', 'consumer_repository': 'ExternalExample/project',
+        'direct_review': sorted(policy.READ_ONLY_DIRECT_REVIEWERS),
+    })
+    for role in policy.READ_ONLY_DIRECT_REVIEWERS:
+        assert policy.require_direct_llm_admission(role=role) is None
+    with pytest.raises(policy.RouteAdmissionError, match='policy evidence'):
+        policy.require_direct_llm_admission()
+    with pytest.raises(policy.RouteAdmissionError, match='policy evidence'):
+        policy.require_direct_llm_admission(role='sast-scan')
+    assert policy.readonly_proxy_fallback('security-boundary-test') is True
+    assert policy.readonly_proxy_fallback('sast-scan') is False
+
+
+def test_admitted_readonly_reviewer_runs_on_proxy_without_direct_key(external, monkeypatch):
+    root, _manifest, commit = external
+    commit({
+        'version': 1, 'mode': 'capabilities', 'capabilities': [],
+        'consumer_scope': 'estate', 'consumer_repository': 'ExternalExample/project',
+        'direct_review': sorted(policy.READ_ONLY_DIRECT_REVIEWERS),
+    })
+    monkeypatch.setenv('ANTHROPIC_BASE_URL', 'https://proxy.example')
+    monkeypatch.setenv('LLM_API_KEY', 'offline-proxy-key')
+    monkeypatch.delenv('ANTHROPIC_DIRECT_API_KEY', raising=False)
+    monkeypatch.delenv('ANTHROPIC_API_KEY', raising=False)
+    specialists = load('run-specialists.py')
+    seen = []
+
+    class _Response:
+        def __enter__(self):
+            return self
+        def __exit__(self, *_args):
+            return False
+        def read(self):
+            return json.dumps({'content': [{'type': 'text', 'text':
+                '{"source":"security-boundary-test","findings":[]}'}]}).encode()
+
+    def _open(req, *, timeout, host):
+        seen.append((host, req.full_url))
+        return _Response()
+
+    monkeypatch.setattr(specialists, '_urlopen_https', _open)
+    out = root / 'candidates'
+    out.mkdir()
+    name, error = specialists._invoke_skill('security-boundary-test', 'diff line\n', out)
+    assert name == 'security-boundary-test'
+    assert error is None
+    assert seen and seen[0][0] == 'proxy.example'
+    marker = json.loads((out / 'security-boundary-test.json').read_text())
+    assert 'skipped' not in marker
+    assert marker.get('first_party') is not True
+    _name, denied = specialists._invoke_skill('sast-scan', 'diff line\n', out)
+    assert 'direct review denied' in denied
+    denied_marker = json.loads((out / 'sast-scan.json').read_text())
+    assert denied_marker['skipped'] == 'route_policy_denied'
