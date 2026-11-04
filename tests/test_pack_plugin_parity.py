@@ -101,3 +101,15 @@ def test_review_evidence_and_companion_ship_without_drift():
         assert (root / prefix / "scripts/ci/review_evidence.py").read_bytes() == (root / "scripts/ci/review_evidence.py").read_bytes()
         assert (root / prefix / "skills/autonomy-follow-through/review-evidence.md").read_bytes() == (root / ".claude/skills/autonomy-follow-through/review-evidence.md").read_bytes()
         assert (root / prefix / "skills/autonomy-follow-through/SKILL.md").read_bytes() == (root / ".claude/skills/autonomy-follow-through/SKILL.md").read_bytes()
+
+
+def test_exact_release_subject_and_contract_are_present_in_each_distribution():
+    for prefix in ("plugin/manolii-framework", "registry/platform/framework"):
+        runtime = ROOT / prefix / "scripts/lib/release_subject.py"
+        contract = ROOT / prefix / "docs/agent-release-experience.md"
+        assert runtime.is_file() and contract.is_file()
+        assert runtime.read_bytes() == (ROOT / "scripts/lib/release_subject.py").read_bytes()
+        assert contract.read_bytes() == (ROOT / "docs/agent-release-experience.md").read_bytes()
+        assert 'SCHEMA = "agent-release-subject/v1"' in runtime.read_text()
+        assert '"execution_authorized": False' in runtime.read_text()
+        assert "Shipping the helper alone is preparation" in contract.read_text()
