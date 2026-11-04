@@ -1,0 +1,29 @@
+name: Workflow SHA probe
+
+# Scratch evidence for job.workflow_sha on a SHA-pinned reusable call.
+# Delete after the run URL is recorded.
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    name: Print workflow SHA
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Print job context
+        env:
+          WORKFLOW_SHA: ${{ job.workflow_sha }}
+          WORKFLOW_REPOSITORY: ${{ job.workflow_repository }}
+        run: |
+          echo "workflow_sha=${WORKFLOW_SHA}"
+          echo "workflow_repository=${WORKFLOW_REPOSITORY}"
+          if [ -z "$WORKFLOW_SHA" ]; then
+            echo "workflow_sha_empty=true"
+            exit 1
+          fi
+          echo "workflow_sha_empty=false"
