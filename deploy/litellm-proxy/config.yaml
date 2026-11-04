@@ -86,14 +86,11 @@ model_list:
       model: anthropic/claude-haiku-5-5
       api_key: os.environ/ANTHROPIC_API_KEY
 
-  # OSS heavy tier — SWE-Bench Pro 58.4 > Opus 4.6 at 57.3.
+  # OSS heavy tier — unavailable until a model has genuine qualification.
   # RESTRICTED: code-patch, agentic-loop, math-reasoning, bulk-extract ONLY.
   # EXCLUDED from: prose, code-review, ADRs, orchestration, client-facing, vision.
-  # data_clearance: internal + public (NOT restricted_us_oss_ok).
-  - model_name: tier-0-oss-heavy
-    litellm_params:
-      model: fireworks_ai/accounts/fireworks/models/kimi-k2p6
-      api_key: os.environ/FIREWORKS_API_KEY
+  # No primary heavy serving row: required smoke + 8-case fitness qualification is pending.
+  # Existing named alternatives below are not an automatic heavy-tier fallback.
   - model_name: tier-0-oss-heavy-fallback-openrouter
     litellm_params:
       model: openrouter/moonshotai/kimi-k2.6
@@ -132,24 +129,22 @@ model_list:
       api_key: os.environ/GROQ_API_KEY
 
   # ═══════════════════════════════════════════════════════════════════════════
-  # TIER 2 AGENTIC — long tool chains, 262K context, multi-step subagents
-  # Kimi K2.6: SWE-bench flagship (successor to K2.5), 200+ sequential tool calls, ~417 tok/s.
+  # TIER 2 AGENTIC — existing ordinary MiniMax M3 route, 1M context
+  # Reuses tier-2-agentic-pro provider parameters and recorded 2026-10-28 acceptance.
   # data_clearance: internal + public.
   # ═══════════════════════════════════════════════════════════════════════════
   - model_name: tier-2-agentic
     litellm_params:
-      model: fireworks_ai/accounts/fireworks/models/kimi-k2p6
+      model: fireworks_ai/accounts/fireworks/models/minimax-m3
       api_key: os.environ/FIREWORKS_API_KEY
+      timeout: 600
+
   - model_name: tier-2-agentic-fallback-kimi
     litellm_params:
       model: openrouter/moonshotai/kimi-k2.6
       api_key: os.environ/OPENROUTER_API_KEY
       extra_body: *openrouter_us_zdr
-  # Fireworks K2.6 under a distinct name — the tier-2-agentic-pro chain's last hop.
-  - model_name: tier-2-agentic-fallback-fireworks
-    litellm_params:
-      model: fireworks_ai/accounts/fireworks/models/kimi-k2p6
-      api_key: os.environ/FIREWORKS_API_KEY
+  # Unqualified Fireworks Kimi candidate is not a fallback hop.
   - model_name: tier-2-agentic-fallback-qwen
     litellm_params:
       model: openrouter/qwen/qwen3.5-397b-a17b
@@ -194,11 +189,6 @@ model_list:
       model: openrouter/moonshotai/kimi-k2.6
       api_key: os.environ/OPENROUTER_API_KEY
       extra_body: *openrouter_us_zdr
-  - model_name: tier-3-tool-fallback-kimi-fireworks
-    litellm_params:
-      model: fireworks_ai/accounts/fireworks/models/kimi-k2p6
-      api_key: os.environ/FIREWORKS_API_KEY
-
   # ═══════════════════════════════════════════════════════════════════════════
   # TIER 4 EXTRACT — grep, count, format, lint, bulk classification
   # Groq LPU: ~$0.05/$0.08, ~800 tok/s. Rate limit: ~1000 rpm Developer tier.
@@ -268,10 +258,10 @@ model_list:
       api_key: os.environ/GROQ_API_KEY
 
   # ═══════════════════════════════════════════════════════════════════════════
-  # Haiku alias — transparent substitution to GPT-OSS 120B (Fireworks)
+  # Native Haiku ID and separate OSS-offload short alias
   # ═══════════════════════════════════════════════════════════════════════════
-  # Claude Code sends haiku, proxy routes to GPT-OSS 120B (matches tier-1-fast).
-  # Cost: GPT-OSS 120B $0.80/$3.20 vs Anthropic Haiku $0.30/$1.20.
+  # The dated ID retains native Anthropic Haiku ($1/$5 per MTok).
+  # Only `haiku` offloads to GPT-OSS 120B (active tier-1-fast pin: $0.80/$3.20).
   # Note: starter-pack uses GPT-OSS 120B for both tier-1-fast and haiku for
   # consistency. Override here if cost-sensitive.
   # data_clearance: internal-only (NOT for client code or restricted data).
@@ -323,16 +313,14 @@ litellm_settings:
   # Fallback chains: primary fails → secondary → tertiary.
   # Claude tiers do NOT automatically fall back to OSS — explicitly route if needed.
   fallbacks:
-    - claude-haiku-4-5-20251001: [claude-haiku-4-5-20251001-anthropic]
-    # The `haiku` short alias (scripts/run-*.py, Claude Code) needs the same
-    # Anthropic-direct safety net the dated ID has.
+    # Full Anthropic IDs retain native semantics; retries handle transient failures.
+    # The OSS `haiku` short alias retains an independent Anthropic safety net.
     - haiku: [claude-haiku-4-5-20251001-anthropic]
     - sonnet: [sonnet-us-fallback-gptoss120b, sonnet-us-fallback-llama8b]
-    - tier-0-oss-heavy: [tier-0-oss-heavy-fallback-openrouter, tier-0-oss-heavy-fallback-glm]
     - tier-1-fast: [tier-1-fast-fallback-openrouter, tier-1-fast-fallback-groq]
-    - tier-2-agentic: [tier-2-agentic-fallback-kimi, tier-2-agentic-fallback-qwen]
-    - tier-2-agentic-pro: [tier-2-agentic-pro-fallback-openrouter, tier-2-agentic-fallback-fireworks]
-    - tier-3-tool: [tier-3-tool-fallback-kimi-fireworks, tier-3-tool-fallback-kimi-openrouter]
+    - tier-2-agentic: [tier-2-agentic-pro-fallback-openrouter]
+    - tier-2-agentic-pro: [tier-2-agentic-pro-fallback-openrouter]
+    - tier-3-tool: [tier-3-tool-fallback-kimi-openrouter]
     - tier-4-extract: [tier-4-extract-fallback-fireworks, tier-4-extract-fallback-gptoss]
     - tier-5-latency: [tier-5-latency-fallback-gptoss, tier-5-latency-fallback-fireworks]
 

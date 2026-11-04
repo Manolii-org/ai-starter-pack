@@ -12,6 +12,7 @@ Exit codes:
   1 = fatal error (API key missing, diff file missing)
 """
 import concurrent.futures
+import importlib.machinery
 import importlib.util
 import json
 import os
@@ -24,22 +25,32 @@ import urllib.parse
 import urllib.request
 from typing import Optional
 
+class _HydratedSourceLoader(importlib.machinery.SourceFileLoader):
+    """Import the hydrated source directly, without consulting bytecode caches."""
+
+    def get_code(self, fullname):
+        return self.source_to_code(self.get_data(self.path), self.path)
+
+
+def _source_spec(name, path):
+    return importlib.util.spec_from_file_location(
+        name, path, loader=_HydratedSourceLoader(name, str(path)))
+
+
 # Load the exact hydrated helper, never an ambient/PR-added lib package initializer.
 # The launcher still owns complete runtime custody; this is not shell isolation.
 try:
-    _policy_spec = importlib.util.spec_from_file_location(
+    _policy_spec = _source_spec(
         "_assessment_route_policy", pathlib.Path(__file__).resolve().parent / "lib/agent_capabilities.py")
     if _policy_spec is None or _policy_spec.loader is None:
         raise ImportError("missing policy loader")
     _policy_module = importlib.util.module_from_spec(_policy_spec)
-    # Execute hydrated source bytes, not a PR-retained bytecode cache.
-    _policy_path = _policy_spec.origin
-    exec(compile(pathlib.Path(_policy_path).read_bytes(), _policy_path, "exec"),
-         _policy_module.__dict__)
+    _policy_spec.loader.exec_module(_policy_module)
     RouteAdmissionError = _policy_module.RouteAdmissionError
     require_direct_llm_admission = _policy_module.require_direct_llm_admission
+    configured_direct_endpoint = _policy_module.configured_direct_endpoint
 except (ImportError, OSError, AttributeError):
-    # Mixed/older consumer runtime: preserve ordinary proxy calls, but never
+    # Mixed/older consumer runtime: preserve local proxy calls, but never
     # admit a direct call without the shared policy implementation.
     class RouteAdmissionError(ValueError):
         pass
@@ -47,16 +58,30 @@ except (ImportError, OSError, AttributeError):
     def require_direct_llm_admission():
         raise RouteAdmissionError("direct review denied: compatible policy runtime missing")
 
+    def configured_direct_endpoint():
+        raise RouteAdmissionError("direct review denied: compatible policy runtime missing")
+
+
+# Older local proxy-only consumers can still write candidates. Hosted runners
+# must have the provenance API before any transport can be constructed.
+_bind_review_candidate = getattr(globals().get("_policy_module"), "bind_review_candidate", None)
+if not callable(_bind_review_candidate):
+    if os.environ.get("GITHUB_ACTIONS") == "true":
+        raise RouteAdmissionError("assessment candidate provenance runtime missing")
+
+    def _bind_review_candidate(data):
+        return {key: value for key, value in data.items() if key != "_assessment"}
+
 
 # Optional for older direct-only consumers; explicit estate mode fails closed
 # when this companion is absent. Never import a package initializer or .pyc.
 try:
     _protected_path = pathlib.Path(__file__).resolve().parent / "lib/protected_review.py"
-    _protected_spec = importlib.util.spec_from_file_location("_assessment_protected_review", _protected_path)
+    _protected_spec = _source_spec("_assessment_protected_review", _protected_path)
     if _protected_spec is None or _protected_spec.loader is None:
         raise ImportError("missing protected review loader")
     protected_review = importlib.util.module_from_spec(_protected_spec)
-    exec(compile(_protected_path.read_bytes(), str(_protected_path), "exec"), protected_review.__dict__)
+    _protected_spec.loader.exec_module(protected_review)
 except (ImportError, OSError, AttributeError, SyntaxError):
     protected_review = None
 
@@ -65,7 +90,6 @@ REPO_ROOT = pathlib.Path(__file__).parent.parent.resolve()
 SKILLS_DIR = REPO_ROOT / ".claude/skills"
 MANIFEST_FILE = REPO_ROOT / ".ai/candidates/manifest.json"
 
-_ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
 _ANTHROPIC_API_VERSION = "2023-06-01"
 _ANTHROPIC_HOST = "api.anthropic.com"
 
@@ -104,10 +128,14 @@ def _proxy_transport_key() -> str:
     ):
         if not candidate:
             continue
-        key = candidate.strip()
+        key = (
+            candidate.strip()
+        )
         # The auth-scheme token is case-insensitive (RFC 7235).
         if key.lower() == "bearer" or key.lower().startswith("bearer "):
-            key = key[7:].strip()
+            key = (
+                key[7:].strip()
+            )
         if not key or key.lower().startswith("sk-ant-"):
             continue
         return key
@@ -117,9 +145,9 @@ def _proxy_transport_key() -> str:
 def _endpoint(direct: bool = False) -> tuple[str, str, bool]:
     """Resolve (api_key, url, proxied).
 
-    Transport token: ANTHROPIC_API_KEY when calling Anthropic directly. When
-    LITELLM_PROXY_URL or ANTHROPIC_BASE_URL points at a non-Anthropic host the
-    request goes through that proxy with _proxy_transport_key().
+    Resolve proxy credentials or an explicitly admitted external provider.
+    A non-Anthropic LITELLM_PROXY_URL or ANTHROPIC_BASE_URL uses the proxy
+    credential resolver; direct requests require a configured origin.
 
     direct=True forces the Anthropic endpoint regardless of proxy config — used
     by `first_party` skills, where the eligibility matrix keeps the task class
@@ -127,21 +155,37 @@ def _endpoint(direct: bool = False) -> tuple[str, str, bool]:
     sent there, so only a real Anthropic key authenticates.
     """
     proxy_base = (os.environ.get("LITELLM_PROXY_URL") or os.environ.get("ANTHROPIC_BASE_URL") or "").rstrip("/")
+    parsed_origin = urllib.parse.urlsplit(proxy_base)
+    named_proxy = bool(os.environ.get("LITELLM_PROXY_URL"))
+    is_direct_origin = (parsed_origin.hostname or "").lower().rstrip(".") == _ANTHROPIC_HOST
+    if proxy_base and (named_proxy or not is_direct_origin):
+        if (parsed_origin.scheme != "https" or not parsed_origin.hostname
+                or parsed_origin.username or parsed_origin.password or parsed_origin.query
+                or parsed_origin.fragment or is_direct_origin):
+            raise RouteAdmissionError("review route denied: unsafe configured proxy origin")
     proxy_configured = bool(proxy_base) and (urllib.parse.urlparse(proxy_base).hostname or "").lower().rstrip(".") != _ANTHROPIC_HOST
-    if direct:
-        require_direct_llm_admission()
+    if direct or os.environ.get("CLIENT_AI_POLICY"):
+        direct_url = configured_direct_endpoint()
         # Under a configured proxy ANTHROPIC_API_KEY holds the LiteLLM
         # credential — it must never be sent to api.anthropic.com. Only the
         # dedicated direct key authenticates first-party calls there.
-        key = os.environ.get("ANTHROPIC_DIRECT_API_KEY") or (
-            os.environ.get("ANTHROPIC_API_KEY", "") if not proxy_configured else ""
+        key = (
+            os.environ.get("ANTHROPIC_DIRECT_API_KEY") or (
+                os.environ.get("ANTHROPIC_API_KEY", "") if not proxy_configured else ""
+            )
         )
-        return key, _ANTHROPIC_API_URL, False
+        return key, direct_url, False
     if proxy_configured:
+        parsed = urllib.parse.urlsplit(proxy_base)
+        if (parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password
+                or parsed.query or parsed.fragment):
+            raise RouteAdmissionError("direct review denied: governed HTTPS proxy required")
         return _proxy_transport_key(), proxy_base + "/v1/messages", True
-    require_direct_llm_admission()
-    key = os.environ.get("ANTHROPIC_DIRECT_API_KEY") or os.environ.get("ANTHROPIC_API_KEY", "")
-    return key, _ANTHROPIC_API_URL, False
+    direct_url = configured_direct_endpoint()
+    key = (
+        os.environ.get("ANTHROPIC_DIRECT_API_KEY") or os.environ.get("ANTHROPIC_API_KEY", "")
+    )
+    return key, direct_url, False
 
 
 # Dated claude-* IDs only exist on Anthropic's API; a LiteLLM-style proxy serves
@@ -275,19 +319,16 @@ def _call_api(system_prompt: str, user_message: str, model: str, max_tokens: int
         if data is None:
             raise RuntimeError("API call produced no response")
 
-        text = ""
-        for block in data.get("content", []):
-            if block.get("type") == "text":
-                text = block["text"]
-                break
+        text = "".join(block.get("text", "") for block in data.get("content", [])
+                       if isinstance(block, dict) and block.get("type") == "text")
         if text:
-            if (_budget_attempt == 0 and validate is not None
-                    and data.get("stop_reason") == "max_tokens"
-                    and not validate(text)):
-                # Truncated mid-payload (e.g. reasoning + findings JSON cut
-                # at the declared budget): one doubled-budget retry.
-                budget *= 2
-                continue
+            if data.get("stop_reason") == "max_tokens":
+                # A parseable example is not proof that the final verdict was
+                # completed. Retry output-limited responses once, then refuse.
+                if _budget_attempt == 0:
+                    budget *= 2
+                    continue
+                raise ValueError("specialist response remained output-limited")
             return text
         if _budget_attempt == 0:
             # An empty first block on attempt 0 is either starvation
@@ -309,28 +350,52 @@ def _parse_findings(raw: str) -> dict:
     block, then the last balanced object that carries a "findings" key.
     """
     text = raw.strip()
-    if text.startswith("```"):
-        lines = text.splitlines()
-        end = next((i for i, ln in enumerate(lines[1:], 1) if ln.startswith("```")), len(lines))
-        text = "\n".join(lines[1:end])
     try:
         return json.loads(text)
     except json.JSONDecodeError:
         pass
-    for block in reversed(re.findall(r"```(?:json)?\s*\n(.*?)```", raw, re.S)):
-        try:
-            candidate = json.loads(block.strip())
-        except json.JSONDecodeError:
+    def complete_tail(end):
+        tail = raw[end:].lstrip()
+        if tail.startswith("```"):
+            tail = tail[3:]
+        return not any(marker in tail for marker in ("{", "[", "```"))
+
+    # Only outermost JSON boundaries are candidates. A nested findings object
+    # cannot stand in for an unfinished enclosing response.
+    starts = []
+    stack = []
+    quoted = False
+    escaped = False
+    for offset, char in enumerate(raw):
+        if quoted:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                quoted = False
             continue
-        if isinstance(candidate, dict) and "findings" in candidate:
-            return candidate
+        if stack and char == '"':
+            quoted = True
+        elif char in "{[":
+            if not stack and char == "{":
+                starts.append(offset)
+            stack.append(char)
+        elif char in "}]" and stack:
+            if (stack[-1], char) in (("{", "}"), ("[", "]")):
+                stack.pop()
+            else:
+                # Malformed outer JSON must never expose a nested candidate.
+                break
     decoder = json.JSONDecoder()
-    for match in reversed(list(re.finditer(r"\{", raw))):
+    for start in reversed(starts):
         try:
-            obj, _ = decoder.raw_decode(raw, match.start())
+            obj, end = decoder.raw_decode(raw, start)
         except json.JSONDecodeError:
             continue
         if isinstance(obj, dict) and "findings" in obj:
+            if not complete_tail(end):
+                continue
             return obj
     raise json.JSONDecodeError("no findings JSON in response", raw, 0)
 
@@ -356,7 +421,7 @@ def _write_skip_marker(skill_name: str, output_dir: pathlib.Path, reason: str) -
     output_file = output_dir / f"{skill_name}.json"
     output_file.write_text(
         json.dumps(
-            _policy_module.bind_review_candidate({"source": skill_name, "findings": [],
+            _bind_review_candidate({"source": skill_name, "findings": [],
              "first_party": True, "skipped": reason}),
             indent=2,
         ) + "\n",
@@ -469,7 +534,9 @@ def _invoke_skill(skill_name: str, diff: str, output_dir: pathlib.Path) -> tuple
                     or os.environ.get("ANTHROPIC_BASE_URL") or "").rstrip("/")
             if not base or (urllib.parse.urlparse(base).hostname or "").lower().rstrip(".") == _ANTHROPIC_HOST:
                 raise ValueError("protected review requires its existing proxy route")
-            key = _proxy_transport_key()
+            key = (
+                _proxy_transport_key()
+            )
             if not key:
                 raise ValueError("protected review proxy credential unavailable")
             data = protected_review.review(skill_name, system_prompt, user_message, diff, base, key)
@@ -510,7 +577,7 @@ def _invoke_skill(skill_name: str, diff: str, output_dir: pathlib.Path) -> tuple
 
         # Write findings to file
         output_file = output_dir / f"{skill_name}.json"
-        output_file.write_text(json.dumps(_policy_module.bind_review_candidate(data), indent=2) + "\n", encoding="utf-8")
+        output_file.write_text(json.dumps(_bind_review_candidate(data), indent=2) + "\n", encoding="utf-8")
         finding_count = len(data.get("findings", []))
         print(f"[{skill_name}] {finding_count} findings written to {output_file}")
         return skill_name, None
@@ -541,7 +608,7 @@ def _write_skipped_marker(skill_name: str, output_dir: pathlib.Path, reason: str
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / f"{skill_name}.json").write_text(
         json.dumps(
-            _policy_module.bind_review_candidate({"source": skill_name, "findings": [], "skipped": reason}),
+            _bind_review_candidate({"source": skill_name, "findings": [], "skipped": reason}),
             indent=2,
         ) + "\n",
         encoding="utf-8",
@@ -573,7 +640,7 @@ def main() -> None:
 
     # Read diff
     if diff_file is None:
-        diff_file = pathlib.Path(os.environ.get("DIFF_FILE", "/tmp/pr.diff"))
+        diff_file = pathlib.Path(os.environ.get("DIFF_FILE", ".ai/pr.diff"))
     if diff_file.exists():
         diff = diff_file.read_text(encoding="utf-8", errors="replace")
     else:

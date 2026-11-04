@@ -13,6 +13,7 @@ Usage:
 """
 
 import argparse
+import importlib.machinery
 import importlib.util
 import hashlib
 import math
@@ -34,28 +35,52 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 import yaml
 
+class _HydratedSourceLoader(importlib.machinery.SourceFileLoader):
+    """Import the hydrated source directly, without consulting bytecode caches."""
+
+    def get_code(self, fullname):
+        return self.source_to_code(self.get_data(self.path), self.path)
+
+
+def _source_spec(name, path):
+    return importlib.util.spec_from_file_location(
+        name, path, loader=_HydratedSourceLoader(name, str(path)))
+
+
 # Load the exact hydrated helper, never an ambient/PR-added lib package initializer.
 # The launcher still owns complete runtime custody; this is not shell isolation.
 try:
-    _policy_spec = importlib.util.spec_from_file_location(
+    _policy_spec = _source_spec(
         "_assessment_route_policy", Path(__file__).resolve().parent / "lib/agent_capabilities.py")
     if _policy_spec is None or _policy_spec.loader is None:
         raise ImportError("missing policy loader")
     _policy_module = importlib.util.module_from_spec(_policy_spec)
-    # Execute hydrated source bytes, not a PR-retained bytecode cache.
-    _policy_path = _policy_spec.origin
-    exec(compile(Path(_policy_path).read_bytes(), _policy_path, "exec"),
-         _policy_module.__dict__)
+    _policy_spec.loader.exec_module(_policy_module)
     RouteAdmissionError = _policy_module.RouteAdmissionError
     require_direct_llm_admission = _policy_module.require_direct_llm_admission
+    configured_direct_endpoint = _policy_module.configured_direct_endpoint
 except (ImportError, OSError, AttributeError):
-    # Mixed/older consumer runtime: preserve ordinary proxy calls, but never
+    # Mixed/older consumer runtime: preserve local proxy calls, but never
     # admit a direct call without the shared policy implementation.
     class RouteAdmissionError(ValueError):
         pass
 
     def require_direct_llm_admission():
         raise RouteAdmissionError("direct review denied: compatible policy runtime missing")
+
+    def configured_direct_endpoint():
+        raise RouteAdmissionError("direct review denied: compatible policy runtime missing")
+
+
+# Older local proxy-only consumers can still write candidates. Hosted runners
+# must have the provenance API before any transport can be constructed.
+_bind_review_candidate = getattr(globals().get("_policy_module"), "bind_review_candidate", None)
+if not callable(_bind_review_candidate):
+    if os.environ.get("GITHUB_ACTIONS") == "true":
+        raise RouteAdmissionError("assessment candidate provenance runtime missing")
+
+    def _bind_review_candidate(data):
+        return {key: value for key, value in data.items() if key != "_assessment"}
 
 
 logging.basicConfig(
@@ -162,15 +187,18 @@ _ANTHROPIC_HOST = "api.anthropic.com"
 
 
 def _proxy_base() -> Optional[str]:
-    """Non-Anthropic proxy base when configured, else None."""
-    base = (
-        os.environ.get("LITELLM_PROXY_URL")
-        or os.environ.get("ANTHROPIC_BASE_URL")
-        or ""
-    ).rstrip("/")
+    """Distinguish an absent proxy from unsafe configured transport."""
+    named = os.environ.get("LITELLM_PROXY_URL")
+    base = (named or os.environ.get("ANTHROPIC_BASE_URL") or "").rstrip("/")
     if not base:
         return None
-    if (urlparse(base).hostname or "").lower().rstrip(".") == _ANTHROPIC_HOST:
+    parsed = urlparse(base)
+    if (parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password
+            or parsed.query or parsed.fragment):
+        raise RouteAdmissionError("review route denied: unsafe configured proxy origin")
+    if parsed.hostname.lower().rstrip(".") == _ANTHROPIC_HOST:
+        if named:
+            raise RouteAdmissionError("review route denied: proxy origin is a direct provider")
         return None
     return base
 
@@ -214,8 +242,10 @@ def get_api_key() -> Optional[str]:
             key = normalized
             break
     else:
-        require_direct_llm_admission()
-        key = os.getenv("ANTHROPIC_DIRECT_API_KEY") or os.getenv("ANTHROPIC_API_KEY")
+        configured_direct_endpoint()
+        key = (
+            os.getenv("ANTHROPIC_DIRECT_API_KEY") or os.getenv("ANTHROPIC_API_KEY")
+        )
     if not key:
         logger.warning("no API credential set; skipping agent invocations")
         return None
@@ -258,6 +288,21 @@ def build_user_message(diff: str, changed_files: list[str]) -> str:
 _DEEP_DIVE_VERSION = "security-deep-dive-input-v1"
 
 
+_MAX_DEEP_CONTAINER_DEPTH = 512
+
+
+def _deep_require_bounded(value, label: str) -> None:
+    """Bound container nesting without relying on interpreter recursion limits."""
+    pending = [(value, 1)]
+    while pending:
+        item, depth = pending.pop()
+        if isinstance(item, (dict, list, tuple)):
+            if depth > _MAX_DEEP_CONTAINER_DEPTH:
+                raise ValueError(f"deep-dive {label} nesting too deep")
+            children = item.values() if isinstance(item, dict) else item
+            pending.extend((child, depth + 1) for child in children)
+
+
 def _deep_json(raw: str | bytes):
     """One strict JSON value; duplicate fields/NaN are never coverage evidence."""
     def pairs(rows):
@@ -276,12 +321,15 @@ def _deep_json(raw: str | bytes):
     if isinstance(raw, str) and raw.startswith("\ufeff"):
         raw = raw[1:]
     try:
-        return json.loads(raw, object_pairs_hook=pairs, parse_constant=invalid)
+        value = json.loads(raw, object_pairs_hook=pairs, parse_constant=invalid)
+        _deep_require_bounded(value, "JSON")
+        return value
     except RecursionError:
         raise ValueError("deep-dive JSON nesting too deep") from None
 
 
 def _deep_digest(value) -> str:
+    _deep_require_bounded(value, "identity")
     try:
         return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=True,
                                          separators=(",", ":"), allow_nan=False).encode()).hexdigest()
@@ -312,11 +360,12 @@ def _deep_git(root: Path, *args: str, limit: int) -> bytes:
     with tempfile.TemporaryFile() as output:
         try:
             completed = subprocess.run(
-                ["git", "--no-pager", "--no-replace-objects", "--no-lazy-fetch",
+                ["git", "--no-pager", "--no-replace-objects",
                  "--literal-pathspecs", "-C", str(root), "-c", "core.fsmonitor=false",
                  *args], stdout=output, stderr=subprocess.DEVNULL, timeout=15,
                 env={"PATH": os.defpath, "GIT_CONFIG_NOSYSTEM": "1",
-                     "GIT_CONFIG_GLOBAL": os.devnull, "GIT_TERMINAL_PROMPT": "0"})
+                     "GIT_CONFIG_GLOBAL": os.devnull, "GIT_TERMINAL_PROMPT": "0",
+                     "GIT_NO_LAZY_FETCH": "1", "GIT_ALLOW_PROTOCOL": ""})
             size = output.tell()
             if completed.returncode or size > limit:
                 raise ValueError("deep-dive immutable evidence unavailable or over budget")
@@ -330,11 +379,11 @@ def _deep_screen_helpers():
     # Reuse the existing canonical Judge source/privacy guard. Its modules are
     # already part of the hydrated broad/Judge runtime. Do not execute Git blobs.
     path = Path(__file__).resolve().with_name("run-judge.py")
-    spec = importlib.util.spec_from_file_location("_deep_dive_source_guard", path)
+    spec = _source_spec("_deep_dive_source_guard", path)
     if spec is None or spec.loader is None:
         raise ValueError("deep-dive source guard unavailable")
     module = importlib.util.module_from_spec(spec)
-    exec(compile(path.read_bytes(), str(path), "exec"), module.__dict__)
+    spec.loader.exec_module(module)
     return module
 
 
@@ -684,11 +733,11 @@ def parse_security_deep_dive_output(raw: str, packet: dict, *, stop_reason: str)
 def _deep_leg_contract():
     """Read existing dormant leg constants, never inventory, credentials or HTTP."""
     path = Path(__file__).resolve().parent / "lib/protected_review.py"
-    spec = importlib.util.spec_from_file_location("_deep_leg_contract", path)
+    spec = _source_spec("_deep_leg_contract", path)
     if spec is None or spec.loader is None:
         raise ValueError("deep-dive leg contract unavailable")
     module = importlib.util.module_from_spec(spec)
-    exec(compile(path.read_bytes(), str(path), "exec"), module.__dict__)
+    spec.loader.exec_module(module)
     return module
 
 
@@ -900,7 +949,12 @@ def invoke_agent(
     # Route through the LiteLLM proxy when configured (Bearer auth); otherwise
     # direct Anthropic (x-api-key). The retired anthropic_only tier has no
     # callers left — its agents were remapped to restricted_us_oss_ok.
-    proxy = _proxy_base()
+    try:
+        proxy = _proxy_base()
+    except RouteAdmissionError:
+        return {"source": agent_config.name, "findings": [],
+                "first_party": bool(agent_config.first_party or os.environ.get("CLIENT_AI_POLICY")),
+                "skipped": "route_policy_denied"}
     # True once this call is bound to the Anthropic-direct plane — a runtime
     # failure must then degrade to the skipped first-party marker so the judge
     # fails closed instead of adjudicating without the required direct leg.
@@ -914,7 +968,7 @@ def invoke_agent(
                 "first_party": True, "skipped": "protected_review_incomplete"}
     try:
         if agent_config.first_party or os.environ.get("CLIENT_AI_POLICY") or not proxy:
-            require_direct_llm_admission()
+            direct_url = configured_direct_endpoint()
     except RouteAdmissionError as exc:
         logger.warning("%s: %s", agent_config.name, exc)
         return {"source": agent_config.name, "findings": [],
@@ -924,8 +978,10 @@ def invoke_agent(
     # Anthropic-direct — never the OSS proxy, regardless of declared model.
     if agent_config.first_party:
         direct_required = True
-        api_key = os.getenv("ANTHROPIC_DIRECT_API_KEY") or (
-            os.getenv("ANTHROPIC_API_KEY") if not proxy else None
+        api_key = (
+            os.getenv("ANTHROPIC_DIRECT_API_KEY") or (
+                os.getenv("ANTHROPIC_API_KEY") if not proxy else None
+            )
         )
         if not api_key:
             logger.warning(
@@ -957,8 +1013,10 @@ def invoke_agent(
         # whenever a proxy is configured — api.anthropic.com would reject it
         # (and it must never leave the boundary as x-api-key to that host).
         # The direct plane requires a real Anthropic key.
-        api_key = os.getenv("ANTHROPIC_DIRECT_API_KEY") or (
-            os.getenv("ANTHROPIC_API_KEY") if not proxy else None
+        api_key = (
+            os.getenv("ANTHROPIC_DIRECT_API_KEY") or (
+                os.getenv("ANTHROPIC_API_KEY") if not proxy else None
+            )
         )
         if not api_key:
             logger.warning(
@@ -980,23 +1038,30 @@ def invoke_agent(
             f"{agent_config.name}: CLIENT_AI_POLICY active — dispatching {model} (Anthropic-direct)"
         )
     else:
-        api_key = api_key or get_api_key()
+        api_key = (
+            api_key or get_api_key()
+        )
     if not api_key:
         return {"source": agent_config.name, "findings": [],
                 "first_party": direct_required, "skipped": "no_credential"}
-    base_url = proxy or "https://api.anthropic.com"
     if proxy and model in {"claude-haiku-4-5-20251001", "claude-sonnet-4-6"}:
         model = {"claude-haiku-4-5-20251001": "haiku", "claude-sonnet-4-6": "sonnet"}[model]
     if not proxy:
         model = DIRECT_MODEL_MAP.get(model, model)
-    api_url = f"{base_url}/v1/messages"
+    api_url = f"{proxy}/v1/messages" if proxy else direct_url
 
     headers = {
         "anthropic-version": "2023-06-01",
         "content-type": "application/json",
     }
     if proxy:
-        headers["Authorization"] = f"Bearer {api_key.removeprefix('Bearer ')}"
+        auth = api_key.strip()
+        if auth.lower().startswith("bearer "):
+            auth = auth[7:].strip()
+        if not auth or auth.lower() == "bearer" or auth.lower().startswith("sk-ant-"):
+            return {"source": agent_config.name, "findings": [], "first_party": False,
+                    "skipped": "invalid_proxy_credential"}
+        headers["Authorization"] = f"Bearer {auth}"
     else:
         headers["x-api-key"] = api_key
 
@@ -1214,7 +1279,7 @@ def run_broad_agents(
         if not config:
             # Unknown capability on failed load is conservative missing coverage,
             # never permission to run an ordinary/proxy replacement.
-            (output_dir / f"{agent_name}.json").write_text(json.dumps(_policy_module.bind_review_candidate({
+            (output_dir / f"{agent_name}.json").write_text(json.dumps(_bind_review_candidate({
                 "source": agent_name, "findings": [], "skipped": "load_error",
                 "first_party": True}), indent=2), encoding="utf-8")
             continue
@@ -1232,7 +1297,7 @@ def run_broad_agents(
         logger.error("Complete diff exceeds explicit owner limit; no agent dispatched")
         for agent in agents_to_run:
             (output_dir / f"{agent.name}.json").write_text(
-                json.dumps(_policy_module.bind_review_candidate(_incomplete(agent, "input_limit")), indent=2), encoding="utf-8")
+                json.dumps(_bind_review_candidate(_incomplete(agent, "input_limit")), indent=2), encoding="utf-8")
         return 0  # Durable incomplete markers, never a completed review.
 
     runnable = agents_to_run
@@ -1267,7 +1332,7 @@ def run_broad_agents(
             results[agent_name] = findings
             out_file = output_dir / f"{agent_name}.json"
             out_file.write_text(
-                json.dumps(_policy_module.bind_review_candidate(findings), indent=2),
+                json.dumps(_bind_review_candidate(findings), indent=2),
                 encoding="utf-8",
             )
             logger.info(f"Wrote {agent_name} findings to {out_file}")
@@ -1293,7 +1358,7 @@ def main():
     parser.add_argument(
         "--diff",
         type=Path,
-        default=Path(os.getenv("DIFF_FILE", "/tmp/pr.diff")),
+        default=Path(os.getenv("DIFF_FILE", ".ai/pr.diff")),
         help="Path to PR diff file",
     )
     parser.add_argument(

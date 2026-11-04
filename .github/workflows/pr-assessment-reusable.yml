@@ -20,7 +20,7 @@ name: PR Assessment (Reusable)
 on:
   workflow_call:
     inputs:
-      provider_mode: { type: string, default: anthropic, description: 'anthropic (direct ANTHROPIC_API_KEY) | proxy (LiteLLM via ANTHROPIC_BASE_URL + LITELLM_MASTER_KEY).' }
+      provider_mode: { type: string, default: anthropic, description: 'anthropic requires an existing ANTHROPIC_API_KEY, vars.ANTHROPIC_DIRECT_BASE_URL and committed external llm-anthropic capability admission; proxy uses litellm_proxy_url and LITELLM_MASTER_KEY.' }
       litellm_proxy_url: { type: string, default: '', description: 'Proxy base URL for proxy mode; pass vars.LITELLM_PROXY_URL.' }
       model: { type: string, default: '', description: 'Optional model id override; empty = script/action default.' }
       runs_on: { type: string, default: ubuntu-latest }
@@ -99,6 +99,7 @@ jobs:
     env:
       ANTHROPIC_API_KEY: ${{ inputs.provider_mode == 'proxy' && secrets.LITELLM_MASTER_KEY || secrets.ANTHROPIC_API_KEY }}
       ANTHROPIC_BASE_URL: ${{ inputs.provider_mode == 'proxy' && inputs.litellm_proxy_url || '' }}
+      ANTHROPIC_DIRECT_BASE_URL: ${{ vars.ANTHROPIC_DIRECT_BASE_URL }}
       ANTHROPIC_MODEL: ${{ inputs.model }}
       # CLIENT_AI_POLICY engagements route the classifier Anthropic-direct as
       # well; the proxy credential cannot authenticate api.anthropic.com.
@@ -220,6 +221,28 @@ jobs:
           # workspace would be walked by later steps (skill discovery,
           # artifact globs) and by the caller's own tooling.
           rm -rf .pack-hydrate
+
+      - name: Validate direct-provider prerequisites
+        if: inputs.provider_mode == 'anthropic'
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import importlib.machinery
+          import importlib.util
+          from pathlib import Path
+
+          class SourceOnly(importlib.machinery.SourceFileLoader):
+              def get_code(self, fullname):
+                  return self.source_to_code(self.get_data(self.path), self.path)
+
+          path = Path("scripts/lib/agent_capabilities.py")
+          loader = SourceOnly("_direct_prerequisites", str(path))
+          spec = importlib.util.spec_from_loader(loader.name, loader)
+          policy = importlib.util.module_from_spec(spec)
+          loader.exec_module(policy)
+          policy.configured_direct_endpoint()
+          print("Direct provider origin and immutable external capability policy verified")
+          PY
 
       - name: Get PR diff
         id: diff
@@ -483,6 +506,8 @@ jobs:
           path: .ai/sast-findings.json
 
   specialists:
+    outputs:
+      assessment_attempt: ${{ github.run_attempt }}
     name: Specialist Skills
     runs-on: ${{ inputs.runs_on }}
     timeout-minutes: 15
@@ -500,6 +525,7 @@ jobs:
     env:
       ANTHROPIC_API_KEY: ${{ inputs.provider_mode == 'proxy' && secrets.LITELLM_MASTER_KEY || secrets.ANTHROPIC_API_KEY }}
       ANTHROPIC_BASE_URL: ${{ inputs.provider_mode == 'proxy' && inputs.litellm_proxy_url || '' }}
+      ANTHROPIC_DIRECT_BASE_URL: ${{ vars.ANTHROPIC_DIRECT_BASE_URL }}
       ANTHROPIC_MODEL: ${{ inputs.model }}
       # first_party specialist skills (shell-security, sast-scan,
       # security-boundary-test) run Anthropic-direct on this key; without it
@@ -648,6 +674,8 @@ jobs:
           path: .ai/candidates/
 
   broad-agents:
+    outputs:
+      assessment_attempt: ${{ github.run_attempt }}
     name: Broad Agents
     runs-on: ${{ inputs.runs_on }}
     timeout-minutes: 20
@@ -660,6 +688,7 @@ jobs:
     env:
       ANTHROPIC_API_KEY: ${{ inputs.provider_mode == 'proxy' && secrets.LITELLM_MASTER_KEY || secrets.ANTHROPIC_API_KEY }}
       ANTHROPIC_BASE_URL: ${{ inputs.provider_mode == 'proxy' && inputs.litellm_proxy_url || '' }}
+      ANTHROPIC_DIRECT_BASE_URL: ${{ vars.ANTHROPIC_DIRECT_BASE_URL }}
       ANTHROPIC_MODEL: ${{ inputs.model }}
     steps:
       - name: Validate provider secrets
@@ -816,6 +845,7 @@ jobs:
     env:
       ANTHROPIC_API_KEY: ${{ inputs.provider_mode == 'proxy' && secrets.LITELLM_MASTER_KEY || secrets.ANTHROPIC_API_KEY }}
       ANTHROPIC_BASE_URL: ${{ inputs.provider_mode == 'proxy' && inputs.litellm_proxy_url || '' }}
+      ANTHROPIC_DIRECT_BASE_URL: ${{ vars.ANTHROPIC_DIRECT_BASE_URL }}
       ANTHROPIC_MODEL: ${{ inputs.model }}
       # Judge adjudicates first_party candidates Anthropic-direct (run-judge.py
       # _endpoint(direct=True)); without this key those findings go unjudged.
@@ -968,6 +998,8 @@ jobs:
 
       - name: Run judge
         env:
+          REVIEW_SKILLS_ATTEMPT: ${{ needs.specialists.outputs.assessment_attempt }}
+          REVIEW_AGENTS_ATTEMPT: ${{ needs['broad-agents'].outputs.assessment_attempt }}
           REVIEW_SKILLS: ${{ needs.classify.outputs.invoke_skills }}
           REVIEW_AGENTS: ${{ needs.classify.outputs.invoke_agents }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

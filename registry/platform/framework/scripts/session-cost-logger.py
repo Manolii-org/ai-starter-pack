@@ -56,6 +56,7 @@ _MAIN_PER_M = {
     "claude-sonnet-4-6":         {"in": 3.00, "out": 15.00},
     "claude-haiku-4-5-20251001": {"in": 1.00, "out":  5.00},
     "claude-haiku-4-5":          {"in": 1.00, "out":  5.00},
+    "claude-haiku-4-5-20251001-anthropic": {"in": 1.00, "out": 5.00},
     "claude-fable-5-1":          {"in": 10.00, "out": 50.00},
     "claude-opus-5-5":           {"in": 4.00, "out": 20.00},
     "claude-opus-5":             {"in": 5.00, "out": 25.00},
@@ -165,6 +166,17 @@ def parse_session(session_file: Path) -> dict:
 
 
 _SUBAGENT_PRICING: dict[str, dict] = {
+    # Historical/candidate Kimi serving IDs remain estimable, not dispatchable.
+    **{name: {"input": 3.00 / 1_000_000, "output": 15.00 / 1_000_000}
+       for name in ("kimi-k3", "accounts/fireworks/models/kimi-k3",
+                    "fireworks_ai/accounts/fireworks/models/kimi-k3")},
+    # Ordinary agentic aliases reuse the existing qualified M3 provider route.
+    **{name: {"input": 0.30 / 1_000_000, "output": 1.20 / 1_000_000}
+       for name in ("minimax-m3", "accounts/fireworks/models/minimax-m3",
+                    "fireworks_ai/accounts/fireworks/models/minimax-m3",
+                    "minimax/minimax-m3", "openrouter/minimax/minimax-m3",
+                    "tier-2-agentic", "tier-2-agentic-pro",
+                    "tier-2-agentic-pro-fallback-openrouter")},
     # Anthropic-direct sub-agents (full model ID bypasses proxy)
     "claude-sonnet-4-6":       {"input": 3.00 / 1_000_000, "output": 15.00 / 1_000_000},
     "claude-opus-4-7":         {"input": 5.00 / 1_000_000, "output": 25.00 / 1_000_000},
@@ -180,6 +192,7 @@ _SUBAGENT_PRICING: dict[str, dict] = {
     "haiku": {"input": 0.10 / 1_000_000, "output": 0.50 / 1_000_000},
     "claude-haiku-4-5-20251001": {"input": 1.00 / 1_000_000, "output": 5.00 / 1_000_000},
     "claude-haiku-4-5":          {"input": 1.00 / 1_000_000, "output": 5.00 / 1_000_000},
+    "claude-haiku-4-5-20251001-anthropic": {"input": 1.00 / 1_000_000, "output": 5.00 / 1_000_000},
     # Claude Code aliases on Anthropic (model-routing.json alias_resolution).
     "sonnet": {"input": 2.00 / 1_000_000, "output": 10.00 / 1_000_000},  # Sonnet 5.5
     "opus":   {"input": 4.00 / 1_000_000, "output": 20.00 / 1_000_000},  # Opus 5.5
@@ -187,21 +200,26 @@ _SUBAGENT_PRICING: dict[str, dict] = {
     # Explicit tier-vision (Sonnet 4.6 when used as sub-agent, not via proxy)
     "tier-vision": {"input": 3.00 / 1_000_000, "output": 15.00 / 1_000_000},  # Claude Sonnet 4.6
 }
-_ANTHROPIC_BASE_URL = os.environ.get("ANTHROPIC_BASE_URL", "").strip().lower()
-_PROXY_ACTIVE = bool(_ANTHROPIC_BASE_URL) and "anthropic.com" not in _ANTHROPIC_BASE_URL
+# Follow the Claude client plane, not the named endpoint used by optional
+# programmatic critics. Keep this standalone script compatible with older
+# installs without a lib companion; parity with proxy_plane is tested.
+_ANTHROPIC_BASE_URL = os.environ.get("ANTHROPIC_BASE_URL", "").strip()
+_PROXY_ACTIVE = (
+    (urlparse(_ANTHROPIC_BASE_URL).hostname or "").lower().rstrip(".") != "api.anthropic.com"
+    if _ANTHROPIC_BASE_URL else os.environ.get("CLAUDE_CLIENT_USE_PROXY", "").strip() == "1"
+)
 if _PROXY_ACTIVE:
-    for _alias in ("haiku", "claude-haiku-4-5-20251001", "claude-haiku-4-5"):
-        _SUBAGENT_PRICING[_alias] = {
-            "input": 0.112 / 1_000_000,
-            "output": 0.224 / 1_000_000,
-        }
-    # The proxy intercepts `sonnet` onto DeepSeek V4 Pro.
-    _SUBAGENT_PRICING["sonnet"] = {"input": 0.30 / 1_000_000, "output": 0.87 / 1_000_000}
+    # Active tier-1-fast and sonnet pins in .claude/model-routing.json.
+    # Dated Haiku IDs retain their native Anthropic backend through the proxy.
+    _SUBAGENT_PRICING["haiku"] = {"input": 0.80 / 1_000_000, "output": 3.20 / 1_000_000}
+    _SUBAGENT_PRICING["sonnet"] = {"input": 1.74 / 1_000_000, "output": 3.48 / 1_000_000}
 _ANTHROPIC_DIRECT_MODELS = {
     "claude-sonnet-4-6", "claude-opus-4-7", "claude-opus-4-6",
     "claude-fable-5-1", "claude-opus-5-5", "claude-opus-5",
     "claude-sonnet-5-5", "claude-sonnet-5", "claude-haiku-5-5",
     "opus", "fable",
+    "claude-haiku-4-5-20251001", "claude-haiku-4-5",
+    "claude-haiku-4-5-20251001-anthropic",
 }
 if not _PROXY_ACTIVE:
     # Without a proxy the haiku and sonnet aliases are Anthropic models too.
@@ -216,7 +234,8 @@ def parse_subagents(subagent_dir: Path) -> dict:
     sub-agents to give visibility into untracked Anthropic spend.
 
     Pricing is derived from the static _SUBAGENT_PRICING table. Unknown model IDs
-    fall back to haiku proxy rates and emit a warnings.warn so the operator knows
+    fall back to the active Haiku alias estimate (or the historical native
+    Haiku default without a proxy) and emit a warnings.warn so the operator knows
     cost attribution may be inaccurate.
     """
     if not subagent_dir.is_dir():
@@ -258,10 +277,11 @@ def parse_subagents(subagent_dir: Path) -> dict:
             if model and model not in _SUBAGENT_PRICING:
                 warnings.warn(
                     f"[session-cost-logger] Unknown sub-agent model '{model}' — "
-                    "falling back to haiku proxy rates; cost attribution may be inaccurate.",
+                    "falling back to a Haiku estimate; cost attribution may be inaccurate.",
                     stacklevel=2,
                 )
-            rates = _SUBAGENT_PRICING.get(model, _SUBAGENT_PRICING["claude-haiku-4-5-20251001"])
+            fallback = "haiku" if _PROXY_ACTIVE else "claude-haiku-4-5-20251001"
+            rates = _SUBAGENT_PRICING.get(model, _SUBAGENT_PRICING[fallback])
             call_cost = inp * rates["input"] + out * rates["output"]
             if model in _ANTHROPIC_DIRECT_MODELS:
                 ant_cost += call_cost

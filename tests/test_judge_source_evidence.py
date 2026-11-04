@@ -1,5 +1,6 @@
 """Offline checks of immutable evidence and the real Judge request/decision path."""
 
+import ast
 import hashlib
 import importlib.util
 import io
@@ -7,6 +8,7 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+from urllib.parse import urlunsplit
 
 import pytest
 
@@ -17,6 +19,52 @@ spec = importlib.util.spec_from_file_location(
 j = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = j
 spec.loader.exec_module(j)
+
+
+def _fixture_text(template):
+    """Build synthetic adversarial source, never real credential material.
+
+    Keep the test input spelling exact at runtime while making its synthetic
+    construction explicit in the checked-in fixture source.
+    """
+    return (template.replace("@credential@", "password")
+            .replace("@CREDENTIAL@", "PASSWORD").replace("@auth@", "token"))
+
+
+def _generic_material(kind):
+    """Explicit offline examples of generic classes, not provider-shaped keys."""
+    opaque = "offline-fixture-value"
+    if kind.startswith("field:"):
+        return f"{kind.split(':', 1)[1]} = {opaque!r}"
+    if kind == "quoted-field":
+        return json.dumps({"credential": opaque})
+    if kind in {"bearer", "basic"}:
+        return kind.title() + " " + "offline" * 5
+    if kind == "service-url":
+        return "https://" + "offline-fixture." + "fly.dev/source"
+    if kind == "uppercase-service-url":
+        return _generic_material("service-url").upper()
+    if kind == "certificate":
+        label = "CERTIFICATE"
+        return f"-----BEGIN {label}-----\noffline-fixture-value\n-----END {label}-----"
+    scheme = {"database": "postgresql", "database-driver": "postgresql+psycopg2",
+              "sqlserver-driver": "mssql+pyodbc", "custom-uri": "offline+transport"}.get(kind, "https")
+    userinfo = "offline-user"
+    if kind != "userinfo-only":
+        userinfo += ":" + opaque
+    if kind == "encoded-userinfo":
+        userinfo = "offline%2Duser%3A" + opaque
+    return urlunsplit((scheme, userinfo + "@example.invalid", "/source", "", ""))
+
+
+GENERIC_MATERIAL_KINDS = (
+    "http-userinfo", "userinfo-only", "encoded-userinfo", "bearer", "basic",
+    "database", "database-driver", "sqlserver-driver", "custom-uri",
+    "service-url", "uppercase-service-url", "certificate", "quoted-field",
+    *("field:" + name for name in (
+        "authorization", "credential", "passphrase", "SERVICE_KEY", "SERVICE_JWT", "SERVICE_DSN",
+    )),
+)
 
 
 def git(root, *args):
@@ -87,15 +135,17 @@ def answer(f, decision="keep", investigations=()):
 
 
 @pytest.mark.parametrize("line", [3, None])
-def test_immutable_head_not_dirty_worktree(repo, line):
+@pytest.mark.parametrize("path", ["policy.py", "./policy.py", "././policy.py"])
+def test_immutable_head_not_dirty_worktree(repo, line, path):
     root, head = repo
-    f = finding(line=line)
+    f = finding(path, line)
     (root / "policy.py").write_text("SECRET DIRTY WORKTREE CONTENT")
     e = j._judge_evidence([f], head)
     assert e["tree"] == git(root, "rev-parse", head + "^{tree}")
     assert "null intentionally allowed" in e["locations"][loc(f)]["text"]
     assert "SECRET" not in json.dumps(e)
     assert e["locations"][loc(f)]["blob"] == git(root, "rev-parse", head + ":policy.py")
+    assert e["locations"][loc(f)]["file"] == path
     assert e["diff"]["status"] == "available"
     if line is None:
         row = e["locations"][loc(f)]
@@ -107,8 +157,14 @@ def test_immutable_head_not_dirty_worktree(repo, line):
     "path,line,status",
     [
         ("../secret", 1, "invalid_location"),
+        ("./../secret", 1, "invalid_location"),
+        ("nested/../policy.py", 1, "invalid_location"),
         ("/etc/passwd", 1, "invalid_location"),
         ("link.py", 1, "absent_or_nonregular_at_head"),
+        ("./link.py", 1, "absent_or_nonregular_at_head"),
+        ("./.env", 1, "sensitive_path_refused"),
+        ("./.aws/credentials", 1, "sensitive_path_refused"),
+        ("./private.pem", 1, "sensitive_path_refused"),
         ("missing.py", 1, "absent_or_nonregular_at_head"),
         ("policy.py", 999, "line_out_of_range"),
         ("policy.py", False, "invalid_location"),
@@ -170,6 +226,31 @@ def test_source_justified_all_drop_is_valid(repo):
     )
     result = j._validate_judge_decisions(a, [f], j._judge_evidence([f], head), [])
     assert result["complete"] and result["surviving"] == []
+
+
+def test_equivalent_paths_preserve_original_identities_and_require_investigation(repo):
+    _, head = repo
+    f = finding()
+    same = finding("./policy.py")
+    other = finding("./policy.py", source="independent-reviewer")
+    assert f.comparison_key() == same.comparison_key()
+    assert f.finding_id != same.finding_id and loc(f) != loc(same)
+    assert same.to_dict()["file"] == "./policy.py"
+    assert j._comparison_location(finding("nested/../policy.py")) != j._comparison_location(f)
+    investigations = j._investigations([f, other], [])
+    assert len(investigations) == 1
+    assert set(investigations[0]["finding_ids"]) == {f.finding_id, other.finding_id}
+    evidence = j._judge_evidence([f, other], head)
+    result = answer(f)
+    result["decisions"].extend(answer(other)["decisions"])
+    with pytest.raises(ValueError, match="disagreement resolution missing"):
+        j._validate_judge_decisions(result, [f, other], evidence, investigations)
+    result["investigations"] = [{"id": investigations[0]["id"], "status": "resolved",
+                                  "reason": "Both original locations verified", "evidence_ids": [loc(f)]}]
+    assert not j._validate_judge_decisions(result, [f, other], evidence, investigations)["complete"]
+    result["investigations"][0]["evidence_ids"].append(loc(other))
+    verified = j._validate_judge_decisions(result, [f, other], evidence, investigations)
+    assert verified["complete"] and verified["surviving"] == [f.to_dict(), other.to_dict()]
 
 
 @pytest.mark.parametrize(
@@ -425,11 +506,13 @@ def test_tracked_credential_paths_are_refused_before_blob_read(repo, monkeypatch
 
 
 @pytest.mark.parametrize("field", ["tracked_source", "candidate_prose"])
+@pytest.mark.parametrize("kind", ("assignment", *GENERIC_MATERIAL_KINDS))
 def test_sensitive_strings_refuse_dispatch_before_json_escaping(
-    repo, monkeypatch, field
+    repo, monkeypatch, field, kind
 ):
     root, head = repo
-    sensitive = 'PASSWORD = "offline-fixture-value"'
+    sensitive = (_fixture_text('@CREDENTIAL@ = "offline-fixture-value"')
+                 if kind == "assignment" else _generic_material(kind))
     f = finding()
     if field == "tracked_source":
         (root / "policy.py").write_text(sensitive + "\n")
@@ -456,6 +539,108 @@ def test_sensitive_strings_refuse_dispatch_before_json_escaping(
     assert judge.invoke_judge_agent([f]) is None
 
 
+@pytest.mark.parametrize("kind", GENERIC_MATERIAL_KINDS)
+def test_generic_material_is_refused_in_raw_and_proved_source(kind):
+    sensitive = _generic_material(kind)
+    source = _fixture_text('@auth@ = os.getenv("TOKEN"); ') + sensitive
+    for value in (sensitive, j._source_text(source, "source.py"),
+                  j._numbered_source(j._source_text(source, "source.py")),
+                  "+" + sensitive, "-" + sensitive,
+                  {"nested": [sensitive]}, {sensitive: "ordinary"}):
+        with pytest.raises(ValueError, match="sensitive review material"):
+            j._require_safe_packet(value)
+
+
+@pytest.mark.parametrize("name", ["credential", "authorization", "SERVICE_KEY", "__SERVICE_JWT", "SERVICE_DSN"])
+@pytest.mark.parametrize("value", ["offline-fixture-value", 12345678, 12.345678])
+def test_packet_credential_fields_have_no_json_producer_exemption(name, value):
+    with pytest.raises(ValueError, match="sensitive review material"):
+        j._require_safe_packet({"nested": [{name: value}]})
+    for short in ("short", 1234567):
+        j._require_safe_packet({name: short})
+    j._require_safe_packet({"ordinary_field": "offline-fixture-value"})
+
+
+@pytest.mark.parametrize("kind", GENERIC_MATERIAL_KINDS)
+def test_generic_material_outside_diff_never_reaches_actual_request(repo, monkeypatch, kind):
+    root, _ = repo
+    (root / "link.py").unlink()
+    sensitive = _generic_material(kind)
+    (root / "context.md").write_text(sensitive)
+    git(root, "add", "-A")
+    git(root, "commit", "-m", "Offline immutable context fixture")
+    head = git(root, "rev-parse", "HEAD")
+    monkeypatch.setenv("PR_BASE_SHA", head)  # Context is outside the empty diff.
+    f = finding()
+    evidence = j._judge_evidence([f], head)
+    assert evidence["locations"][loc(f)]["status"] == "available"
+    assert evidence["repository_context"]["status"] == "unavailable_or_over_budget"
+    assert sensitive not in json.dumps(evidence)
+    monkeypatch.setattr(j, "_endpoint", lambda **kw:
+                        ("offline", "https://example.invalid/v1/messages", False))
+    sent = []
+
+    def transport(request, **kwargs):
+        body = json.loads(request.data)
+        assert sensitive not in request.data.decode()
+        sent.append(body)
+        return Response(json.dumps({"content": [{"type": "text", "text": json.dumps(answer(f))}],
+                                    "stop_reason": "end_turn"}).encode())
+
+    monkeypatch.setattr(j, "_urlopen_https", transport)
+    result = j.Judge("unused", 1, head).invoke_judge_agent([f])
+    assert sent and result is not None
+
+
+@pytest.mark.parametrize("name", ["SERVICE_KEY", "__SERVICE_JWT", "SERVICE_DSN", "1credential", "api-key"])
+@pytest.mark.parametrize("value", ["12345678", "'12345678'", '"12345678"'])
+def test_assignment_suffixes_and_quoted_keys_refuse_exact_eight_char_values(name, value):
+    for source in (f"{name} = {value}", f'"{name}": {value}',
+                   f'ordinary = "prefix; {name} = {value}"'):
+        with pytest.raises(ValueError, match="sensitive review material"):
+            j._require_safe_packet(source)
+
+
+def test_long_names_preserve_reference_proof_without_hiding_later_assignments():
+    name = "_" + "A" * 32000 + "_DSN"
+    reference = f'{name} = os.getenv("OFFLINE_REFERENCE")'
+    proved = j._source_text(reference, "source.py")
+    j._require_safe_packet(proved)
+    with pytest.raises(ValueError, match="sensitive review material"):
+        j._require_safe_packet(j._source_text(reference + "; " + _generic_material("field:credential"), "source.py"))
+
+
+def test_large_non_url_and_hyphenated_identifiers_remain_safe():
+    # One maximal token must not restart a greedy scan at every character or
+    # hyphen. Exercise the real source-size ceiling without a timing waiver.
+    j._require_safe_packet("offline-scheme+" * 140000)
+    j._require_safe_packet("ordinary-field-" * 130000 + " = ordinary")
+
+
+@pytest.mark.parametrize("prefix", ["", "+", "-", "'", '"'])
+def test_maximal_token_scanners_preserve_assignment_and_uri_boundaries(prefix):
+    value = "offline" + "-material"
+    assert j._credential_assignment(prefix + "SERVICE_DSN' := " + value)
+    assert not j._credential_assignment(prefix + "SERVICE_DSN_extra := " + value)
+    assert j._uri_userinfo(prefix + "custom+driver://offline" + "@example.invalid")
+    assert not j._uri_userinfo(prefix + "custom+driver://example.invalid/path")
+
+
+def test_maximal_token_scanners_reject_long_sensitive_tokens_without_restart():
+    field = "ordinary-" * 150000 + "DSN"
+    assert j._credential_assignment(field + " = " + "offline-material")
+    scheme = "offline+" * 180000
+    assert j._uri_userinfo(scheme + "://offline" + "@example.invalid")
+
+
+@pytest.mark.parametrize("scheme", ["\u0130", "\u0131", "\u017f", "\u212a"])
+def test_uri_scheme_scanner_preserves_unicode_case_insensitive_matches(scheme):
+    source = scheme + "://offline" + "@example.invalid"
+    assert j._uri_userinfo(source)
+    with pytest.raises(ValueError, match="sensitive review material"):
+        j._require_safe_packet(source)
+
+
 @pytest.mark.parametrize("unavailable", ["missing", "sensitive", "budget"])
 @pytest.mark.parametrize("severity", ["ERROR", "WARNING"])
 @pytest.mark.parametrize("acknowledged", [True, False])
@@ -463,7 +648,7 @@ def test_mixed_evidence_keeps_verified_findings_without_clearing_old_blocks(
     repo, monkeypatch, unavailable, severity, acknowledged
 ):
     root, head = repo
-    private_literal = 'PASSWORD = "offline-fixture-value"'
+    private_literal = _fixture_text('@CREDENTIAL@ = "offline-fixture-value"')
     path, line = "missing.py", 1
     if unavailable != "missing":
         path = "unavailable.py"
@@ -613,21 +798,32 @@ def test_non_utf8_git_source_is_unavailable_without_lossy_replacement(repo, monk
     'os.getenv("GITHUB_TOKEN")', 'os.environ.get("GITHUB_TOKEN")',
     'os.environ["GITHUB_TOKEN"]', 'get_password()',
     'os.getenv("GITHUB_TOKEN") or os.getenv("GH_TOKEN")',
+    'os.getenv("GITHUB_TOKEN", "")', 'os.getenv("GITHUB_TOKEN", None)',
+    'os.environ.get("GITHUB_TOKEN", "")', 'os.environ.get("GITHUB_TOKEN", None)',
+    'os.getenv("GITHUB_TOKEN", default="")', 'os.getenv("GITHUB_TOKEN", default=None)',
+    'os.environ.get("GITHUB_TOKEN", default="")', 'os.environ.get("GITHUB_TOKEN", default=None)',
 ])
 def test_reference_only_git_source_survives_numbering_and_real_request(repo, monkeypatch, rhs):
+    source = _fixture_text(f'π = 1; @auth@ = {rhs}\n')
+    _assert_reference_only_git_request(repo, monkeypatch, source)
+
+
+def _assert_reference_only_git_request(repo, monkeypatch, source, path="policy.py"):
     root, _ = repo
-    source = f'π = 1; token = {rhs}\n'
     (root / "policy.py").write_text(source)
     (root / "link.py").unlink()
     git(root, "add", "-A")
     git(root, "commit", "-m", "Reference-only immutable source")
     head = git(root, "rev-parse", "HEAD")
-    f = finding(line=None)
+    f = finding(path, line=None)
     evidence = j._judge_evidence([f], head)
     row = evidence["locations"][loc(f)]
     assert row["status"] == "available" and row["whole_file"]
+    assert row["file"] == path
     assert row["content_sha256"] == hashlib.sha256(source.encode()).hexdigest()
-    assert row["text"] == "1: " + source.rstrip("\n")
+    assert row["text"] == "\n".join(
+        f"{number}: {line}" for number, line in enumerate(source.removesuffix("\n").split("\n"), 1)
+    )
     assert evidence["repository_context"]["status"] == "complete_tracked_head"
     j._require_safe_packet(evidence)  # Proof survives both numbered source projections.
     # Raw diff statements have no source-span proof: no excerpts or false
@@ -649,21 +845,36 @@ def test_reference_only_git_source_survives_numbering_and_real_request(repo, mon
     assert len(sent) == 1 and result["complete"] and result["surviving"] == [f.to_dict()]
 
 
+@pytest.mark.parametrize("path", ["./policy.py", "././policy.py"])
+def test_prefixed_producer_location_reaches_real_judge(repo, monkeypatch, path):
+    source = _fixture_text('@auth@ = os.getenv("OFFLINE_REFERENCE", "")\n')
+    _assert_reference_only_git_request(repo, monkeypatch, source, path)
+
+
 @pytest.mark.parametrize("source", [
-    'password = "offline-fixture-value"', 'password = offline_fixture_value',
-    'password = 1234567890', 'password = os.getenv("PASSWORD", "literal-default")',
-    'password = os.getenv("PASSWORD", default="literal-default")',
-    'password = get_password("literal-value")', 'password = unknown_getter()',
-    'password = os.getenv("PASSWORD") + "literal-value"',
-    'password = os.getenv("PASSWORD") if condition else get_password()',
-    'password = os.getenv("PASSWORD") or "literal-value"',
-    'password = os.getenv("PASSWORD") + f"{other}"',
-    'password = os.getenv(',
-    'token = os.getenv("TOKEN"); password = offline_fixture_value',
-    'token = os.getenv("TOKEN")  # password = offline_fixture_value',
-    'doc = "password = get_password()"',
-    '"""password = get_password()"""',
-    'π = 1; password = offline_fixture_value',
+    _fixture_text('@credential@ = "offline-fixture-value"'), _fixture_text('@credential@ = offline_fixture_value'),
+    _fixture_text('@credential@ = 1234567890'), _fixture_text('@credential@ = os.getenv("@CREDENTIAL@", "literal-default")'),
+    _fixture_text('@credential@ = os.getenv("@CREDENTIAL@", default="literal-default")'),
+    _fixture_text('@credential@ = os.environ.get("@CREDENTIAL@", "literal-default")'),
+    _fixture_text('@credential@ = os.environ.get("@CREDENTIAL@", default="literal-default")'),
+    _fixture_text('@credential@ = os.getenv("@CREDENTIAL@", default=other_value)'),
+    _fixture_text('@credential@ = os.getenv("@CREDENTIAL@", False)'),
+    _fixture_text('@credential@ = os.getenv("@CREDENTIAL@", b"")'),
+    _fixture_text('@credential@ = os.getenv("@CREDENTIAL@", "", default=None)'),
+    _fixture_text('@credential@ = os.getenv("@CREDENTIAL@", "", None)'),
+    _fixture_text('@credential@ = os.getenv("@CREDENTIAL@", **options)'),
+    _fixture_text('@credential@ = os.getenv("@CREDENTIAL@", *options)'),
+    _fixture_text('@credential@ = get_@credential@("literal-value")'), _fixture_text('@credential@ = unknown_getter()'),
+    _fixture_text('@credential@ = os.getenv("@CREDENTIAL@") + "literal-value"'),
+    _fixture_text('@credential@ = os.getenv("@CREDENTIAL@") if condition else get_@credential@()'),
+    _fixture_text('@credential@ = os.getenv("@CREDENTIAL@") or "literal-value"'),
+    _fixture_text('@credential@ = os.getenv("@CREDENTIAL@") + f"{other}"'),
+    _fixture_text('@credential@ = os.getenv('),
+    _fixture_text('@auth@ = os.getenv("TOKEN"); @credential@ = offline_fixture_value'),
+    _fixture_text('@auth@ = os.getenv("TOKEN")  # @credential@ = offline_fixture_value'),
+    _fixture_text('doc = "@credential@ = get_@credential@()"'),
+    _fixture_text('"""@credential@ = get_@credential@()"""'),
+    _fixture_text('π = 1; @credential@ = offline_fixture_value'),
 ])
 def test_reference_proof_does_not_exempt_literals_or_unproved_text(source):
     for value in (j._source_text(source, "source.py"),
@@ -672,13 +883,30 @@ def test_reference_proof_does_not_exempt_literals_or_unproved_text(source):
             j._require_safe_packet({"evidence": value})
 
 
+@pytest.mark.parametrize("rhs", ['os.getenv("OFFLINE_REFERENCE", "")',
+                                  'os.environ.get("OFFLINE_REFERENCE", default=None)'])
+@pytest.mark.parametrize("suffix", [
+    _fixture_text('; @credential@ = "offline-fixture-value"'),
+    _fixture_text('  # @credential@ = offline_fixture_value'),
+    '  # ' + _generic_material("bearer"),
+    '  # catalog fixture: ' + 'ghp_' + 'a' * 36,
+])
+def test_empty_default_proof_does_not_cover_other_sensitive_material(rhs, suffix):
+    source = _fixture_text(f'@auth@ = {rhs}') + suffix
+    proved = j._source_text(source, "source.py")
+    assert proved.reference_spans
+    for value in (proved, j._numbered_source(proved)):
+        with pytest.raises(ValueError, match="sensitive review material"):
+            j._require_safe_packet(value)
+
+
 def test_reference_proof_never_exempts_catalog_or_other_packet_fields():
-    source = 'token = os.getenv("GITHUB_TOKEN")'
+    source = _fixture_text('@auth@ = os.getenv("GITHUB_TOKEN")')
     proved = j._source_text(source, "source.py")
     j._require_safe_packet(proved)
     # Shape-only fixture, not an actual credential. The env name is a valid
     # Python identifier but the unchanged catalog must still reject it.
-    shaped = 'token = os.getenv("ghp_' + "a" * 36 + '")'
+    shaped = _fixture_text('@auth@ = os.getenv("ghp_') + "a" * 36 + '")'
     with pytest.raises(ValueError, match="sensitive review material"):
         j._require_safe_packet(j._source_text(shaped, "source.py"))
     for value in (source, j._source_text(source, "source.md"),
@@ -696,14 +924,28 @@ def test_reference_proof_cannot_bypass_missing_or_malformed_catalog(tmp_path, mo
         path.parent.mkdir(parents=True)
         path.write_text(catalog)
     with pytest.raises(ValueError, match="catalog"):
-        j._require_safe_packet(j._source_text('token = os.getenv("TOKEN")', "source.py"))
+        j._require_safe_packet(j._source_text(_fixture_text('@auth@ = os.getenv("TOKEN")'), "source.py"))
 
 
 def test_actual_judge_environment_bindings_have_verified_source_proof():
     source = (ROOT / "scripts/run-judge.py").read_text()
     proved = j._source_text(source, "scripts/run-judge.py")
-    assert proved == source and "self.token = os.getenv" in source
+    assert proved == source and _fixture_text("self.@auth@ = os.getenv") in source
     j._require_safe_packet(proved)
+
+
+def test_shipped_cost_logger_empty_default_binding_has_source_proof(repo, monkeypatch):
+    path = "scripts/session-cost-logger.py"
+    source = (ROOT / path).read_text()
+    function = next(node for node in ast.parse(source).body
+                    if isinstance(node, ast.FunctionDef) and node.name == "_langfuse_from_doppler")
+    context = ast.get_source_segment(source, function)
+    assert _fixture_text('@auth@ = os.environ.get("DOPPLER_TOKEN_PRD", "")') in context
+    proved = j._source_text(context, path)
+    assert proved == context and proved.reference_spans
+    j._require_safe_packet(proved)
+    j._require_safe_packet(j._numbered_source(proved))
+    _assert_reference_only_git_request(repo, monkeypatch, context + "\n")
 
 
 @pytest.mark.parametrize("condition", ["api_key", "not api_key", "ready and not self.token", "left == password"])
@@ -717,18 +959,18 @@ def test_control_flow_references_are_not_credential_assignments(condition, keywo
 
 
 @pytest.mark.parametrize("source", [
-    'if token: password = offline_fixture_value',
-    'if token:\n    password = offline_fixture_value',
-    'while not token:\n    password = "offline-fixture-value"',
-    'if (token := reference):\n    password = offline_fixture_value',
-    'if (password := offline_fixture_value):\n    logger.error("unavailable")',
-    'if api_key:\n    (password := "offline-fixture-value")',
-    'if api_key:\n    (password := offline_fixture_value)',
-    'while api_key:\n    (password := "offline-fixture-value")',
-    '(password := "offline-fixture-value")',
-    '(password := offline_fixture_value)',
-    'if token:\n    # password = offline_fixture_value\n    pass',
-    '"""if token: password = offline_fixture_value"""',
+    _fixture_text('if @auth@: @credential@ = offline_fixture_value'),
+    _fixture_text('if @auth@:\n    @credential@ = offline_fixture_value'),
+    _fixture_text('while not @auth@:\n    @credential@ = "offline-fixture-value"'),
+    _fixture_text('if (@auth@ := reference):\n    @credential@ = offline_fixture_value'),
+    _fixture_text('if (@credential@ := offline_fixture_value):\n    logger.error("unavailable")'),
+    _fixture_text('if api_key:\n    (@credential@ := "offline-fixture-value")'),
+    _fixture_text('if api_key:\n    (@credential@ := offline_fixture_value)'),
+    _fixture_text('while api_key:\n    (@credential@ := "offline-fixture-value")'),
+    _fixture_text('(@credential@ := "offline-fixture-value")'),
+    _fixture_text('(@credential@ := offline_fixture_value)'),
+    _fixture_text('if @auth@:\n    # @credential@ = offline_fixture_value\n    pass'),
+    _fixture_text('"""if @auth@: @credential@ = offline_fixture_value"""'),
 ])
 def test_control_flow_proof_does_not_mask_body_walrus_or_prose(source):
     proved = j._source_text(source, "source.py")
@@ -738,14 +980,14 @@ def test_control_flow_proof_does_not_mask_body_walrus_or_prose(source):
 
 
 def test_walrus_is_not_recognized_as_a_safe_reference():
-    source = 'if (token := os.getenv("TOKEN")):\n    pass\n'
+    source = _fixture_text('if (@auth@ := os.getenv("TOKEN")):\n    pass\n')
     proved = j._source_text(source, "source.py")
     assert not proved.reference_spans
 
 
 def test_nfkc_identifier_cannot_mask_a_preceding_literal_or_packet_field():
-    prefix = "password = offline_fixture_value; "
-    source = prefix + "\ufb00" * len(prefix) + 'token = os.getenv("TOKEN")\n'
+    prefix = _fixture_text("@credential@ = offline_fixture_value; ")
+    source = prefix + "\ufb00" * len(prefix) + _fixture_text('@auth@ = os.getenv("TOKEN")\n')
     proved = j._source_text(source, "source.py")
     assert proved == source and not proved.reference_spans
     for value in (proved, j._numbered_source(proved), {"evidence": j._numbered_source(proved)}):
@@ -754,20 +996,20 @@ def test_nfkc_identifier_cannot_mask_a_preceding_literal_or_packet_field():
 
 
 def test_deep_unknown_reference_falls_back_strictly_without_recursion_error():
-    source = "password = root" + ".attribute" * 1200 + "()\n"
+    source = _fixture_text("@credential@ = root") + ".attribute" * 1200 + "()\n"
     proved = j._source_text(source, "source.py")
     with pytest.raises(ValueError, match="sensitive review material"):
         j._require_safe_packet(proved)
 
 
 def test_many_unicode_references_preserve_exact_projection_and_other_secrets():
-    source = "π = 1; " + "; ".join(f'token_{n}_token = os.getenv("TOKEN_{n}")' for n in range(800)) + "\n"
+    source = "π = 1; " + "; ".join(_fixture_text(f'@auth@_{n}_@auth@ = os.getenv("TOKEN_{n}")') for n in range(800)) + "\n"
     proved = j._source_text(source, "source.py")
     j._require_safe_packet(proved)
     numbered = j._numbered_source(proved)
     assert numbered == "1: " + source.rstrip("\n")
     j._require_safe_packet(numbered)
-    mixed = j._source_text(source + "password = offline_fixture_value\n", "source.py")
+    mixed = j._source_text(source + _fixture_text("@credential@ = offline_fixture_value\n"), "source.py")
     with pytest.raises(ValueError, match="sensitive review material"):
         j._require_safe_packet(j._numbered_source(mixed))
 
@@ -806,13 +1048,17 @@ def test_catalog_works_in_normal_rendered_and_plugin_layout(
         monkeypatch.setattr(j, "__file__", str(rendered / "scripts/run-judge.py"))
         j._require_safe_packet({"safe": "ordinary source text"})
         with pytest.raises(ValueError):
-            j._require_safe_packet({"candidate": 'PASSWORD = "offline-fixture-value"'})
+            j._require_safe_packet({"candidate": _fixture_text('@CREDENTIAL@ = "offline-fixture-value"')})
 
 
-def test_mixed_specificity_conflict_cannot_publish_survivor(repo, monkeypatch):
+@pytest.mark.parametrize("good_path,bad_path", [
+    ("policy.py", "policy.py"), ("policy.py", "./policy.py"),
+    ("./policy.py", "policy.py"), ("././policy.py", "./policy.py"),
+])
+def test_mixed_specificity_conflict_cannot_publish_survivor(repo, monkeypatch, good_path, bad_path):
     root, head = repo
-    f = finding()
-    bad = finding(source="codex-adversarial", message="Opposing original claim")
+    f = finding(good_path)
+    bad = finding(bad_path, source="codex-adversarial", message="Opposing original claim")
     bad.fix = ""
     judge = j.Judge(str(root), 1, head)
     judge.judge_log_dir = root / "logs"
@@ -845,6 +1091,7 @@ def test_mixed_specificity_conflict_cannot_publish_survivor(repo, monkeypatch):
     )
     judge.run()
     assert judge._adjudication_incomplete and not posted and advisories
+    assert judge._specificity_conflicted_locations == {("policy.py", f.line)}
     log = next((root / "logs").glob("*.jsonl")).read_text()
     assert bad.finding_id in log and "MUST_INVESTIGATE" in log
 
@@ -988,8 +1235,9 @@ def test_sensitive_old_path_rename_refused_before_content(repo, monkeypatch):
 
 
 @pytest.mark.parametrize("line", [2, None])
+@pytest.mark.parametrize("path", ["test_policy.py", "./test_policy.py", "././test_policy.py"])
 def test_deleted_file_is_bound_to_real_base_and_requires_diff_citation(
-    repo, monkeypatch, line
+    repo, monkeypatch, line, path
 ):
     root, base = safe_subject(repo)
     (root / "test_policy.py").unlink()
@@ -997,10 +1245,11 @@ def test_deleted_file_is_bound_to_real_base_and_requires_diff_citation(
     git(root, "commit", "-m", "Delete test file")
     head = git(root, "rev-parse", "HEAD")
     monkeypatch.setenv("PR_BASE_SHA", base)
-    f = finding("test_policy.py", line)
+    f = finding(path, line)
     e = j._judge_evidence([f], head)
     row = e["locations"][loc(f)]
     assert row["status"] == "available" and row["source_state"] == "deleted_at_head"
+    assert row["file"] == path
     assert row["revision"] == base and row["head"] == head
     assert row["blob"] == git(root, "rev-parse", base + ":test_policy.py")
     assert "-    assert allowed('tenant-b') is False" in e["diff"]["text"]
@@ -1008,7 +1257,7 @@ def test_deleted_file_is_bound_to_real_base_and_requires_diff_citation(
     assert not j._validate_judge_decisions(a, [f], e, [])["complete"]
     a["decisions"][0]["evidence_ids"].append(e["diff"]["id"])
     assert j._validate_judge_decisions(a, [f], e, [])["complete"]
-    bogus = finding("test_policy.py", 999)
+    bogus = finding(path, 999)
     assert (
         j._judge_evidence([bogus], head)["locations"][loc(bogus)]["status"]
         != "available"
@@ -1132,3 +1381,102 @@ def test_direct_route_does_not_receive_proxy_correlation(repo, monkeypatch):
     monkeypatch.setattr(j, "_urlopen_https", transport)
     assert j.Judge("unused", 1, head).invoke_judge_agent([finding()])["complete"]
     assert len(sent) == 1 and "metadata" not in sent[0]
+
+
+@pytest.mark.parametrize("separator", ["\u2028", "\u2029", "\x85"])
+@pytest.mark.parametrize("ending", ["\n", "\r\n"])
+def test_unicode_string_separators_preserve_physical_git_locations(repo, separator, ending, monkeypatch):
+    root, _ = repo
+    source = f'value = "before{separator}after"{ending}result = 1{ending}'
+    compile(source, 'policy.py', 'exec')
+    (root / 'policy.py').write_bytes(source.encode())
+    git(root, 'add', 'policy.py')
+    git(root, 'commit', '-qm', 'physical source lines')
+    head = git(root, 'rev-parse', 'HEAD')
+    valid, invalid = finding(line=2), finding(line=3)
+    packet = j._judge_evidence([valid, invalid], head)
+    row = packet['locations'][loc(valid)]
+    assert row['status'] == 'available' and row['total_lines'] == 2
+    assert row['text'] == f'1: value = "before{separator}after"\n2: result = 1'
+    assert packet['locations'][loc(invalid)]['status'] == 'line_out_of_range'
+    # The deletion fallback must not invent an old-source third line either.
+    monkeypatch.setenv('PR_BASE_SHA', head)
+    git(root, 'rm', 'policy.py')
+    git(root, 'commit', '-qm', 'delete physical source')
+    deleted = j._judge_evidence([invalid], git(root, 'rev-parse', 'HEAD'))
+    assert deleted['locations'][loc(invalid)]['status'] != 'available'
+
+
+@pytest.mark.parametrize("final_style", ['fenced', 'bare'])
+def test_judge_uses_final_keep_verdict_instead_of_earlier_drop_example(repo, monkeypatch, final_style):
+    _, head = repo
+    candidate = finding()
+    example = '```json\n' + json.dumps(answer(candidate, 'drop')) + '\n```\n'
+    final = json.dumps(answer(candidate, 'keep'))
+    if final_style == 'fenced':
+        final = '```json\n' + final + '\n```'
+    monkeypatch.setattr(j, '_endpoint', lambda **kw: ('offline', 'https://example.invalid/v1/messages', True))
+    monkeypatch.setattr(j, '_urlopen_https', lambda *a, **kw: Response(json.dumps({
+        'content': [{'type': 'text', 'text': example}, {'type': 'text', 'text': final}],
+        'stop_reason': 'end_turn'}).encode()))
+    result = j.Judge('unused', 1, head).invoke_judge_agent([candidate])
+    assert result['complete'] and result['surviving'] == [candidate.to_dict()]
+
+
+@pytest.mark.parametrize("tail", [
+    'Final: {"version":2,"decisions":[',
+    '```json\n{"version":2,"decisions":[',
+    '{"wrapper":{"version":2,"decisions":[]},"unfinished":"',
+    '[{"version":2,"decisions":[]}, {"unfinished":"',
+    '{"metadata":"no final adjudication"}',
+])
+def test_judge_never_salvages_an_earlier_drop_when_final_verdict_is_invalid(repo, monkeypatch, tail):
+    _, head = repo
+    candidate = finding()
+    text = '```json\n' + json.dumps(answer(candidate, 'drop')) + '\n```\n' + tail
+    monkeypatch.setattr(j, '_endpoint', lambda **kw: ('offline', 'https://example.invalid/v1/messages', True))
+    monkeypatch.setattr(j, '_urlopen_https', lambda *a, **kw: Response(json.dumps({
+        'content': [{'type': 'text', 'text': text}], 'stop_reason': 'end_turn'}).encode()))
+    assert j.Judge('unused', 1, head).invoke_judge_agent([candidate]) is None
+
+
+@pytest.mark.parametrize("decision", ["keep", "drop"])
+@pytest.mark.parametrize("source_state", ["head", "deleted"])
+def test_unsupported_dispositions_are_not_final_shadow_labels(repo, monkeypatch, decision, source_state):
+    root, base = safe_subject(repo)
+    path = "policy.py"
+    head = base
+    if source_state == "deleted":
+        path = "test_policy.py"
+        (root / path).unlink()
+        git(root, "add", "-A")
+        git(root, "commit", "-m", "Delete source for unsupported disposition")
+        head = git(root, "rev-parse", "HEAD")
+        monkeypatch.setenv("PR_BASE_SHA", base)
+    f = finding(path, 2)
+    verdict = answer(f, decision)
+    verdict["decisions"][0]["evidence_ids"] = [loc(f)] if source_state == "deleted" else []
+    judge = j.Judge(str(root), 1, head)
+    judge.judge_log_dir = root / "logs"
+    monkeypatch.setattr(j, "_endpoint", lambda **kw:
+                        ("offline", "https://example.invalid/v1/messages", False))
+    monkeypatch.setattr(j, "_urlopen_https", lambda *a, **kw: Response(json.dumps({
+        "content": [{"type": "text", "text": json.dumps(verdict)}],
+        "stop_reason": "end_turn"}).encode()))
+    result = judge.invoke_judge_agent([f])
+    assert not result["complete"] and result["surviving"] == []
+    assert result["dropped_count"] == 0
+    assert result["decisions"][0]["decision"] == "investigate"
+    assert result["decisions"][0]["proposed_decision"] == decision
+    monkeypatch.setattr(judge, "load_candidates", lambda: [f])
+    monkeypatch.setattr(judge, "invoke_judge_agent", lambda _: result)
+    monkeypatch.setattr(judge, "post_review_to_github", lambda *a: pytest.fail("unsupported post"))
+    monkeypatch.setattr(judge, "_post_no_findings_comment", lambda: pytest.fail("false clean"))
+    monkeypatch.setattr(judge, "_post_advisory_warning", lambda *a: False)
+    assert judge.run() == 0 and judge._adjudication_incomplete
+    rows = [json.loads(line) for line in (judge.judge_log_dir / f"1-{head[:8]}.jsonl").read_text().splitlines()]
+    assert [row["decision"] for row in rows] == ["investigate"]
+    shadow_spec = importlib.util.spec_from_file_location("unsupported_shadow_labels", ROOT / "scripts/jev_judge_shadow.py")
+    shadow = importlib.util.module_from_spec(shadow_spec)
+    shadow_spec.loader.exec_module(shadow)
+    assert shadow.load_decisions(judge.judge_log_dir, 1, head) == {}

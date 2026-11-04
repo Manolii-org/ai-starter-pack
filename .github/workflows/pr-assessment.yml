@@ -84,7 +84,8 @@ jobs:
             echo "::error::Assessment state root must be a real directory" >&2
             exit 1
           fi
-          git fetch --depth=1 origin "$BASE_SHA"
+          # Checkout already fetched full history without persisted credentials.
+          git cat-file -e "${BASE_SHA}^{commit}" || { echo "::error::Trusted base object unavailable"; exit 1; }
           # rm first: `git checkout BASE -- dir` overwrites base content but
           # leaves PR-added files (e.g. scripts/json.py shadowing stdlib) live
           # in lanes that carry secrets.
@@ -125,6 +126,7 @@ jobs:
           LITELLM_MASTER_KEY: ${{ secrets.LITELLM_MASTER_KEY || secrets.LLM_API_KEY }}
           LLM_API_KEY: ${{ secrets.LLM_API_KEY || secrets.LITELLM_MASTER_KEY }}
           ANTHROPIC_BASE_URL: ${{ vars.LITELLM_PROXY_URL || vars.ANTHROPIC_BASE_URL }}
+          ANTHROPIC_DIRECT_BASE_URL: ${{ vars.ANTHROPIC_DIRECT_BASE_URL }}
           CLIENT_AI_POLICY: ${{ vars.CLIENT_AI_POLICY }}
           # CLIENT_AI_POLICY routes the classifier Anthropic-direct too — the
           # proxy credential cannot authenticate api.anthropic.com.
@@ -380,6 +382,8 @@ jobs:
           path: .ai/sast-findings.json
 
   specialists:
+    outputs:
+      assessment_attempt: ${{ github.run_attempt }}
     name: Specialist Skills
     runs-on: >-
       ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
@@ -416,7 +420,8 @@ jobs:
             echo "::error::Assessment state root must be a real directory" >&2
             exit 1
           fi
-          git fetch --depth=1 origin "$BASE_SHA"
+          # Checkout already fetched full history without persisted credentials.
+          git cat-file -e "${BASE_SHA}^{commit}" || { echo "::error::Trusted base object unavailable"; exit 1; }
           # rm first: `git checkout BASE -- dir` overwrites base content but
           # leaves PR-added files (e.g. scripts/json.py shadowing stdlib) live
           # in lanes that carry secrets.
@@ -458,6 +463,7 @@ jobs:
           LITELLM_MASTER_KEY: ${{ secrets.LITELLM_MASTER_KEY || secrets.LLM_API_KEY }}
           LLM_API_KEY: ${{ secrets.LLM_API_KEY || secrets.LITELLM_MASTER_KEY }}
           ANTHROPIC_BASE_URL: ${{ vars.LITELLM_PROXY_URL || vars.ANTHROPIC_BASE_URL }}
+          ANTHROPIC_DIRECT_BASE_URL: ${{ vars.ANTHROPIC_DIRECT_BASE_URL }}
           # first_party specialist skills run Anthropic-direct; without this
           # key they skip-with-warning under proxy mode.
           ANTHROPIC_DIRECT_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -480,6 +486,8 @@ jobs:
           path: .ai/candidates/
 
   broad-agents:
+    outputs:
+      assessment_attempt: ${{ github.run_attempt }}
     name: Broad Agents
     runs-on: >-
       ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
@@ -511,7 +519,8 @@ jobs:
             echo "::error::Assessment state root must be a real directory" >&2
             exit 1
           fi
-          git fetch --depth=1 origin "$BASE_SHA"
+          # Checkout already fetched full history without persisted credentials.
+          git cat-file -e "${BASE_SHA}^{commit}" || { echo "::error::Trusted base object unavailable"; exit 1; }
           # rm first: `git checkout BASE -- dir` overwrites base content but
           # leaves PR-added files (e.g. scripts/json.py shadowing stdlib) live
           # in lanes that carry secrets.
@@ -550,6 +559,7 @@ jobs:
           LITELLM_MASTER_KEY: ${{ secrets.LITELLM_MASTER_KEY || secrets.LLM_API_KEY }}
           LLM_API_KEY: ${{ secrets.LLM_API_KEY || secrets.LITELLM_MASTER_KEY }}
           ANTHROPIC_BASE_URL: ${{ vars.LITELLM_PROXY_URL || vars.ANTHROPIC_BASE_URL }}
+          ANTHROPIC_DIRECT_BASE_URL: ${{ vars.ANTHROPIC_DIRECT_BASE_URL }}
           # Engagement policy gate: when set, agents declaring
           # client_policy_model escalate Anthropic-direct and need a real key
           # (the transport slot above carries the proxy token in proxy mode).
@@ -602,7 +612,7 @@ jobs:
           fi
           # Do not re-shallow the base after the complete checkout: Judge
           # also needs the common ancestor for its exact base...head diff.
-          git fetch origin "$BASE_SHA"
+          git cat-file -e "${BASE_SHA}^{commit}" || { echo "::error::Trusted base object unavailable"; exit 1; }
           # rm first: `git checkout BASE -- dir` overwrites base content but
           # leaves PR-added files (e.g. scripts/json.py shadowing stdlib) live
           # in lanes that carry secrets.
@@ -655,6 +665,8 @@ jobs:
 
       - name: Run judge
         env:
+          REVIEW_SKILLS_ATTEMPT: ${{ needs.specialists.outputs.assessment_attempt }}
+          REVIEW_AGENTS_ATTEMPT: ${{ needs['broad-agents'].outputs.assessment_attempt }}
           REVIEW_SKILLS: ${{ needs.classify.outputs.invoke_skills }}
           REVIEW_AGENTS: ${{ needs.classify.outputs.invoke_agents }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -664,6 +676,7 @@ jobs:
           LITELLM_MASTER_KEY: ${{ secrets.LITELLM_MASTER_KEY || secrets.LLM_API_KEY }}
           LLM_API_KEY: ${{ secrets.LLM_API_KEY || secrets.LITELLM_MASTER_KEY }}
           ANTHROPIC_BASE_URL: ${{ vars.LITELLM_PROXY_URL || vars.ANTHROPIC_BASE_URL }}
+          ANTHROPIC_DIRECT_BASE_URL: ${{ vars.ANTHROPIC_DIRECT_BASE_URL }}
           # Judge adjudicates first_party candidates Anthropic-direct.
           ANTHROPIC_DIRECT_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           CLIENT_AI_POLICY: ${{ vars.CLIENT_AI_POLICY }}

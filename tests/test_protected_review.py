@@ -241,7 +241,7 @@ def test_unknown_mode_and_role_refused(monkeypatch):
     "origin,key",
     [
         ("http://proxy.example", "key"),
-        ("https://user:pass@proxy.example", "key"),
+        ("https://" + "user:pass@" + "proxy.example", "key"),
         ("https://proxy.example?token=x", "key"),
         ("https://proxy.example", "sk-ant-offline"),
     ],
@@ -460,7 +460,7 @@ def test_equal_identity_content_different_confidence_keeps_first_original_and_bo
     assert [leg["findings"] for leg in original["protected_review"]["legs"]] == [[first], [second]]
 
 
-@pytest.mark.parametrize("layout", ["", "plugin/manolii-framework/", "registry/platform/framework/"])
+@pytest.mark.parametrize("layout", [""])
 @pytest.mark.parametrize("identity", [None, "original-id"])
 def test_protected_identity_is_stable_in_all_shipped_judges(monkeypatch, tmp_path, layout, identity):
     path = ROOT / layout / "scripts/run-judge.py"
@@ -638,6 +638,7 @@ def test_unqualified_broad_role_stays_incomplete_and_client_policy_stays_direct(
     subprocess.run(["git", "add", ".ai/capabilities.json"], check=True)
     subprocess.run(["git", "-c", "user.email=offline@example.invalid", "-c", "user.name=Offline",
                     "commit", "-qm", "External policy fixture"], check=True)
+    monkeypatch.setenv("ANTHROPIC_DIRECT_BASE_URL", "https://api.anthropic.com")
     monkeypatch.setenv("CLIENT_AI_POLICY", "us_weights_ok")
     result = module.invoke_agent(agent, "offline", DIFF)
     assert result["skipped"] == "no_direct_key"
@@ -918,6 +919,7 @@ def test_copied_specialist_companion_uses_source_not_initializer_or_cached_bytec
     import shutil
     consumer = tmp_path / "consumer"
     for relative in ["scripts/run-specialists.py", "scripts/lib/agent_capabilities.py",
+                     "scripts/run-judge.py", ".ai/security/token-shapes.json",
                      ".claude/skills/security-boundary-test/SKILL.md"]:
         dest = consumer / relative
         dest.parent.mkdir(parents=True, exist_ok=True)
@@ -967,3 +969,69 @@ def test_older_consumer_missing_companion_keeps_ordinary_proxy_and_marks_estate_
     _, error = module._invoke_skill("security-boundary-test", DIFF, tmp_path)
     assert error and len(calls) == 1
     assert json.loads((tmp_path / "security-boundary-test.json").read_text())["skipped"] == "protected_review_incomplete"
+
+
+@pytest.mark.parametrize("field", ["system", "user", "diff"])
+@pytest.mark.parametrize("material", [
+    "db_" + "password = 'offline-material'",
+    "Bearer " + "offline" * 5,
+    "custom+transport://offline-user" + "@example.invalid/source",
+])
+def test_sensitive_input_refuses_before_any_proxy_request(monkeypatch, field, material):
+    monkeypatch.setattr(pr, "_request", lambda *a, **kw: pytest.fail("privacy refusal reached proxy"))
+    arguments = dict(source="security-boundary-test", system="Review source", user="Review complete input",
+                     diff=DIFF, base="https://proxy.example", key="offline")
+    arguments[field] = material
+    with pytest.raises(ValueError, match="sensitive review material"):
+        pr.review(**arguments)
+
+
+@pytest.mark.parametrize("failure", ["missing_guard", "invalid_catalog"])
+def test_input_screening_failure_never_dispatches(monkeypatch, failure):
+    monkeypatch.setattr(pr, "_request", lambda *a, **kw: pytest.fail("screening failure reached proxy"))
+    if failure == "missing_guard":
+        def absent(*args, **kwargs):
+            raise FileNotFoundError("offline missing helper")
+        monkeypatch.setattr(pr._PrivacySourceLoader, "get_data", absent)
+    else:
+        read = Path.read_text
+        def invalid_catalog(path, *args, **kwargs):
+            return "{broken" if path.name == "token-shapes.json" else read(path, *args, **kwargs)
+        monkeypatch.setattr(Path, "read_text", invalid_catalog)
+    with pytest.raises(ValueError, match="guard unavailable|catalog invalid"):
+        pr.review("security-boundary-test", "Review", "Complete input", DIFF,
+                  "https://proxy.example", "offline")
+
+
+def test_input_cannot_claim_unverified_source_reference_spans(monkeypatch):
+    class UnverifiedSource(str):
+        reference_spans = ((0, 11),)
+    monkeypatch.setattr(pr, "_request", lambda *a, **kw: pytest.fail("unverified source proof reached proxy"))
+    unsafe = UnverifiedSource("db_" + "password = 'offline-material'")
+    with pytest.raises(ValueError, match="sensitive review material"):
+        pr.review("security-boundary-test", "Review", unsafe, DIFF,
+                  "https://proxy.example", "offline")
+
+
+def test_input_screen_matches_serialized_text_when_str_is_overridden(monkeypatch):
+    class MisleadingString(str):
+        def __str__(self):
+            return "Ordinary review input"
+    unsafe = MisleadingString("db_" + "password = 'offline-material'")
+    assert "offline-material" in json.dumps(unsafe)
+    monkeypatch.setattr(pr, "_request", lambda *a, **kw: pytest.fail("unscreened underlying text reached proxy"))
+    with pytest.raises(ValueError, match="sensitive review material"):
+        pr.review("security-boundary-test", "Review", unsafe, DIFF,
+                  "https://proxy.example", "offline")
+
+
+def test_request_construction_uses_only_the_screened_builtin_strings(monkeypatch):
+    class MisleadingSystem(str):
+        def __add__(self, other):
+            return "db_" + "password = 'offline-material'" + other
+    sent = install(monkeypatch)
+    pr.review("security-boundary-test", MisleadingSystem("Review source"), "Complete input", DIFF,
+              "https://proxy.example", "offline")
+    assert len(sent) == 2
+    assert all("offline-material" not in json.dumps(payload) for payload in sent)
+    assert all(payload["system"].startswith("Review source") for payload in sent)

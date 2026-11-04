@@ -322,3 +322,73 @@ Referenced above but not shipped by the pack (`tests/test_doc_path_references.py
   - `scripts/tests/test_session_start_plane_separation.py`
   - `scripts/verify-model-plane.py`
   - `templates/ai-starter-pack/`
+
+## Agent routing catalogue
+
+| Agent | Access Level | Purpose |
+|-------|-------------|---------|
+| **Claude Code (primary)** | Full read/write | Development, debugging, implementation |
+| **CodeRabbit** | PR read | Automated code review on pull requests |
+| **Gemini Code Review** | PR read | Secondary automated code review |
+| **Sub-agents** | Scoped per definition | Parallel task execution (see `.claude/agents/`) |
+| **memory-protocol** | `.ai/memory/` JSONL files | Read/write memory with correct formatting (haiku) |
+| **session-retrospective** | `.ai/memory/retrospectives/` | Stop-hook capture; `failure_class` taxonomy; KL-optional |
+| **insight-miner** | `.ai/memory/` JSONL files | Surface patterns and promotion candidates (sonnet) |
+| **pr-classifier** | PR diff (read) | Triages PR diff → routing manifest for skills/agents (haiku) |
+| **diff-reflex** | Uncommitted diff (read) | Lightning pre-commit self-review — CRITICAL issues only (sonnet) |
+| **review-internal** | Repo files (read) | Code review for own-repo PRs — correctness + OWASP Top 10 (haiku) |
+| **architecture-impact** | Codebase (read) | Downstream caller count, god-node detection, breaking change risk (sonnet) |
+| **ci-fixer** | CI logs + diff (read-only) | CI failure diagnosis and scoped fix proposal — propose-only (sonnet) |
+| **security-deep-dive** | Codebase (read) | SAST finding triage with true-positive likelihood scoring (sonnet) |
+| **systems-consistency** | Deploy surface (read) | Cross-file deployment invariant checks (sonnet) |
+| **judge** | Candidates + GitHub | Final PR review filter — 4-gate, only agent that posts to GitHub (sonnet) |
+| **orchestrator** | Scoped per task | Multi-step DAG coordinator for parallel sub-agent tasks (sonnet) |
+
+## Explicit review provider policy
+
+Review runners use the configured governed HTTPS proxy for ordinary calls.
+There is no built-in provider-direct endpoint fallback. A missing or unsafe
+proxy never turns a proxy credential into a first-party credential.
+
+An external consumer may use its existing direct-provider capability only when
+its immutable capability policy admits the call and it explicitly configures
+`ANTHROPIC_DIRECT_BASE_URL` (or an Anthropic `ANTHROPIC_BASE_URL`). The configured
+value must be an HTTPS origin for `api.anthropic.com`, with no user information,
+query, fragment, non-default port or path. Admission and origin validation occur
+before reading a direct credential. Credential resolution, review input custody,
+complete-input bounds and missing-coverage markers keep their existing checks.
+
+Estate instances remain denied by the existing capability admission rule.
+`CLIENT_AI_POLICY` cannot silently fall back to an ordinary proxy review.
+Restricted data remains governance no-AI and is never made dispatchable by a
+provider setting. The intent-drift stop hook requires the governed proxy and
+refuses direct-only policy contexts.
+
+Tests use synthetic credentials and mocked requests; they do not contact either
+provider or load production configuration.
+
+Reusable workflows default to direct-provider mode. This requires an existing
+Anthropic credential, the explicit `ANTHROPIC_DIRECT_BASE_URL` repository
+variable, and committed external `llm-anthropic` capability admission in the
+trusted base revision. They validate the origin and immutable admission after
+runtime hydration and before classification. A credential alone never grants
+admission. Estate consumers must select the governed proxy mode instead.
+
+Standalone and reusable GitHub workflows forward the non-secret repository
+variable `ANTHROPIC_DIRECT_BASE_URL` in every review phase. External direct-mode
+consumers must configure that origin explicitly; a credential or capability
+alone does not select a provider endpoint. Ordinary proxy mode is unchanged.
+
+
+### Unqualified model candidates
+
+Kimi K3 is retained as an inactive catalog candidate. It has no bundled serving
+row or automatic fallback edge. The OSS heavy tier is unavailable until a model
+has the required intelligence baseline, smoke test and eight-case fitness eval;
+no other model is silently substituted for a heavy assignment.
+
+The ordinary `tier-2-agentic` alias reuses the existing `tier-2-agentic-pro`
+MiniMax M3 Fireworks route and its existing OpenRouter fallback. Its recorded
+2026-10-28 acceptance probe qualifies that existing ordinary route, not the
+separate heavy tier. Existing internal/public clearance and credentials remain
+unchanged. Catalog prices and provider capabilities do not grant qualification.

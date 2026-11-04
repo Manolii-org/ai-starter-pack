@@ -324,7 +324,6 @@ def test_native_nested_catalog_restore_refuses_unsafe_state_root(tmp_path, job, 
 
 def test_native_judge_checkout_contains_exact_head_and_merge_base(tmp_path):
     """A shallow synthetic merge plus a base fetch omits the PR head object."""
-    import shlex
     import subprocess
 
     def git(cwd, *args, check=True):
@@ -369,10 +368,61 @@ def test_native_judge_checkout_contains_exact_head_and_merge_base(tmp_path):
                 if s.get("uses", "").startswith("actions/checkout@"))
     restore = next(s for s in workflow["jobs"]["judge"]["steps"]
                    if s.get("name") == "Restore trusted runtime from PR base")
-    fetch_line = next(line.strip() for line in restore["run"].splitlines()
-                      if line.strip().startswith("git fetch "))
-    base_fetch = shlex.split(fetch_line.replace('"$BASE_SHA"', base))[1:]
+    assert "git fetch" not in restore["run"]
+    assert 'git cat-file -e "${BASE_SHA}^{commit}"' in restore["run"]
+    base_fetch = ["cat-file", "-e", base + "^{commit}"]
     complete = checkout("configured-checkout", step.get("with", {}).get("fetch-depth", 1), base_fetch)
     assert git(complete, "rev-parse", head + "^{tree}").stdout.strip()
     assert git(complete, "show", head + ":source.py").stdout == "corrected = True\n"
     assert "+corrected = True" in git(complete, "diff", base + "..." + head).stdout
+
+
+@pytest.mark.parametrize("job", sorted(RUNNER_JOBS))
+@pytest.mark.parametrize("has_base", [True, False])
+def test_private_restore_uses_complete_checkout_without_network_or_credentials(tmp_path, job, has_base):
+    import os
+    import shutil
+    import subprocess
+
+    workspace = tmp_path / "repository"
+    workspace.mkdir()
+    real_git = shutil.which("git", path=os.defpath)
+    env = {"PATH": os.defpath, "HOME": str(tmp_path),
+           "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull}
+    def git(*args):
+        return subprocess.check_output([real_git, *args], cwd=workspace, env=env, text=True).strip()
+    git("init", "-q")
+    git("config", "user.name", "Synthetic fixture")
+    git("config", "user.email", "fixture@example.invalid")
+    (workspace / "scripts").mkdir()
+    target = workspace / "scripts/keep.py"
+    target.write_text("# trusted base source\n")
+    git("add", ".")
+    git("commit", "-qm", "Synthetic trusted base")
+    base = git("rev-parse", "HEAD") if has_base else "0" * 40
+    target.write_text("# PR-owned source\n")
+    tools = tmp_path / "bin"
+    tools.mkdir()
+    wrapper = tools / "git"
+    wrapper.write_text('#!/bin/sh\nif [ "$1" = fetch ]; then echo forbidden-network-fetch >&2; exit 97; fi\nexec "'
+                       + real_git + '" "$@"\n')
+    wrapper.chmod(0o755)
+    env["PATH"] = str(tools) + os.pathsep + os.defpath
+    document = yaml.safe_load((REPO_ROOT / ".github/workflows/pr-assessment.yml").read_text())
+    steps = document["jobs"][job]["steps"]
+    checkout = next(step for step in steps if str(step.get("uses", "")).startswith("actions/checkout@"))
+    assert checkout["with"]["fetch-depth"] == 0
+    assert checkout["with"]["persist-credentials"] is False
+    step = next(step for step in steps if step.get("name") == "Restore trusted runtime from PR base")
+    assert "git fetch" not in step["run"]
+    body = step["run"].replace("${{ github.event.pull_request.base.sha }}", base)
+    result = subprocess.run(["bash", "-c", body], cwd=workspace, env=env,
+                            capture_output=True, text=True, timeout=15)
+    assert "forbidden-network-fetch" not in result.stderr
+    if has_base:
+        assert result.returncode == 0, result.stderr
+        assert target.read_text() == "# trusted base source\n"
+    else:
+        assert result.returncode != 0
+        assert "Trusted base object unavailable" in result.stdout
+        assert target.read_text() == "# PR-owned source\n"

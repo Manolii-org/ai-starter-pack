@@ -17,6 +17,7 @@ import ast
 from array import array
 from bisect import bisect_left
 import hashlib
+import importlib.machinery
 import importlib.util
 import json
 import logging
@@ -31,20 +32,30 @@ from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import Optional
 
+class _HydratedSourceLoader(importlib.machinery.SourceFileLoader):
+    """Import the hydrated source directly, without consulting bytecode caches."""
+
+    def get_code(self, fullname):
+        return self.source_to_code(self.get_data(self.path), self.path)
+
+
+def _source_spec(name, path):
+    return importlib.util.spec_from_file_location(
+        name, path, loader=_HydratedSourceLoader(name, str(path)))
+
+
 # Load the exact hydrated helper, never an ambient/PR-added lib package initializer.
 # The launcher still owns complete runtime custody; this is not shell isolation.
 try:
-    _policy_spec = importlib.util.spec_from_file_location(
+    _policy_spec = _source_spec(
         "_assessment_route_policy", Path(__file__).resolve().parent / "lib/agent_capabilities.py")
     if _policy_spec is None or _policy_spec.loader is None:
         raise ImportError("missing policy loader")
     _policy_module = importlib.util.module_from_spec(_policy_spec)
-    # Execute hydrated source bytes, not a PR-retained bytecode cache.
-    _policy_path = _policy_spec.origin
-    exec(compile(Path(_policy_path).read_bytes(), _policy_path, "exec"),
-         _policy_module.__dict__)
+    _policy_spec.loader.exec_module(_policy_module)
     RouteAdmissionError = _policy_module.RouteAdmissionError
     require_direct_llm_admission = _policy_module.require_direct_llm_admission
+    configured_direct_endpoint = _policy_module.configured_direct_endpoint
 except (ImportError, OSError, AttributeError):
     # Mixed/older consumer runtime: preserve ordinary proxy calls, but never
     # admit a direct call without the shared policy implementation.
@@ -54,13 +65,16 @@ except (ImportError, OSError, AttributeError):
     def require_direct_llm_admission():
         raise RouteAdmissionError("direct review denied: compatible policy runtime missing")
 
+    def configured_direct_endpoint():
+        raise RouteAdmissionError("direct review denied: compatible policy runtime missing")
+
 # Qualification helper follows the same hydrated-source custody as route policy.
 _protected_path = Path(__file__).resolve().parent / "lib/protected_review.py"
-_protected_spec = importlib.util.spec_from_file_location("_protected_review", _protected_path)
+_protected_spec = _source_spec("_protected_review", _protected_path)
 if _protected_spec is None or _protected_spec.loader is None:
     raise ImportError("missing protected-review loader")
 protected_review = importlib.util.module_from_spec(_protected_spec)
-exec(compile(_protected_path.read_bytes(), str(_protected_path), "exec"), protected_review.__dict__)
+_protected_spec.loader.exec_module(protected_review)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -92,10 +106,14 @@ def _proxy_transport_key() -> str:
     ):
         if not candidate:
             continue
-        key = candidate.strip()
+        key = (
+            candidate.strip()
+        )
         # The auth-scheme token is case-insensitive (RFC 7235).
         if key.lower() == "bearer" or key.lower().startswith("bearer "):
-            key = key[7:].strip()
+            key = (
+                key[7:].strip()
+            )
         if not key or key.lower().startswith("sk-ant-"):
             continue
         return key
@@ -116,20 +134,33 @@ def _endpoint(direct: bool = False) -> tuple[str, str, bool]:
     LiteLLM credential in ANTHROPIC_API_KEY must never cross the boundary.
     """
     base = (os.environ.get("LITELLM_PROXY_URL") or os.environ.get("ANTHROPIC_BASE_URL") or "").rstrip("/")
+    parsed_origin = urllib.parse.urlsplit(base)
+    named_proxy = bool(os.environ.get("LITELLM_PROXY_URL"))
+    is_direct_origin = (parsed_origin.hostname or "").lower().rstrip(".") == _ANTHROPIC_HOST
+    if base and (named_proxy or not is_direct_origin):
+        if (parsed_origin.scheme != "https" or not parsed_origin.hostname
+                or parsed_origin.username or parsed_origin.password or parsed_origin.query
+                or parsed_origin.fragment or is_direct_origin):
+            raise RouteAdmissionError("review route denied: unsafe configured proxy origin")
     proxied = bool(base) and (urllib.parse.urlparse(base).hostname or "").lower().rstrip(".") != _ANTHROPIC_HOST
-    if direct:
-        require_direct_llm_admission()
-        key = os.environ.get("ANTHROPIC_DIRECT_API_KEY") or (
-            os.environ.get("ANTHROPIC_API_KEY", "") if not proxied else ""
+    if direct or os.environ.get("CLIENT_AI_POLICY"):
+        direct_url = configured_direct_endpoint()
+        key = (
+            os.environ.get("ANTHROPIC_DIRECT_API_KEY") or (
+                os.environ.get("ANTHROPIC_API_KEY", "") if not proxied else ""
+            )
         )
-        return key, _ANTHROPIC_API_URL, False
+        return key, direct_url, False
     if proxied:
+        parsed = urllib.parse.urlsplit(base)
+        if (parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password
+                or parsed.query or parsed.fragment):
+            raise RouteAdmissionError("direct review denied: governed HTTPS proxy required")
         return _proxy_transport_key(), base + "/v1/messages", True
-    require_direct_llm_admission()
-    return os.environ.get("ANTHROPIC_API_KEY", ""), _ANTHROPIC_API_URL, False
+    direct_url = configured_direct_endpoint()
+    return os.environ.get("ANTHROPIC_API_KEY", ""), direct_url, False
 
 
-_ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
 
 # Dated claude-* IDs only exist on Anthropic's API; a LiteLLM-style proxy serves
 # tier aliases instead. Only applied when proxied.
@@ -257,7 +288,7 @@ class Finding:
 
     def comparison_key(self) -> tuple:
         """Local reviewer agreement, independent of IDs and confidence scores."""
-        return (self.source, self.file, self.line, self.severity, self.message, self.fix)
+        return (self.source, *_comparison_location(self), self.severity, self.message, self.fix)
 
     def to_dict(self) -> dict:
         return {
@@ -272,6 +303,20 @@ class Finding:
         }
 
 
+def _comparison_location(finding: Finding) -> tuple:
+    """Compare safe relative spellings without resolving the working tree.
+
+    Producer filenames, finding IDs and evidence IDs remain unchanged. Invalid
+    paths retain their spelling and still fail evidence validation.
+    """
+    name = finding.file
+    if isinstance(name, str) and name:
+        path = PurePosixPath(name)
+        if not path.is_absolute() and ".." not in path.parts and "\\" not in name:
+            return path.as_posix(), finding.line
+    return name, finding.line
+
+
 def _sensitive_evidence_path(name: str) -> bool:
     path = PurePosixPath(name)
     return (any(part.lower() in {".aws", ".ssh", ".gnupg"} for part in path.parts)
@@ -280,7 +325,47 @@ def _sensitive_evidence_path(name: str) -> bool:
             or path.suffix.lower() in {".pem", ".key", ".p12", ".pfx", ".jks"})
 
 
-_CREDENTIAL_ASSIGNMENT = re.compile(r"(?i)\b([A-Za-z0-9_]*(?:api[_-]?key|secret|token|password|passwd))(\s*(?::=|[:=])\s*)(['\"]?)[^\s'\"]{8,}\3")
+_CREDENTIAL_SUFFIXES = (
+    "KEY", "TOKEN", "SECRET", "PASSWORD", "PASSWD", "AUTHORIZATION",
+    "CREDENTIAL", "PASSPHRASE", "JWT", "DSN",
+)
+_FIELD_PART = re.compile(r"[A-Za-z0-9_.+\-]+")
+_ASSIGNMENT_SEPARATOR = re.compile(r"[\"']?\s*(?::=|[:=])\s*")
+_ASSIGNMENT_VALUE = re.compile(r"[\"']?[^\s\"']{8,}")
+_URI_SCHEME_PART = re.compile(r"[A-Za-z0-9+.\-]+", re.IGNORECASE)
+_URI_USERINFO = re.compile(r"://[^\s/\"'`@]+@[^\s/\"'`]+")
+# Independent generic classes from the existing canonical screening contract.
+# Reference-only source proofs apply to assignment identifiers alone; these
+# checks always see the complete original string, including source literals.
+_GENERIC_EVIDENCE_PATTERNS = (
+    re.compile(r"(?i)(bearer|basic)\s+[A-Za-z0-9._\-+/=]{20,}"),
+    re.compile(r"(?i)(postgres(?:ql)?|mysql|mongodb|redis|rediss|amqp|amqps)(?:\+[a-z0-9_.\-]+)?://[^\s'\"`]+"),
+    re.compile(r"(?i)https?://[a-zA-Z0-9._\-]+\.(fly\.dev|vercel\.app|supabase\.co|neon\.tech|railway\.app|render\.com)(?:/[^\s]*)?"),
+    re.compile(r"-----BEGIN (?:[A-Z0-9 ]*PRIVATE KEY|CERTIFICATE)-----"),
+)
+
+
+def _credential_field(name: str) -> bool:
+    return bool(_FIELD_PART.fullmatch(name)
+                and name.upper().endswith(_CREDENTIAL_SUFFIXES))
+
+
+def _credential_assignment(text: str) -> bool:
+    # Consume only headers, never a noncredential field's value: a second
+    # sensitive assignment can occur inside that value on the same line.
+    for token in _FIELD_PART.finditer(text):
+        if _credential_field(token.group()):
+            separator = _ASSIGNMENT_SEPARATOR.match(text, token.end())
+            if separator and _ASSIGNMENT_VALUE.match(text, separator.end()):
+                return True
+    return False
+
+
+def _uri_userinfo(text: str) -> bool:
+    # Maximal, nonoverlapping tokens preserve linear scanning on Python 3.10,
+    # without possessive quantifiers. Include diff +/- markers in each token.
+    return any(_URI_USERINFO.match(text, token.end())
+               for token in _URI_SCHEME_PART.finditer(text))
 
 
 class _VerifiedSourceText(str):
@@ -337,25 +422,35 @@ def _source_text(text: str, path: str) -> str:
     def env_name(node):
         return isinstance(node, ast.Constant) and isinstance(node.value, str) and bool(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", node.value))
 
+    def empty_default(node):
+        return isinstance(node, ast.Constant) and (node.value is None or node.value == "")
+
     def reference(node):
         if isinstance(node, ast.BoolOp) and isinstance(node.op, ast.Or):
             return all(reference(value) for value in node.values)
         if isinstance(node, ast.Subscript):
             return dotted(node.value) == "os.environ" and env_name(node.slice)
-        if not isinstance(node, ast.Call) or node.keywords:
+        if not isinstance(node, ast.Call):
             return False
         name = dotted(node.func)
-        return ((name in {"os.getenv", "os.environ.get"} and len(node.args) == 1 and env_name(node.args[0]))
-                or (name == "get_password" and not node.args))
+        if name == "get_password":
+            return not node.args and not node.keywords
+        if name not in {"os.getenv", "os.environ.get"} or not 1 <= len(node.args) <= 2 or not env_name(node.args[0]):
+            return False
+        if len(node.args) == 2:
+            return not node.keywords and empty_default(node.args[1])
+        return not node.keywords or (
+            len(node.keywords) == 1 and node.keywords[0].arg == "default"
+            and empty_default(node.keywords[0].value)
+        )
 
     spans = []
 
     def add_identifier(target):
         name = target.id if isinstance(target, ast.Name) else target.attr if isinstance(target, ast.Attribute) else None
-        # Reuse the exact generic field-name grammar; the synthetic RHS is
-        # only a recognizer probe, never source or credential material.
-        match = _CREDENTIAL_ASSIGNMENT.fullmatch(f"{name} = reference_probe") if name else None
-        if match and match.group(1) == name:
+        # Reuse the exact field-name grammar. Only this identifier's span,
+        # backed by a complete reference-only AST expression, is exempt.
+        if name and _credential_field(name):
             end = position(target, True)
             start = end - len(name)
             # AST identifiers are NFKC-normalized. Never let normalized name
@@ -378,12 +473,20 @@ def _source_text(text: str, path: str) -> str:
     return _VerifiedSourceText(text, spans)
 
 
+def _physical_source_lines(text: str, keepends: bool = False) -> list[str]:
+    """Git blob locations count LF boundaries, not Unicode text separators."""
+    parts = text.split("\n")
+    if keepends:
+        return [part + "\n" for part in parts[:-1]] + ([parts[-1]] if parts[-1] else [])
+    return parts[:-1] if parts[-1] == "" else parts
+
+
 def _numbered_source(text: str, start: int = 1, end: int | None = None) -> str:
     """Project proved source spans through the existing numbered-window format."""
     parts, spans, raw_offset, output_offset = [], [], 0, 0
     references = iter(sorted(getattr(text, "reference_spans", ())))
     pending = next(references, None)
-    for number, raw_line in enumerate(text.splitlines(keepends=True), 1):
+    for number, raw_line in enumerate(_physical_source_lines(text, keepends=True), 1):
         line = raw_line.rstrip("\r\n")
         selected = number >= start and (end is None or number <= end)
         prefix = f"{number}: "
@@ -403,7 +506,7 @@ def _numbered_source(text: str, start: int = 1, end: int | None = None) -> str:
 def _require_safe_packet(value) -> None:
     """Refuse detected sensitive material; never redact code and claim completeness.
 
-    Use the canonical shipped token catalog and credential-assignment refusal.
+    Use the canonical shipped token catalog and generic credential refusal.
     Only locally proved reference expressions in Git source are exempt from
     the generic assignment heuristic; catalog matches are never exempt.
     The pack-only Jev redactor is intentionally
@@ -436,13 +539,17 @@ def _require_safe_packet(value) -> None:
                 offset = b
             pieces.append(item[offset:])
             generic_text = "".join(pieces)
-            if (any(pattern.search(item) for pattern in patterns)
-                    or _CREDENTIAL_ASSIGNMENT.search(generic_text)):
+            if (any(pattern.search(item) for pattern in (*patterns, *_GENERIC_EVIDENCE_PATTERNS))
+                    or _uri_userinfo(item)
+                    or _credential_assignment(generic_text)):
                 raise ValueError("sensitive review material requires approved sanitized evidence")
         elif isinstance(item, dict):
             for key, child in item.items():
                 check(key)
                 check(child)
+                if (isinstance(key, str) and _credential_field(key)
+                        and isinstance(child, (str, int, float)) and re.search(r"\S{8,}", str(child))):
+                    raise ValueError("sensitive review material requires approved sanitized evidence")
         elif isinstance(item, (list, tuple)):
             for child in item:
                 check(child)
@@ -604,7 +711,9 @@ def _judge_evidence(findings: list[Finding], head: str) -> dict:
         return packet
     used = 0
     for finding in findings:
-        key = hashlib.sha256(f"{finding.file}|{finding.line}".encode()).hexdigest()[:16]
+        key = (
+            hashlib.sha256(f"{finding.file}|{finding.line}".encode()).hexdigest()[:16]
+        )
         if key in packet["locations"]:
             continue
         row = {
@@ -631,12 +740,13 @@ def _judge_evidence(findings: list[Finding], head: str) -> dict:
         if _sensitive_evidence_path(finding.file):
             row["status"] = "sensitive_path_refused"
             continue
+        lookup = path.as_posix()
         try:
-            entries = _git(root, "ls-tree", "-z", head, "--", finding.file).split(b"\0")
+            entries = _git(root, "ls-tree", "-z", head, "--", lookup).split(b"\0")
             matches = [
                 e.split(b"\t", 1)[0].split()
                 for e in entries
-                if b"\t" in e and e.split(b"\t", 1)[1].decode() == finding.file
+                if b"\t" in e and e.split(b"\t", 1)[1].decode() == lookup
             ]
             if len(matches) != 1 or matches[0][0] not in {b"100644", b"100755"}:
                 row["status"] = "absent_or_nonregular_at_head"
@@ -654,7 +764,7 @@ def _judge_evidence(findings: list[Finding], head: str) -> dict:
             # Unsupported encodings remain explicitly unavailable.
             decoded = _source_text(body.decode("utf-8"), finding.file)
             _require_safe_packet(decoded)
-            lines = decoded.splitlines()
+            lines = _physical_source_lines(decoded)
             if finding.line is not None and finding.line > len(lines):
                 row["status"] = "line_out_of_range"
                 continue
@@ -688,14 +798,17 @@ def _judge_evidence(findings: list[Finding], head: str) -> dict:
         try:
             deleted = set(_git_bounded(root, "diff", "--no-ext-diff", "--no-textconv", "--no-renames", "--name-only", "--diff-filter=D", "-z", base + "..." + head, limit=20000).split(b"\0"))
             for row in packet["locations"].values():
-                if row["status"] != "absent_or_nonregular_at_head" or row["file"].encode() not in deleted:
+                if row["status"] != "absent_or_nonregular_at_head":
                     continue
-                entries = _git_bounded(root, "ls-tree", "-z", base, "--", row["file"], limit=20000).split(b"\0")
-                match = [e.split(b"\t", 1)[0].split() for e in entries if b"\t" in e and e.split(b"\t", 1)[1] == row["file"].encode()]
+                lookup = PurePosixPath(row["file"]).as_posix()
+                if lookup.encode() not in deleted:
+                    continue
+                entries = _git_bounded(root, "ls-tree", "-z", base, "--", lookup, limit=20000).split(b"\0")
+                match = [e.split(b"\t", 1)[0].split() for e in entries if b"\t" in e and e.split(b"\t", 1)[1] == lookup.encode()]
                 if len(match) != 1 or match[0][0] not in {b"100644", b"100755"}:
                     continue
                 body = _git_bounded(root, "cat-file", "blob", match[0][2].decode(), limit=min(20000, _EVIDENCE_MAX_FILE_BYTES))
-                if b"\0" in body or (row["line"] is not None and row["line"] > len(body.decode("utf-8").splitlines())):
+                if b"\0" in body or (row["line"] is not None and row["line"] > len(_physical_source_lines(body.decode("utf-8")))):
                     continue
                 _require_safe_packet(_source_text(body.decode("utf-8"), row["file"]))
                 row.update(status="available", revision=base, source_state="deleted_at_head",
@@ -711,7 +824,7 @@ def _investigations(findings: list[Finding], observations: list[dict]) -> list[d
     groups = {}
     aliases = {}
     for finding in findings:
-        groups.setdefault((finding.file, finding.line), []).append(finding)
+        groups.setdefault(_comparison_location(finding), []).append(finding)
         for alias in (finding.finding_id, finding.legacy_id()):
             aliases.setdefault(alias, set()).add(finding.comparison_key())
     result = []
@@ -736,7 +849,9 @@ def _investigations(findings: list[Finding], observations: list[dict]) -> list[d
             leg_sets.append(keys)
         differing_legs = ambiguous or (bool(leg_sets) and any(s != leg_sets[0] for s in leg_sets[1:]))
         if len(sources) > 1 or differing_legs or "codex-adversarial" in sources:
-            key = hashlib.sha256(json.dumps([location, ids]).encode()).hexdigest()[:16]
+            key = (
+                hashlib.sha256(json.dumps([location, ids]).encode()).hexdigest()[:16]
+            )
             result.append(
                 {
                     "id": key,
@@ -769,7 +884,7 @@ def _validate_judge_decisions(
     decisions = result.get("decisions")
     if not isinstance(decisions, list) or len(decisions) != len(originals):
         raise ValueError("every candidate needs a disposition")
-    seen, surviving = set(), []
+    seen, surviving, unsupported_ids = set(), [], set()
     for row in decisions:
         if not isinstance(row, dict):
             raise ValueError("invalid disposition")
@@ -795,6 +910,7 @@ def _validate_judge_decisions(
         supporting = evidence["locations"].get(required, {}).get("evidence_ref")
         if row["decision"] == "investigate" or required not in refs or (supporting and supporting not in refs):
             complete = False
+            unsupported_ids.add(fid)
         elif row["decision"] == "drop" and row["gate"] == "passed":
             raise ValueError("dropped finding needs its failed gate")
         elif row["decision"] == "keep":
@@ -805,7 +921,7 @@ def _validate_judge_decisions(
     if not isinstance(resolutions, list) or len(resolutions) != len(investigations):
         raise ValueError("disagreement resolution missing")
     expected = {r["id"]: r for r in investigations}
-    resolved, unresolved_ids = set(), set()
+    resolved, unresolved_ids = set(), unsupported_ids
     for row in resolutions:
         if (
             not isinstance(row, dict)
@@ -856,6 +972,46 @@ def _unique_candidate_fields(pairs):
             raise ValueError("duplicate assessment field")
         result[key] = value
     return result
+
+
+def _parse_judge_verdict(raw: str):
+    """Use the final complete outer JSON value, never an earlier example.
+
+    Nested objects inside an unfinished wrapper are not standalone verdicts.
+    Anything after the selected object must be whitespace or its closing fence.
+    """
+    try:
+        return json.loads(raw.strip())
+    except json.JSONDecodeError:
+        pass
+    starts, stack = [], []
+    quoted = escaped = False
+    for offset, char in enumerate(raw):
+        if quoted:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                quoted = False
+            continue
+        if stack and char == '"':
+            quoted = True
+        elif char in "{[":
+            if not stack and char == "{":
+                starts.append(offset)
+            stack.append(char)
+        elif char in "}]" and stack:
+            if (stack[-1], char) not in (("{", "}"), ("[", "]")):
+                raise ValueError("malformed adjudication wrapper")
+            stack.pop()
+    if not starts:
+        raise ValueError("adjudication JSON unavailable")
+    # Do not recover an earlier value if the final response is incomplete.
+    value, end = json.JSONDecoder().raw_decode(raw, starts[-1])
+    if raw[end:].strip() not in {"", "```"}:
+        raise ValueError("ambiguous adjudication tail")
+    return value
 
 
 class Judge:
@@ -929,10 +1085,14 @@ class Judge:
         seen_roles = set()
         expected_roles = context = None
         try:
-            expected_roles = _policy_module.selected_review_roles()
-            context = _policy_module.assessment_context()
-            if context is not None and context["head"] != self.sha:
-                raise ValueError("assessment head mismatch")
+            # These are hosted provenance controls. Local legacy callers have
+            # no Actions roster/context, just as the current helper returns None.
+            if os.environ.get("GITHUB_ACTIONS") == "true":
+                policy = globals().get("_policy_module")
+                expected_roles = getattr(policy, "selected_review_roles")()
+                context = getattr(policy, "assessment_context")()
+                if expected_roles is None or context is None or context["head"] != self.sha:
+                    raise ValueError("assessment launcher context unavailable")
         except (AttributeError, ValueError):
             self._candidate_load_errors += 1
 
@@ -952,7 +1112,7 @@ class Judge:
                 candidate_findings = data.get("findings", [])
                 if expected_roles is not None:
                     if (source not in expected_roles or source != candidate_file.stem
-                            or data.get("_assessment") != context):
+                            or data.get("_assessment") != _policy_module.candidate_assessment_context(source)):
                         raise ValueError("assessment artifact provenance invalid")
                     seen_roles.add(source)
                 estate_security = (
@@ -1258,18 +1418,9 @@ Only keep original IDs that pass all four gates. Never post to GitHub yourself."
                 raise KeyError("no text blocks in judge response content")
             logger.info("Judge response received (%d characters)", len(response_text))
 
-            # Parse JSON, stripping markdown fences if present
-            json_text = response_text
-            if "```json" in json_text:
-                json_text = json_text.split("```json")[1].split("```")[0]
-            elif "```" in json_text:
-                json_text = json_text.split("```")[1].split("```")[0]
-
-            if result.get("stop_reason") == "max_tokens":
-                raise ValueError("truncated adjudication is incomplete")
-            judge_result = json.loads(json_text.strip())
+            judge_result = _parse_judge_verdict(response_text)
             adjudicated = _validate_judge_decisions(judge_result, findings, evidence, investigations)
-            blocked = {f.finding_id for f in findings if (f.file, f.line) in self._specificity_conflicted_locations}
+            blocked = {f.finding_id for f in findings if _comparison_location(f) in self._specificity_conflicted_locations}
             if blocked:
                 adjudicated["complete"] = False
                 adjudicated["surviving"] = [f for f in adjudicated["surviving"] if f["finding_id"] not in blocked]
@@ -1680,9 +1831,9 @@ Only keep original IDs that pass all four gates. Never post to GitHub yourself."
             self._adjudication_incomplete = True
             kept_ids = {f.finding_id for f in findings}
             removed = [f for f in originals if f.finding_id not in kept_ids]
-            self._specificity_conflicted_locations = {(f.file, f.line) for f in removed} & {(f.file, f.line) for f in findings}
+            self._specificity_conflicted_locations = {_comparison_location(f) for f in removed} & {_comparison_location(f) for f in findings}
             for investigation in _investigations(originals, self._review_observations):
-                if any((f.file, f.line) in self._specificity_conflicted_locations and f.finding_id in investigation["finding_ids"] for f in originals):
+                if any(_comparison_location(f) in self._specificity_conflicted_locations and f.finding_id in investigation["finding_ids"] for f in originals):
                     self.write_log_entry(investigation["id"], "investigate", "specificity", json.dumps(investigation, sort_keys=True))
         logger.info(f"{len(findings)} findings remain after specificity gate")
 

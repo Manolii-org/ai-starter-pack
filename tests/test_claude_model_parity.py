@@ -14,8 +14,6 @@ from pathlib import Path
 import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
-# Routed through the proxy on purpose (OSS-intercepted Haiku); not direct spend.
-PROXY_INTERCEPTED = {"claude-haiku-4-5-20251001"}
 
 
 def _literal(path: str, name: str):
@@ -46,6 +44,7 @@ def _list_prices() -> dict[str, dict]:
 
 
 def _cost_logger(monkeypatch, base_url: str | None = None):
+    monkeypatch.setenv("CLAUDE_CLIENT_USE_PROXY", "0")
     if base_url is None:
         monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
     else:
@@ -66,7 +65,7 @@ def test_guard_ids_are_priced_and_classified(monkeypatch) -> None:
     logger = _cost_logger(monkeypatch)
     ids = _guard_claude_ids()
     assert ids - set(logger._SUBAGENT_PRICING) == set()
-    assert ids - PROXY_INTERCEPTED - logger._ANTHROPIC_DIRECT_MODELS == set()
+    assert ids - logger._ANTHROPIC_DIRECT_MODELS == set()
 
 
 def test_cost_logger_prices_match_list_prices(monkeypatch) -> None:
@@ -95,12 +94,55 @@ def test_every_accepted_name_is_priced_as_the_model_it_resolves_to(monkeypatch) 
         sub = logger._SUBAGENT_PRICING[name]
         got = (round(sub["input"] * 1_000_000, 6), round(sub["output"] * 1_000_000, 6))
         assert got == (expected["in"], expected["out"]), name
-        if name not in PROXY_INTERCEPTED:
-            assert name in logger._ANTHROPIC_DIRECT_MODELS, name
+        assert name in logger._ANTHROPIC_DIRECT_MODELS, name
 
 
 def test_proxy_intercepted_aliases_are_proxy_spend(monkeypatch) -> None:
     logger = _cost_logger(monkeypatch, "https://litellm.example.test")
     for alias in ("haiku", "sonnet"):
         assert alias not in logger._ANTHROPIC_DIRECT_MODELS
-    assert logger._SUBAGENT_PRICING["sonnet"]["input"] == 0.30 / 1_000_000
+    routing = json.loads((ROOT / ".claude/model-routing.json").read_text())
+    expected = routing["proxy_intercepted_models"]["sonnet"]["cost_per_m_input"]
+    assert logger._SUBAGENT_PRICING["sonnet"]["input"] == expected / 1_000_000
+
+
+def test_native_haiku_has_no_redundant_fallback_and_short_alias_is_independent():
+    config = yaml.safe_load((ROOT / "deploy/litellm-proxy/config.yaml").read_text())
+    models = {row["model_name"]: row["litellm_params"]["model"] for row in config["model_list"]}
+    fallbacks = {key: value for row in config["litellm_settings"]["fallbacks"] for key, value in row.items()}
+    assert "claude-haiku-4-5-20251001" not in fallbacks
+    assert models["claude-haiku-4-5-20251001"].startswith("anthropic/")
+    assert models["haiku"].startswith("fireworks_ai/")
+    assert fallbacks["haiku"] == ["claude-haiku-4-5-20251001-anthropic"]
+    assert models[fallbacks["haiku"][0]].startswith("anthropic/")
+
+
+
+def test_unqualified_kimi_candidate_has_no_serving_route():
+    config = yaml.safe_load((ROOT / "deploy/litellm-proxy/config.yaml").read_text())
+    assert all(row["litellm_params"]["model"] != "fireworks_ai/accounts/fireworks/models/kimi-k2p6"
+               for row in config["model_list"])
+    assert all("kimi-k3" not in row["litellm_params"]["model"] for row in config["model_list"])
+    routing = json.loads((ROOT / ".claude/model-routing.json").read_text())
+    candidate = routing["fallback"]["alternatives"]["kimi-k3"]
+    assert candidate["enabled"] is False and candidate["status"] == "inactive-pending-qualification"
+    assert candidate["model"] == "accounts/fireworks/models/kimi-k3"
+    assert (candidate["cost_per_m_input"], candidate["cost_per_m_output"]) == (3.0, 15.0)
+    assert candidate["context_window"] == 1048576
+    assert "tier-2-agentic-pro" in routing["data_classification"]["internal"]["allowed_tiers"]
+
+
+def test_kimi_candidate_and_heavy_tier_require_real_qualification():
+    routing = json.loads((ROOT / ".claude/model-routing.json").read_text())
+    candidate = routing["fallback"]["alternatives"]["kimi-k3"]
+    for metric in ("swebench_pro", "swebench_verified", "baseline_swebench_pro", "intelligence_score"):
+        assert candidate[metric] is None, metric
+    assert candidate["litellm_alias"] is None and candidate["fallback_chain"] == {}
+    heavy = routing["tier_definitions"]["tier-0-oss-heavy"]
+    assert heavy["enabled"] is False and heavy["model"] is None and heavy["fallback_chain"] == {}
+    assert routing["tier_aliases"]["tier-0-oss-heavy"]["enabled"] is False
+    assert routing["fallback"]["tier_map"]["heavy"]["model_id"] is None
+    assert routing["browser_automation"]["stagehand_llm"]["secondary"]["model_id"] is None
+    threshold = routing["sync_sources"]["intelligence_ratings"]["tier_thresholds"]["heavy_tier_oss"]
+    assert "intelligence_score >= 42" in threshold and ">5pp" in threshold
+    assert "Smoke test + 8-case fitness eval required".lower() in heavy["eval_status"].lower()

@@ -44,30 +44,39 @@ def _build_dispatch_rule(cfg):
     proxy_backed_tiers = {
         k for k, v in tier_aliases.items()
         if not k.startswith("$") and k not in non_proxy_tiers
+        and (not isinstance(v, dict) or v.get("enabled") is not False)
         and (not isinstance(v, dict) or v.get("requires_proxy") is not False)
     }
     oss_tiers = (
         proxy_backed_tiers
-        | {k for k in (cfg.get("proxy_intercepted_models") or {}).keys() if not k.startswith("$")}
+        | {k for k, v in (cfg.get("proxy_intercepted_models") or {}).items()
+           if not k.startswith("$") and (not isinstance(v, dict) or v.get("enabled") is not False)}
     )
     _SONNET_PROXY = frozenset({"sonnet"})
     _REASONING_OSS = frozenset({"tier-review"})
-    _HAIKU_OSS = oss_tiers - _SONNET_PROXY - _REASONING_OSS
     agent_routing = {k: v for k, v in (cfg.get("agent_routing") or {}).items() if not k.startswith("$")}
+    disabled = {k for section in (tier_aliases, cfg.get("tier_definitions") or {},
+                                  cfg.get("proxy_intercepted_models") or {})
+                for k, v in section.items() if isinstance(v, dict) and v.get("enabled") is False}
+    oss_tiers -= disabled
+    _HAIKU_OSS = oss_tiers - _SONNET_PROXY - _REASONING_OSS
+    unavailable = sorted(k for k, v in agent_routing.items() if v in disabled)
+    unavailable_clause = ("Unavailable pending qualification: " + ", ".join(unavailable)
+                          + "; do not substitute another model. ") if unavailable else ""
     anthropic_locked = {k for k, v in agent_routing.items() if v not in oss_tiers}
     builtin_haiku = ["Explore"]
     haiku_named = sorted(k for k, v in agent_routing.items() if v in _HAIKU_OSS and k not in anthropic_locked and k not in builtin_haiku)
     haiku_all = builtin_haiku + haiku_named
     sonnet_named = sorted(k for k, v in agent_routing.items() if v in _SONNET_PROXY and k not in anthropic_locked)
     reasoning_named = sorted(k for k, v in agent_routing.items() if v in _REASONING_OSS and k not in anthropic_locked)
-    restricted_listed = sorted(anthropic_locked)
     reasoning_clause = f"tier-review=reasoning/editorial ({', '.join(reasoning_named)}). " if reasoning_named else ""
     return (
         "DISPATCH RULE: The tier above is for the MAIN THREAD ONLY. "
         f"For Agent tool calls: haiku=search/grep/format/file-read AND ({', '.join(haiku_all)}). "
         f"sonnet=({', '.join(sonnet_named)}). "
         f"{reasoning_clause}"
-        f"claude-sonnet-4-6=restricted/client ({', '.join(restricted_listed)}). "
+        f"{unavailable_clause}"
+        "no-model=restricted governance no-AI; never dispatch restricted data to any model. "
         "opus=MAIN THREAD ONLY — NEVER pass model=\"opus\" to any named sub-agent. "
         "Passing opus to a named sub-agent overrides its configured tier and wastes 5-16x cost."
     )
@@ -93,7 +102,7 @@ def _load_routing_config():
         "sonnet=sonnet-tier named agents: deep-analyse, ci-fixer, architecture-impact, "
         "systems-consistency, security-deep-dive, judge, pr-classifier, orchestrator, "
         "diff-reflex, test-hardener. "
-        "claude-sonnet-4-6=restricted/client data (review). "
+        "no-model=restricted governance no-AI; never dispatch restricted data to any model. "
         "opus=MAIN THREAD ONLY — NEVER pass model=\"opus\" to any named sub-agent. "
         "Passing opus to a named sub-agent overrides its configured tier and wastes 5-16x cost."
     )
@@ -151,7 +160,7 @@ def _load_routing_config():
         pricing_from_config = dict(_PRICING_DEFAULT)
         tier_defs = cfg.get("tier_definitions", {})
         for tier_name, tier_def in tier_defs.items():
-            if isinstance(tier_def, dict) and not tier_name.startswith("$"):
+            if isinstance(tier_def, dict) and not tier_name.startswith("$") and tier_def.get("enabled") is not False:
                 in_rate = tier_def.get("cost_per_m_input")
                 out_rate = tier_def.get("cost_per_m_output")
                 if in_rate is not None and out_rate is not None:
@@ -169,7 +178,7 @@ def _load_routing_config():
         # Build reverse lookup: tier model name -> (in, out) rates
         tier_model_to_rates = {}
         for tier_name, tier_def in tier_defs.items():
-            if isinstance(tier_def, dict) and not tier_name.startswith("$"):
+            if isinstance(tier_def, dict) and not tier_name.startswith("$") and tier_def.get("enabled") is not False:
                 model = tier_def.get("model")
                 in_rate = tier_def.get("cost_per_m_input")
                 out_rate = tier_def.get("cost_per_m_output")
@@ -178,7 +187,7 @@ def _load_routing_config():
 
         # For each proxy-intercepted model, resolve its backend tier and copy rates
         for model_id, model_cfg in proxy_models.items():
-            if isinstance(model_cfg, dict) and not model_id.startswith("$"):
+            if isinstance(model_cfg, dict) and not model_id.startswith("$") and model_cfg.get("enabled") is not False:
                 # Explicit per-alias pricing wins — needed when the alias resolves
                 # to a model that has no tier_definitions entry (e.g. sonnet/haiku
                 # on DeepSeek V4, which no tier routes to).

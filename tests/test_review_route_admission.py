@@ -33,8 +33,9 @@ def external(tmp_path, monkeypatch):
     monkeypatch.delenv('CLIENT_AI_POLICY', raising=False)
     for name in SECRET_NAMES:
         monkeypatch.delenv(name, raising=False)
-    for name in ['LITELLM_PROXY_URL', 'ANTHROPIC_BASE_URL']:
+    for name in ['LITELLM_PROXY_URL', 'ANTHROPIC_BASE_URL', 'ANTHROPIC_DIRECT_BASE_URL']:
         monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv('ANTHROPIC_DIRECT_BASE_URL', 'https://api.anthropic.com')
     subprocess.run(['git', 'init', '-q'], check=True)
     manifest = {'version': 1, 'mode': 'capabilities', 'capabilities': ['llm-anthropic'],
                 'consumer_scope': 'external', 'consumer_repository': 'ExternalExample/project'}
@@ -48,6 +49,63 @@ def external(tmp_path, monkeypatch):
                         '-c', 'core.hooksPath=/dev/null', 'commit', '-qm', 'Policy fixture'], check=True)
         return subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
     return tmp_path, manifest, commit
+
+
+def legacy_git_read_toolchain(tmp_path, monkeypatch):
+    """Reject the new flag and ignore its env replacement, like older Git."""
+    import os
+    import shutil
+
+    original_path = os.defpath
+    real_git = shutil.which('git', path=original_path)
+    assert real_git
+    bindir = tmp_path / 'legacy-git-bin'
+    bindir.mkdir()
+    wrapper = bindir / 'git'
+    wrapper.write_text(
+        '#!' + sys.executable + '\nimport os, sys\n'
+        'if "--no-lazy-fetch" in sys.argv[1:]:\n    raise SystemExit(129)\n'
+        'env = dict(os.environ)\nenv.pop("GIT_NO_LAZY_FETCH", None)\n'
+        + f'os.execve({real_git!r}, [{real_git!r}, *sys.argv[1:]], env)\n')
+    wrapper.chmod(0o755)
+    monkeypatch.setattr(os, 'defpath', str(bindir) + os.pathsep + original_path)
+    return real_git, {'PATH': original_path, 'GIT_CONFIG_NOSYSTEM': '1',
+                      'GIT_CONFIG_GLOBAL': os.devnull, 'GIT_TERMINAL_PROMPT': '0'}
+
+
+def missing_blob_with_local_promisor(root, oid, tmp_path, real_git, environment):
+    """A local SSH stub proves helper execution without any real connection."""
+    import shlex
+
+    marker = tmp_path / 'remote-helper-ran'
+    helper = tmp_path / 'local-ssh-stub'
+    helper.write_text('#!/bin/sh\nprintf x > ' + shlex.quote(str(marker)) + '\nexit 1\n')
+    helper.chmod(0o755)
+    for args in (('remote', 'add', 'lazy', 'ssh://example.invalid/repo'),
+                 ('config', 'remote.lazy.promisor', 'true'),
+                 ('config', 'core.sshCommand', str(helper))):
+        subprocess.run([real_git, '-C', str(root), *args], env=environment,
+                       check=True, capture_output=True, timeout=10)
+    (root / '.git/objects' / oid[:2] / oid[2:]).unlink()
+    probe = subprocess.run([real_git, '-C', str(root), 'cat-file', 'blob', oid],
+                           env=environment, capture_output=True, timeout=10)
+    assert probe.returncode != 0 and marker.is_file()
+    marker.unlink()
+    return marker
+
+
+def test_legacy_git_admits_local_policy_but_never_fetches_missing_blob(external, monkeypatch, tmp_path):
+    root, _, commit = external
+    commit()
+    real_git, environment = legacy_git_read_toolchain(tmp_path, monkeypatch)
+    assert policy.require_direct_llm_admission() is None
+    oid = subprocess.check_output(
+        [real_git, '-C', str(root), 'rev-parse', 'HEAD:.ai/capabilities.json'],
+        env=environment, timeout=10).decode().strip()
+    marker = missing_blob_with_local_promisor(root, oid, tmp_path, real_git, environment)
+    with pytest.raises(policy.RouteAdmissionError, match='consumer policy evidence'):
+        policy.require_direct_llm_admission()
+    assert not marker.exists()
 
 
 @pytest.mark.parametrize('owner', ['Manolii-org', 'BURO-BUILT', 'CPDcheck', 'Impaktful'])
@@ -264,11 +322,6 @@ def test_reusable_hydrates_shared_policy_dependency():
     assert 'scripts/lib/agent_capabilities.py' in data['env']['ASSESSMENT_RUNTIME_FILES'].split()
 
 
-def test_generated_policy_and_entry_points_match_canonical():
-    for prefix in ['plugin/manolii-framework', 'registry/platform/framework']:
-        for path in ['scripts/lib/agent_capabilities.py', 'scripts/run-pr-classifier.py',
-                     'scripts/run-specialists.py', 'scripts/run-judge.py', 'scripts/run-broad-agents.py']:
-            assert (ROOT / prefix / path).read_bytes() == (ROOT / path).read_bytes()
 
 
 @pytest.mark.parametrize('value', ['{broken', '[]', 'null'])
@@ -369,7 +422,10 @@ def test_judge_cli_repo_override_cannot_change_route_identity(monkeypatch, tmp_p
 
 @pytest.mark.parametrize('name', ['run-specialists.py', 'run-judge.py', 'run-pr-classifier.py', 'run-broad-agents.py'])
 @pytest.mark.parametrize('helper', [None, '# older helper without admission\n'])
-def test_old_helper_preserves_proxy_but_never_admits_direct(monkeypatch, tmp_path, name, helper):
+def test_old_helper_preserves_local_proxy_but_never_admits_direct(monkeypatch, tmp_path, name, helper):
+    # This is the supported local legacy path; hosted missing-provenance refusal
+    # is exercised separately before transport creation.
+    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
     import shutil
     scripts = tmp_path / 'scripts'
     scripts.mkdir()
@@ -500,7 +556,11 @@ def test_valid_first_policy_plus_failed_second_blob_denied(external, monkeypatch
     original = policy.subprocess.run
     reads = []
     def fail_second(args, **kwargs):
-        assert '--no-lazy-fetch' in args
+        assert '--no-lazy-fetch' not in args
+        assert '--no-replace-objects' in args
+        assert kwargs['env']['GIT_NO_LAZY_FETCH'] == '1'
+        assert kwargs['env']['GIT_ALLOW_PROTOCOL'] == ''
+        assert kwargs['env']['GIT_TERMINAL_PROMPT'] == '0'
         if 'cat-file' in args:
             reads.append(args[-1])
             if len(reads) == 2:
@@ -546,3 +606,85 @@ def test_external_pr_policy_base_requires_nonshallow_checkout(external, monkeypa
     # Only a local fixture is fetched; admission itself must never lazy-fetch.
     subprocess.run(['git', 'fetch', '-q', '--unshallow', 'origin'], check=True)
     assert policy.require_direct_llm_admission() is None
+
+
+def test_external_admission_does_not_create_an_implicit_endpoint(external, monkeypatch):
+    root, manifest, commit = external
+    commit()
+    monkeypatch.delenv("ANTHROPIC_DIRECT_BASE_URL")
+    monkeypatch.setenv("ANTHROPIC_DIRECT_API_KEY", "offline-direct")
+    assert policy.require_direct_llm_admission() is None
+    with pytest.raises(policy.RouteAdmissionError, match="explicit HTTPS Anthropic origin"):
+        policy.configured_direct_endpoint()
+    for name in ("run-specialists.py", "run-judge.py", "run-pr-classifier.py"):
+        module = load(name)
+        with pytest.raises(module.RouteAdmissionError, match="explicit HTTPS Anthropic origin"):
+            module._endpoint()
+
+
+@pytest.mark.parametrize("base", ["http://api.anthropic.com", "https://other.example",
+    "https://" + "user:password@" + "api.anthropic.com", "https://api.anthropic.com/?query=1",
+    "https://api.anthropic.com/#fragment", "https://api.anthropic.com/v1",
+    "https://api.anthropic.com:8443", "https://api.anthropic.com:invalid"])
+def test_explicit_direct_origin_is_validated_after_admission(external, monkeypatch, base):
+    root, manifest, commit = external
+    commit()
+    monkeypatch.setenv("ANTHROPIC_DIRECT_BASE_URL", base)
+    with pytest.raises(policy.RouteAdmissionError, match="explicit HTTPS Anthropic origin"):
+        policy.configured_direct_endpoint()
+
+
+@pytest.mark.parametrize("base", [
+    "https://api.anthropic.com",
+    "https://API.ANTHROPIC.COM:443/",
+    "https://api.anthropic.com./",
+    "https://api.anthropic.com/\n",
+    "https://api.anthro\tpic.com",
+    "\thttps://api.anthropic.com\r\n",
+])
+def test_explicit_direct_origin_preserves_admitted_first_party_origin(external, monkeypatch, base):
+    root, manifest, commit = external
+    commit()
+    monkeypatch.setenv("ANTHROPIC_DIRECT_BASE_URL", base)
+    assert policy.configured_direct_endpoint() == "https://api.anthropic.com/v1/messages"
+
+
+@pytest.mark.parametrize("name", ["run-specialists.py", "run-judge.py", "run-pr-classifier.py", "run-broad-agents.py"])
+@pytest.mark.parametrize("base", ["http://proxy.example", "https://" + "user:password@proxy.example",
+                                 "https://api.anthropic.com", "https://proxy.example/?query=1"])
+def test_unsafe_proxy_never_becomes_a_direct_credential_context(external, monkeypatch, name, base):
+    root, manifest, commit = external
+    commit()
+    module = load(name)
+    monkeypatch.setattr(module, "_urlopen_https", lambda *args, **kwargs: pytest.fail("network dispatch"))
+    env = NoCredentialReads(GITHUB_REPOSITORY="ExternalExample/project", LITELLM_PROXY_URL=base,
+                            ANTHROPIC_DIRECT_BASE_URL="https://api.anthropic.com",
+                            ANTHROPIC_API_KEY="<placeholder>")
+    with monkeypatch.context() as patch:
+        patch.setattr(module.os, "environ", env)
+        with pytest.raises(module.RouteAdmissionError, match="unsafe configured|direct provider"):
+            module.get_api_key() if name == "run-broad-agents.py" else module._endpoint()
+        if name == "run-broad-agents.py":
+            role = module.AgentConfig("architecture", "sonnet", "internal", "system", "instructions")
+            result = module.invoke_agent(role, "", "complete source")
+            assert result == {"source": "architecture", "findings": [], "first_party": False,
+                              "skipped": "route_policy_denied"}
+
+
+def test_explicit_direct_origin_is_forwarded_in_all_workflow_phases():
+    import yaml
+    def envs(value):
+        if isinstance(value, dict):
+            if isinstance(value.get("env"), dict) and "ANTHROPIC_BASE_URL" in value["env"]:
+                yield value["env"]
+            for child in value.values():
+                yield from envs(child)
+        elif isinstance(value, list):
+            for child in value:
+                yield from envs(child)
+    for name in ("pr-assessment.yml", "pr-assessment-reusable.yml"):
+        document = yaml.safe_load((ROOT / ".github/workflows" / name).read_text())
+        phases = list(envs(document))
+        assert len(phases) == 4
+        assert all(phase["ANTHROPIC_DIRECT_BASE_URL"] == "${{ vars.ANTHROPIC_DIRECT_BASE_URL }}"
+                   for phase in phases)

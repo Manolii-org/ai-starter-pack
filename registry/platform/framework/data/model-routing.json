@@ -236,16 +236,17 @@
       }
     },
     "tier-0-oss-heavy": {
-      "provider": "fireworks",
-      "model": "accounts/fireworks/models/kimi-k2p6",
-      "litellm_alias": "tier-0-oss-heavy",
-      "label": "Kimi K2.6 (OSS heavy tier) — RESTRICTED USE",
-      "swebench_pro": 0.586,
-      "swebench_verified": 0.802,
-      "baseline_swebench_pro": 0.586,
-      "intelligence_score": 54,
-      "context_window": 262144,
+      "enabled": false,
+      "provider": null,
+      "model": null,
+      "litellm_alias": null,
+      "label": "OSS heavy tier unavailable pending qualification",
+      "intelligence_score": null,
+      "context_window": null,
       "context_cap_runtime": 64000,
+      "cost_per_m_input": null,
+      "cost_per_m_output": null,
+      "data_clearance": [],
       "use_cases": {
         "allowed": [
           "code-patch",
@@ -277,72 +278,8 @@
           "long-context-over-64k"
         ]
       },
-      "data_clearance": [
-        "internal",
-        "public"
-      ],
-      "cost_per_m_input": 0.5,
-      "cost_per_m_output": 2.8,
-      "weaknesses": [
-        "Smoke test null as of 2026-05-10 — run against Fireworks serverless before relying on primary",
-        "8-case fitness eval not yet run — GLM-5.1 baseline comparison pending",
-        "PRC censorship on politically sensitive topics (Moonshot AI CN weights)",
-        "~100% tool call rate inherited from K2.5 base — no published BFCL score specific to K2.6",
-        "Chinese character / non-English leakage risk not confirmed absent (verify in fitness eval)"
-      ],
-      "eval_status": "promoted-pending-smoke-test. Smoke test + 8-case fitness eval required before production reliance. See reports/tier-0-oss-heavy-evaluation-2026-05-10.md for rationale. GLM-5.1 retained as tertiary fallback.",
-      "fallback_chain": {
-        "primary": {
-          "provider": "fireworks",
-          "litellm_alias": "tier-0-oss-heavy",
-          "model_id_hint": "accounts/fireworks/models/kimi-k2p6",
-          "smoke_tested": null,
-          "vision": {
-            "supported": true,
-            "modalities": [
-              "text",
-              "image"
-            ]
-          }
-        },
-        "secondary": {
-          "provider": "openrouter",
-          "model_id_hint": "moonshotai/kimi-k2.6",
-          "cost_per_m_input": 0.65,
-          "cost_per_m_output": 3.41,
-          "context_window": 262144,
-          "litellm_alias": "tier-0-oss-heavy-fallback-openrouter",
-          "notes": "Repointed 2026-10-28 from Together, which stopped serving Kimi K2.6 serverless. OpenRouter US-hosted zero-data-retention endpoints only.",
-          "vision": {
-            "supported": true,
-            "modalities": [
-              "text",
-              "image"
-            ]
-          }
-        },
-        "tertiary": {
-          "provider": "fireworks",
-          "litellm_alias": "tier-0-oss-heavy-fallback-glm",
-          "model_id_hint": "accounts/fireworks/models/glm-5p1",
-          "cost_per_m_input": 1.4,
-          "cost_per_m_output": 4.4,
-          "notes": "GLM-5.1 retained as cross-family fallback after K2.6 primary + OpenRouter K2.6 secondary. Different model family ensures tertiary survives a Kimi-family outage.",
-          "vision": {
-            "supported": false,
-            "modalities": [
-              "text"
-            ]
-          }
-        }
-      },
-      "vision": {
-        "supported": true,
-        "modalities": [
-          "text",
-          "image"
-        ]
-      }
+      "fallback_chain": {},
+      "eval_status": "Unavailable pending a qualified heavy model: intelligence_score >= 42, Smoke test + 8-case fitness eval required. No implicit model substitution."
     },
     "tier-1-fast": {
       "provider": "fireworks",
@@ -417,13 +354,11 @@
     },
     "tier-2-agentic": {
       "provider": "fireworks",
-      "model": "accounts/fireworks/models/kimi-k2p6",
+      "model": "accounts/fireworks/models/minimax-m3",
       "litellm_alias": "tier-2-agentic",
-      "swebench": 0.768,
-      "baseline_swebench": 0.768,
-      "intelligence_score": 54,
-      "gdpval_aa_elo": 1531,
-      "context_window": 262144,
+      "intelligence_score": 45,
+      "intelligence_index_version": "4.1.1",
+      "context_window": 1000000,
       "use_cases": [
         "long-tool-chains",
         "multi-step-subagents",
@@ -433,63 +368,35 @@
         "internal",
         "public"
       ],
-      "cost_per_m_input": 0.95,
-      "cost_per_m_output": 4.0,
-      "throughput_tok_per_sec": 140,
+      "cost_per_m_input": 0.3,
+      "cost_per_m_output": 1.2,
       "fallback_chain": {
         "primary": {
           "provider": "fireworks",
           "litellm_alias": "tier-2-agentic",
-          "model_id_hint": "accounts/fireworks/models/kimi-k2p6",
-          "context_window": 262144,
-          "vision": {
-            "supported": false,
-            "modalities": [
-              "text"
-            ]
-          },
-          "smoke_tested": "2026-04-28"
+          "model_id_hint": "accounts/fireworks/models/minimax-m3",
+          "context_window": 1000000,
+          "smoke_tested": "2026-10-28",
+          "notes": "Autofix acceptance probe on the pack's CI proxy 2026-10-28 (two-file bug): fixed and pushed first time, 19 turns, 37 s."
         },
         "secondary": {
           "provider": "openrouter",
-          "model_id_hint": "moonshotai/kimi-k2.6",
-          "cost_per_m_input": 0.65,
-          "cost_per_m_output": 3.41,
-          "context_window": 262144,
-          "litellm_alias": "tier-2-agentic-fallback-kimi",
-          "notes": "Repointed 2026-10-28 from Together, which stopped serving Kimi K2.6 serverless. OpenRouter US-hosted zero-data-retention endpoints only.",
-          "vision": {
-            "supported": true,
-            "modalities": [
-              "text",
-              "image"
-            ],
-            "mmmu_pro": 0.62,
-            "pricing": {
-              "per_1k_images_1mp_usd": 1.425,
-              "native_unit": "input_token_equivalent",
-              "native_rate_usd": 0.95
-            }
-          }
-        },
-        "tertiary": {
-          "provider": "openrouter",
-          "model_id_hint": "qwen/qwen3.5-397b-a17b",
-          "cost_per_m_input": 0.5,
-          "cost_per_m_output": 3.6,
-          "context_window": 262144,
-          "litellm_alias": "tier-2-agentic-fallback-qwen",
-          "notes": "Repointed 2026-10-28 from Together, which now serves Qwen 3.5 397B on dedicated deployments only. Different model family. OpenRouter US-hosted zero-data-retention endpoints only."
+          "litellm_alias": "tier-2-agentic-pro-fallback-openrouter",
+          "model_id_hint": "minimax/minimax-m3",
+          "cost_per_m_input": 0.3,
+          "cost_per_m_output": 1.2,
+          "context_window": 1048576,
+          "notes": "Same model on a second provider (US-hosted zero-data-retention endpoints only), so a Fireworks outage does not take out the chain."
         }
       },
       "vision": {
-        "supported": true,
+        "supported": false,
         "modalities": [
-          "text",
-          "image"
-        ],
-        "mmmu_pro": 0.62
-      }
+          "text"
+        ]
+      },
+      "label": "MiniMax M3 (ordinary agentic route; existing qualified provider)",
+      "qualification_source": "Reuses the existing tier-2-agentic-pro Fireworks M3 acceptance probe recorded 2026-10-28; no new inference or heavy-tier qualification claimed."
     },
     "tier-2-agentic-pro": {
       "provider": "fireworks",
@@ -527,12 +434,6 @@
           "cost_per_m_output": 1.2,
           "context_window": 1048576,
           "notes": "Same model on a second provider (US-hosted zero-data-retention endpoints only), so a Fireworks outage does not take out the chain."
-        },
-        "tertiary": {
-          "provider": "fireworks",
-          "litellm_alias": "tier-2-agentic-fallback-fireworks",
-          "model_id_hint": "accounts/fireworks/models/kimi-k2p6",
-          "context_window": 262144
         }
       },
       "vision": {
@@ -584,28 +485,6 @@
           }
         },
         "secondary": {
-          "provider": "fireworks",
-          "litellm_alias": "tier-3-tool-fallback-kimi-fireworks",
-          "model_id_hint": "accounts/fireworks/models/kimi-k2p6",
-          "smoke_tested": "2026-04-27",
-          "cost_per_m_input": 0.95,
-          "cost_per_m_output": 4.0,
-          "notes": "K2.5 → K2.6 upgrade 2026-04-26: intelligence 47 → 54. Cross-provider first hop from OpenRouter primary. Smoke tested 2026-04-27: 3/3 PASS via live proxy.",
-          "vision": {
-            "supported": true,
-            "modalities": [
-              "text",
-              "image"
-            ],
-            "mmmu_pro": 0.62,
-            "pricing": {
-              "per_1k_images_1mp_usd": 1.425,
-              "native_unit": "input_token_equivalent",
-              "native_rate_usd": 0.95
-            }
-          }
-        },
-        "tertiary": {
           "provider": "openrouter",
           "model_id_hint": "moonshotai/kimi-k2.6",
           "cost_per_m_input": 0.65,
@@ -1072,9 +951,9 @@
       "allowed_tiers": [
         "tier-0-opus",
         "tier-0-sonnet",
-        "tier-0-oss-heavy",
         "tier-1-fast",
         "tier-2-agentic",
+        "tier-2-agentic-pro",
         "tier-3-tool",
         "tier-4-extract",
         "tier-5-latency",
@@ -1271,41 +1150,32 @@
         }
       },
       "standard": {
-        "model_id": "accounts/fireworks/models/kimi-k2p6",
-        "label": "Kimi K2.6",
-        "params": "1T MoE (32B active)",
-        "cost_per_m_input": 0.5,
-        "cost_per_m_output": 2.8,
-        "context_window": 262144,
-        "serverless": true,
-        "function_calling": true,
-        "thinking": false,
-        "notes": "Non-thinking mode. Repointed 2026-05-01 from DeepSeek V3.2 (Fireworks serverless retirement 2026-05-14). Frontier open-source for everyday tasks, agent work, function calling.",
+        "model_id": "accounts/fireworks/models/minimax-m3",
+        "label": "MiniMax M3 (existing ordinary agentic route)",
+        "cost_per_m_input": 0.3,
+        "cost_per_m_output": 1.2,
+        "context_window": 1000000,
+        "data_clearance": [
+          "internal",
+          "public"
+        ],
         "vision": {
           "supported": false,
           "modalities": [
             "text"
           ]
-        }
-      },
-      "heavy": {
-        "model_id": "accounts/fireworks/models/kimi-k2p6",
-        "label": "Kimi K2.6 (Reasoning)",
-        "params": "1T MoE (32B active)",
-        "cost_per_m_input": 0.5,
-        "cost_per_m_output": 2.8,
-        "context_window": 262144,
+        },
+        "notes": "Reuses the existing tier-2-agentic-pro Fireworks M3 acceptance probe recorded 2026-10-28; no new inference or heavy-tier qualification claimed.",
         "serverless": true,
         "function_calling": true,
-        "thinking": true,
-        "notes": "Promoted 2026-05-10: GLM-5.1 → Kimi K2.6. int=54, SWE-Pro 58.6%, IV=28. PRC-origin weights (Moonshot AI). GLM-5.1 retained as tertiary fallback in tier-0-oss-heavy fallback chain.",
-        "vision": {
-          "supported": true,
-          "modalities": [
-            "text",
-            "image"
-          ]
-        }
+        "thinking": false,
+        "params": null
+      },
+      "heavy": {
+        "enabled": false,
+        "model_id": null,
+        "label": "Heavy fallback unavailable pending qualification",
+        "notes": "Unavailable pending a qualified heavy model: intelligence_score >= 42, Smoke test + 8-case fitness eval required. No implicit model substitution."
       }
     },
     "alternatives": {
@@ -1765,6 +1635,81 @@
             "text"
           ]
         }
+      },
+      "kimi-k3": {
+        "provider": "fireworks",
+        "model": "accounts/fireworks/models/kimi-k3",
+        "litellm_alias": null,
+        "label": "Kimi K3 (OSS heavy tier) — RESTRICTED USE",
+        "swebench_pro": null,
+        "swebench_verified": null,
+        "baseline_swebench_pro": null,
+        "intelligence_score": null,
+        "context_window": 1048576,
+        "context_cap_runtime": 64000,
+        "use_cases": {
+          "allowed": [
+            "code-patch",
+            "swe-patch",
+            "agentic-loop",
+            "long-horizon-agent",
+            "bulk-extract",
+            "math-reasoning",
+            "structured-extraction",
+            "classification",
+            "scientific-reasoning"
+          ],
+          "excluded": [
+            "prose",
+            "creative-writing",
+            "tone-sensitive",
+            "client-facing",
+            "code-review",
+            "architecture",
+            "adr",
+            "trade-off-analysis",
+            "orchestration",
+            "dialog",
+            "planning",
+            "vision",
+            "multimodal",
+            "factual-qa",
+            "narrative-docs",
+            "long-context-over-64k"
+          ]
+        },
+        "data_clearance": [
+          "internal",
+          "public"
+        ],
+        "cost_per_m_input": 3.0,
+        "cost_per_m_output": 15.0,
+        "weaknesses": [
+          "Kimi K3 smoke and fitness qualification not yet recorded; verify the current Fireworks route before production reliance.",
+          "8-case fitness eval not yet run — GLM-5.1 baseline comparison pending",
+          "PRC censorship on politically sensitive topics (Moonshot AI CN weights)",
+          "No Kimi K3 BFCL/tool-call score qualified here; prior K2.5/K2.6 measurements are not inherited.",
+          "Chinese character / non-English leakage risk not confirmed absent (verify in fitness eval)"
+        ],
+        "eval_status": "inactive-candidate-pending-qualification. Smoke test + 8-case fitness eval required before activation. The 2026-05-10 report and its GLM-5.1 fallback describe the historical K2.6 setup, not a current K3 serving chain.",
+        "fallback_chain": {},
+        "vision": {
+          "supported": true,
+          "modalities": [
+            "text",
+            "image"
+          ],
+          "$source": "https://fireworks.ai/models/fireworks/kimi-k3: image input and function calling supported; inherited image benchmarks/prices are not qualified for this model."
+        },
+        "$benchmark_note": "Kimi K3 has no qualified canonical intelligence, SWE, GDPval or throughput baseline here; prior K2.6 measurements are not inherited.",
+        "$model_source": "https://fireworks.ai/models/fireworks/kimi-k3 (serverless; $3/$0.30/$15 per million input/cached/output; 1,048,576 context). Catalog verified 2026-11-04; no inference qualification claimed.",
+        "enabled": false,
+        "status": "inactive-pending-qualification",
+        "notes": "Catalog facts only. No serving route or automatic fallback is enabled. Smoke test + 8-case fitness eval required before heavy-tier activation; no prior-model measurements qualify this candidate.",
+        "swebench": null,
+        "baseline_swebench": null,
+        "gdpval_aa_elo": null,
+        "throughput_tok_per_sec": null
       }
     },
     "activation_conditions": [
@@ -1800,19 +1745,12 @@
         }
       },
       "secondary": {
-        "model_id": "openai/accounts/fireworks/models/kimi-k2p6",
-        "label": "Kimi K2.6 (via Fireworks)",
-        "cost_per_action": 0.0005,
-        "monthly_estimate_20_tasks_day": 1.5,
-        "env_var": "FIREWORKS_API_KEY",
-        "base_url": "https://api.fireworks.ai/inference/v1",
-        "notes": "Repointed 2026-05-01 from DeepSeek V3.2 (Fireworks serverless retirement 2026-05-14). Kimi K2.6 is the Fireworks-recommended replacement; ~100-200 tok/s but 262K context. Automatic fallback on Groq rate-limit or 5xx.",
-        "vision": {
-          "supported": false,
-          "modalities": [
-            "text"
-          ]
-        }
+        "enabled": false,
+        "model_id": null,
+        "label": "Optional browser fallback unavailable pending qualification",
+        "cost_per_action": null,
+        "monthly_estimate_20_tasks_day": null,
+        "notes": "Kimi K3 catalog facts are retained as an inactive candidate; no browser inference qualification is recorded."
       },
       "tertiary": {
         "model_id": "google/gemini-2.5-flash",
@@ -1853,7 +1791,7 @@
       },
       "tier_thresholds": {
         "restricted_tier_eligibility": "gdpval_aa_elo >= 1550 required for code-review / security / architecture tasks. Currently only Anthropic models qualify. No non-PRC US-origin model meets this threshold (best: Gemma 4 31B at 1124).",
-        "heavy_tier_oss": "intelligence_score >= 42 for tier-0-oss-heavy (current: Kimi K2.6 at 54, MiniMax M2.7 at 50). Drift alert if current model drops >5pp below baseline.",
+        "heavy_tier_oss": "intelligence_score >= 42 for tier-0-oss-heavy. No qualified primary is active; Kimi K3 remains an inactive candidate pending smoke test + 8-case fitness eval. Drift alert if a qualified current model drops >5pp below its qualified baseline.",
         "standard_tier_oss": "intelligence_score >= 40 for tier-1-fast / tier-2-agentic.",
         "tool_tier_oss": "tool_calling_success_rate >= 85% for tier-3-tool.",
         "extract_tier_oss": "Speed (tok/s) is the primary signal for tier-4-extract and tier-5-latency; intelligence_score secondary."
@@ -1869,21 +1807,12 @@
   },
   "tier_aliases": {
     "tier-0-oss-heavy": {
-      "resolves_to": "fireworks:accounts/fireworks/models/kimi-k2p6",
-      "model_id": "accounts/fireworks/models/kimi-k2p6",
-      "litellm_alias": "tier-0-oss-heavy",
-      "label": "Kimi K2.6 (Fireworks) — OSS heavy tier, RESTRICTED USE",
-      "data_sensitivity_max": "internal",
+      "enabled": false,
       "requires_proxy": true,
-      "context_window": 262144,
-      "notes": "Promoted 2026-05-10: GLM-5.1 → Kimi K2.6. ONLY route here when task tag is in tier-0-oss-heavy.use_cases.allowed AND USE_OSS_FALLBACK is set. NOT a default; explicit opt-in only. Do not use for restricted_us_oss_ok or restricted data.",
-      "vision": {
-        "supported": true,
-        "modalities": [
-          "text",
-          "image"
-        ]
-      }
+      "model_id": null,
+      "resolves_to": "",
+      "label": "OSS heavy tier unavailable pending qualification",
+      "notes": "Unavailable pending a qualified heavy model: intelligence_score >= 42, Smoke test + 8-case fitness eval required. No implicit model substitution."
     },
     "tier-1-fast": {
       "resolves_to": "fireworks:accounts/fireworks/models/gpt-oss-120b",
@@ -1903,15 +1832,14 @@
       }
     },
     "tier-2-agentic": {
-      "resolves_to": "fireworks:accounts/fireworks/models/kimi-k2p6",
-      "model_id": "accounts/fireworks/models/kimi-k2p6",
+      "resolves_to": "fireworks:accounts/fireworks/models/minimax-m3",
+      "model_id": "accounts/fireworks/models/minimax-m3",
       "litellm_alias": "tier-2-agentic",
-      "label": "Kimi K2.6 (Fireworks) — agentic multi-step",
+      "label": "MiniMax M3 (existing ordinary agentic route)",
       "data_sensitivity_max": "internal",
       "requires_proxy": true,
-      "context_window": 262144,
-      "throughput_tok_per_sec": 140,
-      "notes": "Agentic tier for multi-step subagents, session transcript mining, and long tool chains. 262K context. PRC-origin (Moonshot AI) — capped at internal. Do not use for restricted data.",
+      "context_window": 1000000,
+      "notes": "Reuses the existing tier-2-agentic-pro Fireworks M3 acceptance probe recorded 2026-10-28; no new inference or heavy-tier qualification claimed.",
       "vision": {
         "supported": false,
         "modalities": [
@@ -1992,7 +1920,7 @@
       "label": "Llama 3.1 8B Instant (Groq LPU) — bulk extraction",
       "data_sensitivity_max": "internal",
       "requires_proxy": true,
-      "notes": "Cheapest extraction tier ($0.05/$0.08). QUALITY BOUNDARY: only route here for binary/multi-class classification, format/lint, grep/count, and DOM element selection — tasks with well-defined correct answers. Do NOT route email enrichment, standing-order evaluation, summarization, or any multi-step reasoning here; those require tier-2-agentic (Kimi K2.6) minimum. Background pipeline: email classification → tier-4-extract (correct); email enrichment/recommendation → tier-2-agentic (correct). Groq Developer rate limit ~1000 rpm; LiteLLM fallback chain routes overflow to Together Llama 3.3 70B Instruct Turbo, then Together DeepSeek V3.2 Exp. Do not use for restricted data.",
+      "notes": "Cheapest extraction tier ($0.05/$0.08). QUALITY BOUNDARY: only route here for binary/multi-class classification, format/lint, grep/count, and DOM element selection — tasks with well-defined correct answers. Do NOT route email enrichment, standing-order evaluation, summarization, or any multi-step reasoning here; those require tier-2-agentic (currently Kimi K3; separate qualification required) minimum. Background pipeline: email classification → tier-4-extract (correct); email enrichment/recommendation → tier-2-agentic (correct). Groq Developer rate limit ~1000 rpm; LiteLLM fallback chain routes overflow to Together Llama 3.3 70B Instruct Turbo, then Together DeepSeek V3.2 Exp. Do not use for restricted data.",
       "vision": {
         "supported": false,
         "modalities": [
@@ -2240,52 +2168,11 @@
       "cost_per_m_output": 3.48
     },
     "sonnet-internal": {
-      "label": "sonnet-internal (internal-only, Kimi K2.6 Fireworks dual-key)",
-      "resolves_to": "fireworks:kimi-k2p6 (dual-key load balanced)",
+      "enabled": false,
+      "resolves_to": "",
+      "fallback_chain": {},
       "data_sensitivity_max": "internal",
-      "proxy_live_since": "2026-04-20",
-      "warning": "PRC-origin (Moonshot AI / Kimi). ONLY for data_sensitivity: internal agents. Do NOT assign to restricted_us_oss_ok or restricted agents.",
-      "fallback_chain": {
-        "primary": {
-          "provider": "fireworks",
-          "litellm_alias": "sonnet-internal",
-          "model_id_hint": "kimi-k2p6 (dual-key)",
-          "vision": {
-            "supported": false,
-            "modalities": [
-              "text"
-            ]
-          }
-        },
-        "secondary": {
-          "provider": "together",
-          "litellm_alias": "sonnet-internal-fallback-together",
-          "model_id_hint": "moonshotai/Kimi-K2.6",
-          "vision": {
-            "supported": false,
-            "modalities": [
-              "text"
-            ]
-          }
-        },
-        "tertiary": {
-          "provider": "groq",
-          "litellm_alias": "sonnet-internal-fallback-groq",
-          "model_id_hint": "llama-3.1-8b-instant",
-          "vision": {
-            "supported": false,
-            "modalities": [
-              "text"
-            ]
-          }
-        }
-      },
-      "vision": {
-        "supported": false,
-        "modalities": [
-          "text"
-        ]
-      }
+      "notes": "No active bundled route. Kimi K3 is an inactive candidate pending qualification; no substitution is implied."
     }
   },
   "tiers": {
@@ -2374,9 +2261,7 @@
       }
     }
   },
-  "dispatch_restricted_agents": [
-    "security-deep-dive"
-  ],
+  "dispatch_restricted_agents": [],
   "agent_routing": {
     "default": "tier-1-fast",
     "generate": "tier-1-fast",

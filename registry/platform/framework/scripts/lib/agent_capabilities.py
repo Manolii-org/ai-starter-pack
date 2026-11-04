@@ -16,6 +16,7 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+import urllib.parse
 
 VALID_SOURCES = {"env", "doppler", "broker", "mcp"}
 VALID_RETRIEVAL = {"eager", "deferred"}
@@ -52,6 +53,30 @@ def assessment_context(environ=None):
                 "run": run, "attempt": attempt}
     except (OSError, UnicodeError, TypeError, ValueError, KeyError, AttributeError):
         raise ValueError("assessment launcher context unavailable") from None
+
+
+def candidate_assessment_context(role, environ=None):
+    """Bind an artifact to its trusted producing job, including retained jobs.
+
+    GitHub retains successful prerequisite outputs when only failed jobs rerun.
+    Never infer the producing attempt from candidate/model-controlled metadata.
+    """
+    env = os.environ if environ is None else environ
+    context = assessment_context(env)
+    if context is None:
+        return None
+    if role not in selected_review_roles(env):
+        raise ValueError("assessment producer role unavailable")
+    phase = "SKILLS" if role in env["REVIEW_SKILLS"].split(",") else "AGENTS"
+    attempt = env.get("REVIEW_" + phase + "_ATTEMPT")
+    # Initial launches cannot retain an earlier producer. Legacy first-attempt
+    # callers remain compatible; reruns require explicit trusted job outputs.
+    if attempt is None and context["attempt"] == "1":
+        attempt = "1"
+    if (not isinstance(attempt, str) or not re.fullmatch(r"[1-9][0-9]*", attempt)
+            or int(attempt) > int(context["attempt"])):
+        raise ValueError("assessment producing attempt unavailable")
+    return {**context, "attempt": attempt}
 
 
 def bind_review_candidate(data):
@@ -115,12 +140,13 @@ def require_direct_llm_admission(repo_root=None, environ=None):
     def read_git(*args):
         try:
             result = subprocess.run(
-                ["git", "--no-pager", "--no-replace-objects", "--no-lazy-fetch",
+                ["git", "--no-pager", "--no-replace-objects",
                  "-C", str(root), "-c", "core.fsmonitor=false", *args],
                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=5,
                 # Never pass provider credentials or allow implicit object fetch.
                 env={"PATH": os.defpath, "GIT_CONFIG_NOSYSTEM": "1",
-                     "GIT_CONFIG_GLOBAL": os.devnull, "GIT_TERMINAL_PROMPT": "0"},
+                     "GIT_CONFIG_GLOBAL": os.devnull, "GIT_TERMINAL_PROMPT": "0",
+                     "GIT_NO_LAZY_FETCH": "1", "GIT_ALLOW_PROTOCOL": ""},
             )
         except (OSError, subprocess.SubprocessError):
             raise RouteAdmissionError("direct review denied: policy source unavailable") from None
@@ -330,6 +356,28 @@ def main():
         for name in sorted(resolved):
             print(name)
     return 0
+
+
+def configured_direct_endpoint() -> str:
+    """Admit an explicit external provider origin; never invent a fallback."""
+    require_direct_llm_admission()
+    base = os.environ.get("ANTHROPIC_DIRECT_BASE_URL") or os.environ.get("ANTHROPIC_BASE_URL") or ""
+    try:
+        parsed = urllib.parse.urlsplit(base)
+        valid = (parsed.scheme == "https" and parsed.hostname
+                 and parsed.hostname.lower().rstrip(".") == "api.anthropic.com"
+                 and parsed.port in (None, 443) and not parsed.username and not parsed.password
+                 and not parsed.query and not parsed.fragment and parsed.path in ("", "/"))
+    except ValueError:
+        valid = False
+    if not valid:
+        raise RouteAdmissionError("direct review denied: explicit HTTPS Anthropic origin required")
+    # Serialize only the admitted origin, never the raw environment spelling.
+    # urlsplit normalizes control characters; carrying the original string into
+    # the HTTP client would restore those characters after validation.
+    return urllib.parse.urlunsplit(
+        (parsed.scheme, parsed.hostname.lower().rstrip("."), "/v1/messages", "", "")
+    )
 
 
 if __name__ == "__main__":
