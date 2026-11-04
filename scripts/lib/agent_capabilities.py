@@ -137,9 +137,10 @@ def _readonly_estate_admission(manifest, repository, role):
 def readonly_proxy_fallback(role, repo_root=None, environ=None):
     """True when ``role`` is admitted by the estate read-only policy.
 
-    Callers use this only after the direct key is absent, so an admitted
-    reviewer can run on the already-configured CI proxy. An external
-    ``llm-anthropic`` grant does not qualify: that lane stays on Anthropic.
+    An admitted reviewer stays on the already-configured CI proxy, including
+    when a direct key is present. Callers check this before reading that key.
+    An external ``llm-anthropic`` grant does not qualify: that lane stays on
+    Anthropic.
     """
     if role not in READ_ONLY_DIRECT_REVIEWERS:
         return False

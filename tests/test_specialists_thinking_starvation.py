@@ -80,10 +80,16 @@ def _patch_endpoint(monkeypatch, proxied: bool):
 
 def _fake_urlopen(monkeypatch, responses: list[bytes]) -> list[dict]:
     """Fake _urlopen_https; returns a capture list of the sent payloads."""
-    sent: list[dict] = []
+
+    class _Sent(list):
+        urls: list[str]
+
+    sent = _Sent()
+    sent.urls = []
 
     def fake(req, timeout=None, host=None):
         sent.append(json.loads(req.data.decode("utf-8")))
+        sent.urls.append(req.full_url)
         return _FakeResponse(responses[len(sent) - 1])
 
     monkeypatch.setattr(MODULE, "_urlopen_https", fake)
@@ -227,12 +233,17 @@ def test_complete_868_line_diff_reaches_real_security_role(monkeypatch, tmp_path
     assert len(diff) > 50000
     monkeypatch.setenv("PR_TITLE", "Review complete input" if metadata else "")
     monkeypatch.setenv("PR_BODY", "Optional metadata" if metadata else "")
+    # The committed estate policy admits this role. With a proxy configured,
+    # the real role stays on the proxy even though a direct key is set.
+    monkeypatch.setenv("GITHUB_REPOSITORY", "Manolii-org/ai-starter-pack")
+    monkeypatch.chdir(ROOT)
     (name, error), sent, candidate = _invoke_security(monkeypatch, tmp_path, diff)
     assert name == "security-boundary-test" and error is None
     assert len(sent) == 1
     assert f"<untrusted_diff>\n{diff}\n</untrusted_diff>" in sent[0]["messages"][0]["content"]
-    assert sent[0]["model"] == "claude-haiku-4-5-20251001"
-    assert sent[0]["max_tokens"] == 800
+    assert sent.urls == ["https://proxy.example/v1/messages"]  # type: ignore[attr-defined]
+    assert sent[0]["model"] == "haiku"
+    assert sent[0]["max_tokens"] == 800 + MODULE._PROXY_THINKING_HEADROOM
     assert candidate == {"source": "security-boundary-test", "findings": []}
 
 
