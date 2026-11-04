@@ -413,7 +413,11 @@ p.account_probe(Path(sys.argv[2]))
             deadline = time.monotonic() + 5
             while time.monotonic() < deadline:
                 status = Path(f"/proc/{child}/status")
-                if not status.exists() or "State:\tZ" in status.read_text():
+                try:
+                    gone = (not status.exists()) or "State:\tZ" in status.read_text()
+                except (FileNotFoundError, ProcessLookupError):
+                    gone = True
+                if gone:
                     break
                 time.sleep(0.02)
             else:
