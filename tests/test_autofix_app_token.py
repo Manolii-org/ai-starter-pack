@@ -34,9 +34,15 @@ def test_mint_step_fails_closed_and_is_pinned() -> None:
             assert step.get("continue-on-error") is not True
             assert step["uses"] == PIN.split(" # ", 1)[0]
             assert "vars.GH_AUTOMATION_APP_ID != ''" in step["if"]
+            if workflow.name == "pr-autofix-loop.yml":
+                assert step["if"].startswith("steps.lock.outputs.go == 'true' && ")
             assert step["with"]["private-key"] == "${{ secrets.GH_AUTOMATION_APP_PRIVATE_KEY }}"
             assert step["with"]["repositories"] == "${{ github.event.repository.name }}"
             assert step["with"]["permission-contents"] == "write"
+        if workflow.name == "pr-autofix-loop-reusable.yml":
+            call = (spec.get("on") or spec.get(True) or {})["workflow_call"]
+            assert "GH_AUTOMATION_APP_PRIVATE_KEY" in call["secrets"]
+            assert call["secrets"]["GH_AUTOMATION_APP_PRIVATE_KEY"]["required"] is False
 
 
 def test_token_expressions_prefer_the_app_then_the_existing_secret() -> None:
