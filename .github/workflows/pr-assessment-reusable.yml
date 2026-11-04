@@ -24,7 +24,7 @@ on:
       litellm_proxy_url: { type: string, default: '', description: 'Proxy base URL for proxy mode; pass vars.LITELLM_PROXY_URL.' }
       model: { type: string, default: '', description: 'Optional model id override; empty = script/action default.' }
       runs_on: { type: string, default: ubuntu-latest }
-      pack_ref: { type: string, default: v1, description: 'Ref of Manolii-org/ai-starter-pack to hydrate missing runtime files from. Defaults to the moving major alias; callers on an immutable reusable pin should pass the same tag. Fetched only when the caller is missing at least one file.' }
+      pack_ref: { type: string, default: '', description: 'Override the pack revision used for hydration. Default: this reusable workflow''s own commit (job.workflow_sha). Never the moving v1 alias and never the default branch.' }
       trusted_sync_author_id: { type: number, default: 215220684, description: 'GitHub numeric user id allowed to skip assessment on automated/sync-* PRs (mechanical sync bot). Set 0 to disable the skip entirely.' }
       jev_judge_shadow: { type: string, default: 'off', description: "Observe-only Jev (TypeSafe) shadow of the Judge's four gates. Only the literal 'on' enables it, and the repo variable JEV_ENABLED_JUDGE_FINDING_SHADOW must also be 'true' (any other value, including '0', is the kill switch). Never changes the verdict. See docs/jev-judge-shadow.md." }
       jev_entity: { type: string, default: '', description: "Billing entity that owns JEV_TYPESAFE_API_KEY (e.g. manolii, buro, impaktful). Required when jev_judge_shadow is 'on'; recorded in receipts." }
@@ -105,6 +105,17 @@ jobs:
       ANTHROPIC_DIRECT_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       CLIENT_AI_POLICY: ${{ vars.CLIENT_AI_POLICY }}
     steps:
+      - name: Resolve pack revision
+        id: pack
+        env:
+          PACK_REF: ${{ inputs.pack_ref || job.workflow_sha }}
+        run: |
+          if [ -z "$PACK_REF" ]; then
+            echo "::error::Could not resolve this workflow's own pack commit; pass pack_ref: <40-char commit SHA>"
+            exit 1
+          fi
+          echo "ref=$PACK_REF" >> "$GITHUB_OUTPUT"
+
       - name: Validate provider secrets
         env:
           PM: ${{ inputs.provider_mode }}
@@ -162,7 +173,7 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           repository: Manolii-org/ai-starter-pack
-          ref: ${{ inputs.pack_ref }}
+          ref: ${{ steps.pack.outputs.ref }}
           path: .pack-hydrate
           persist-credentials: false
           # Only the runtime trees ASSESSMENT_RUNTIME_FILES can name — the rest of
@@ -201,7 +212,7 @@ jobs:
               # A listed path the pack no longer ships means this list and the
               # runners have drifted. Continuing would resurface later as an
               # opaque FileNotFoundError inside a runner.
-              echo "::error::$f is not present in the pack at '${{ inputs.pack_ref }}'"
+              echo "::error::$f is not present in the pack at '${{ steps.pack.outputs.ref }}'"
               exit 1
             fi
             mkdir -p "$(dirname "$f")"
@@ -507,6 +518,17 @@ jobs:
       ANTHROPIC_DIRECT_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       CLIENT_AI_POLICY: ${{ vars.CLIENT_AI_POLICY }}
     steps:
+      - name: Resolve pack revision
+        id: pack
+        env:
+          PACK_REF: ${{ inputs.pack_ref || job.workflow_sha }}
+        run: |
+          if [ -z "$PACK_REF" ]; then
+            echo "::error::Could not resolve this workflow's own pack commit; pass pack_ref: <40-char commit SHA>"
+            exit 1
+          fi
+          echo "ref=$PACK_REF" >> "$GITHUB_OUTPUT"
+
       - name: Validate provider secrets
         env:
           PM: ${{ inputs.provider_mode }}
@@ -563,7 +585,7 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           repository: Manolii-org/ai-starter-pack
-          ref: ${{ inputs.pack_ref }}
+          ref: ${{ steps.pack.outputs.ref }}
           path: .pack-hydrate
           persist-credentials: false
           # Only the runtime trees ASSESSMENT_RUNTIME_FILES can name — the rest of
@@ -602,7 +624,7 @@ jobs:
               # A listed path the pack no longer ships means this list and the
               # runners have drifted. Continuing would resurface later as an
               # opaque FileNotFoundError inside a runner.
-              echo "::error::$f is not present in the pack at '${{ inputs.pack_ref }}'"
+              echo "::error::$f is not present in the pack at '${{ steps.pack.outputs.ref }}'"
               exit 1
             fi
             mkdir -p "$(dirname "$f")"
@@ -662,6 +684,17 @@ jobs:
       ANTHROPIC_BASE_URL: ${{ inputs.provider_mode == 'proxy' && inputs.litellm_proxy_url || '' }}
       ANTHROPIC_MODEL: ${{ inputs.model }}
     steps:
+      - name: Resolve pack revision
+        id: pack
+        env:
+          PACK_REF: ${{ inputs.pack_ref || job.workflow_sha }}
+        run: |
+          if [ -z "$PACK_REF" ]; then
+            echo "::error::Could not resolve this workflow's own pack commit; pass pack_ref: <40-char commit SHA>"
+            exit 1
+          fi
+          echo "ref=$PACK_REF" >> "$GITHUB_OUTPUT"
+
       - name: Validate provider secrets
         env:
           PM: ${{ inputs.provider_mode }}
@@ -719,7 +752,7 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           repository: Manolii-org/ai-starter-pack
-          ref: ${{ inputs.pack_ref }}
+          ref: ${{ steps.pack.outputs.ref }}
           path: .pack-hydrate
           persist-credentials: false
           # Only the runtime trees ASSESSMENT_RUNTIME_FILES can name — the rest of
@@ -758,7 +791,7 @@ jobs:
               # A listed path the pack no longer ships means this list and the
               # runners have drifted. Continuing would resurface later as an
               # opaque FileNotFoundError inside a runner.
-              echo "::error::$f is not present in the pack at '${{ inputs.pack_ref }}'"
+              echo "::error::$f is not present in the pack at '${{ steps.pack.outputs.ref }}'"
               exit 1
             fi
             mkdir -p "$(dirname "$f")"
@@ -822,6 +855,17 @@ jobs:
       ANTHROPIC_DIRECT_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       CLIENT_AI_POLICY: ${{ vars.CLIENT_AI_POLICY }}
     steps:
+      - name: Resolve pack revision
+        id: pack
+        env:
+          PACK_REF: ${{ inputs.pack_ref || job.workflow_sha }}
+        run: |
+          if [ -z "$PACK_REF" ]; then
+            echo "::error::Could not resolve this workflow's own pack commit; pass pack_ref: <40-char commit SHA>"
+            exit 1
+          fi
+          echo "ref=$PACK_REF" >> "$GITHUB_OUTPUT"
+
       - name: Validate provider secrets
         env:
           PM: ${{ inputs.provider_mode }}
@@ -880,7 +924,7 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           repository: Manolii-org/ai-starter-pack
-          ref: ${{ inputs.pack_ref }}
+          ref: ${{ steps.pack.outputs.ref }}
           path: .pack-hydrate
           persist-credentials: false
           # Only the runtime trees ASSESSMENT_RUNTIME_FILES can name — the rest of
@@ -919,7 +963,7 @@ jobs:
               # A listed path the pack no longer ships means this list and the
               # runners have drifted. Continuing would resurface later as an
               # opaque FileNotFoundError inside a runner.
-              echo "::error::$f is not present in the pack at '${{ inputs.pack_ref }}'"
+              echo "::error::$f is not present in the pack at '${{ steps.pack.outputs.ref }}'"
               exit 1
             fi
             mkdir -p "$(dirname "$f")"
@@ -999,7 +1043,7 @@ jobs:
         if: ${{ !cancelled() && inputs.jev_judge_shadow == 'on' && vars.JEV_ENABLED_JUDGE_FINDING_SHADOW == 'true' }}
         continue-on-error: true
         env:
-          PACK_REF: ${{ inputs.pack_ref }}
+          PACK_REF: ${{ steps.pack.outputs.ref }}
         run: |
           if [[ "$PACK_REF" =~ ^v[0-9]+(\.[0-9]+){0,2}$ ]]; then
             echo "ok=true" >> "$GITHUB_OUTPUT"
@@ -1014,7 +1058,7 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           repository: Manolii-org/ai-starter-pack
-          ref: refs/tags/${{ inputs.pack_ref }}
+          ref: refs/tags/${{ steps.pack.outputs.ref }}
           path: .pack-jev
           persist-credentials: false
           sparse-checkout: scripts/jev_judge_shadow.py

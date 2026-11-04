@@ -24,8 +24,8 @@ on:
         required: true
       pack_ref:
         type: string
-        default: v1
-        description: Immutable pack tag recommended; moving v1 is supported for controlled rollout.
+        default: ''
+        description: Override the pack revision. Default is this reusable workflow's own commit (job.workflow_sha), never the moving v1 alias.
       evidence_bundle_json:
         type: string
         default: '[]'
@@ -65,11 +65,22 @@ jobs:
           ref: ${{ inputs.head_sha }}
           persist-credentials: false
 
+      - name: Resolve pack revision
+        id: pack
+        env:
+          PACK_REF: ${{ inputs.pack_ref || job.workflow_sha }}
+        run: |
+          if [ -z "$PACK_REF" ]; then
+            echo "::error::Could not resolve this workflow's own pack commit; pass pack_ref: <40-char commit SHA>"
+            exit 1
+          fi
+          echo "ref=$PACK_REF" >> "$GITHUB_OUTPUT"
+
       - name: Hydrate admission engine from the pinned pack
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           repository: Manolii-org/ai-starter-pack
-          ref: ${{ inputs.pack_ref }}
+          ref: ${{ steps.pack.outputs.ref }}
           path: .integration-admission-pack
           sparse-checkout: scripts/ci/integration_admission.py
           sparse-checkout-cone-mode: false

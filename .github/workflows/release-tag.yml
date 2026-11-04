@@ -108,12 +108,8 @@ jobs:
           # /commits/$TAG there would race tag-ref replication and 404.
           echo "sha=$SHA" >> "$GITHUB_OUTPUT"
 
-      # REUSABLE-WORKFLOWS.md documents `v1` as a MOVING major alias that
-      # Renovate tracks, and pr-assessment-reusable.yml defaults its hydration
-      # `pack_ref` to it — but nothing ever moved it, so `v1` sat on v1.7.2
-      # while releases ran ahead to v1.8.0. Consumers extending the alias
-      # silently got stale content. Move it here so the documented contract is
-      # the enforced one.
+      # v2 is the moving major alias for the pack_ref contract that follows
+      # job.workflow_sha. v1 stays frozen on its last v1 release.
       - name: Move major-version alias
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -126,7 +122,11 @@ jobs:
           # feature-controls-v*) must never move the pack's major alias.
           PACK_RE='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
           if [[ "$TAG" =~ $PACK_RE ]]; then
-            MAJOR="${TAG%%.*}"          # v1.9.0 -> v1
+            MAJOR="${TAG%%.*}"          # v2.0.0 -> v2
+            if [[ "$MAJOR" == "v1" ]]; then
+              echo "v1 is frozen; this workflow does not move it"
+              exit 0
+            fi
             # inputs.sha is empty when the caller defaulted to main HEAD, so take
             # the sha the create step actually tagged.
             if ! printf '%s' "$SHA" | grep -Eq '^[0-9a-f]{40}$'; then

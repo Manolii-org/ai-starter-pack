@@ -330,11 +330,27 @@ def _reusables_with_mutable_pack_ref_default() -> set[str]:
 
 
 def test_documented_callers_pin_pack_ref_to_the_uses_sha():
-    """A SHA-pinned `uses:` still runs mutable pack code when `pack_ref` is left
-    at its `v1` default, so every documented caller must set both to one SHA."""
+    """Reusable pack_ref defaults follow the pinned workflow commit.
+
+    A SHA-pinned uses: used to run mutable pack code when pack_ref defaulted
+    to v1. Those four reusables now resolve an empty pack_ref to
+    job.workflow_sha and fail closed when that is empty. Any reusable that
+    still has a mutable default must keep documented callers pinned.
+    """
     import re as _re
     mutable = _reusables_with_mutable_pack_ref_default()
-    assert {"pr-assessment-reusable", "ui-smoke-reusable"} <= mutable
+    anchored = {
+        "pr-assessment-reusable",
+        "ui-smoke-reusable",
+        "e2e-playwright-reusable",
+        "integration-admission-reusable",
+    }
+    assert anchored.isdisjoint(mutable)
+    for name in anchored:
+        text = (ROOT / ".github" / "workflows" / f"{name}.yml").read_text()
+        assert "default: v1" not in text
+        assert "inputs.pack_ref || job.workflow_sha" in text
+        assert "Could not resolve this workflow's own pack commit" in text
     doc = (ROOT / ".github/workflows/REUSABLE-WORKFLOWS.md").read_text()
     blocks = _re.findall(r"```ya?ml\n(.*?)```", doc, flags=_re.S)
     checked = 0
@@ -348,4 +364,5 @@ def test_documented_callers_pin_pack_ref_to_the_uses_sha():
             checked += 1
             assert _re.search(rf"pack_ref:\s*['\"]?{sha}\b", block), (
                 f"{name} example must set pack_ref: {sha}")
-    assert checked >= 3
+    assert mutable == set()
+    assert checked == 0
