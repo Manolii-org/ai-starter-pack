@@ -166,12 +166,17 @@ def parse_session(session_file: Path) -> dict:
 
 
 _SUBAGENT_PRICING: dict[str, dict] = {
-    # Current Fireworks serverless heavy/agentic model, including stable routes.
+    # Historical/candidate Kimi serving IDs remain estimable, not dispatchable.
     **{name: {"input": 3.00 / 1_000_000, "output": 15.00 / 1_000_000}
        for name in ("kimi-k3", "accounts/fireworks/models/kimi-k3",
-                    "fireworks_ai/accounts/fireworks/models/kimi-k3",
-                    "tier-0-oss-heavy", "tier-2-agentic",
-                    "tier-2-agentic-fallback-fireworks", "tier-3-tool-fallback-kimi-fireworks")},
+                    "fireworks_ai/accounts/fireworks/models/kimi-k3")},
+    # Ordinary agentic aliases reuse the existing qualified M3 provider route.
+    **{name: {"input": 0.30 / 1_000_000, "output": 1.20 / 1_000_000}
+       for name in ("minimax-m3", "accounts/fireworks/models/minimax-m3",
+                    "fireworks_ai/accounts/fireworks/models/minimax-m3",
+                    "minimax/minimax-m3", "openrouter/minimax/minimax-m3",
+                    "tier-2-agentic", "tier-2-agentic-pro",
+                    "tier-2-agentic-pro-fallback-openrouter")},
     # Anthropic-direct sub-agents (full model ID bypasses proxy)
     "claude-sonnet-4-6":       {"input": 3.00 / 1_000_000, "output": 15.00 / 1_000_000},
     "claude-opus-4-7":         {"input": 5.00 / 1_000_000, "output": 25.00 / 1_000_000},
