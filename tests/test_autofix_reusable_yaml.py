@@ -36,7 +36,7 @@ def test_all_autofix_workflows_parse_as_yaml() -> None:
 
 def test_autofix_uses_github_token_fallback() -> None:
     text = WORKFLOWS[1].read_text(encoding="utf-8")
-    expected = "github_token: ${{ secrets.GH_PAT || github.token }}"
+    expected = "github_token: ${{ steps.github-app.outputs.token || secrets.GH_PAT || github.token }}"
     assert expected in text, (
         "reusable Autofix must fall back to github.token — secrets.GITHUB_TOKEN "
         "is empty in called workflows and breaks private-repo git fetch"
