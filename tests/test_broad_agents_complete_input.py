@@ -391,6 +391,21 @@ def deep_packet(runner, deep_repo):
     return runner.build_security_deep_dive_input(root, **args)
 
 
+def test_legacy_git_reads_immutable_evidence_without_remote_helpers(runner, deep_repo, monkeypatch, tmp_path):
+    from tests.test_review_route_admission import (
+        legacy_git_read_toolchain, missing_blob_with_local_promisor,
+    )
+
+    root, git, args = deep_repo
+    oid = git('rev-parse', args['head'] + ':validation.py')
+    real_git, environment = legacy_git_read_toolchain(tmp_path, monkeypatch)
+    assert runner._deep_git(root, 'cat-file', 'blob', oid, limit=1000) == b'def validate(value):\n    return str(value)\n'
+    marker = missing_blob_with_local_promisor(root, oid, tmp_path, real_git, environment)
+    with pytest.raises(ValueError, match='immutable evidence unavailable'):
+        runner._deep_git(root, 'cat-file', 'blob', oid, limit=1000)
+    assert not marker.exists()
+
+
 def deep_output(packet, likelihoods=(0.85, 0.3)):
     """Bound triage output, not a model receipt or accepted security result."""
     rows = []
