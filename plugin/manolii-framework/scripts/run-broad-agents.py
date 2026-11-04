@@ -360,11 +360,12 @@ def _deep_git(root: Path, *args: str, limit: int) -> bytes:
     with tempfile.TemporaryFile() as output:
         try:
             completed = subprocess.run(
-                ["git", "--no-pager", "--no-replace-objects", "--no-lazy-fetch",
+                ["git", "--no-pager", "--no-replace-objects",
                  "--literal-pathspecs", "-C", str(root), "-c", "core.fsmonitor=false",
                  *args], stdout=output, stderr=subprocess.DEVNULL, timeout=15,
                 env={"PATH": os.defpath, "GIT_CONFIG_NOSYSTEM": "1",
-                     "GIT_CONFIG_GLOBAL": os.devnull, "GIT_TERMINAL_PROMPT": "0"})
+                     "GIT_CONFIG_GLOBAL": os.devnull, "GIT_TERMINAL_PROMPT": "0",
+                     "GIT_NO_LAZY_FETCH": "1", "GIT_ALLOW_PROTOCOL": ""})
             size = output.tell()
             if completed.returncode or size > limit:
                 raise ValueError("deep-dive immutable evidence unavailable or over budget")

@@ -140,12 +140,13 @@ def require_direct_llm_admission(repo_root=None, environ=None):
     def read_git(*args):
         try:
             result = subprocess.run(
-                ["git", "--no-pager", "--no-replace-objects", "--no-lazy-fetch",
+                ["git", "--no-pager", "--no-replace-objects",
                  "-C", str(root), "-c", "core.fsmonitor=false", *args],
                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=5,
                 # Never pass provider credentials or allow implicit object fetch.
                 env={"PATH": os.defpath, "GIT_CONFIG_NOSYSTEM": "1",
-                     "GIT_CONFIG_GLOBAL": os.devnull, "GIT_TERMINAL_PROMPT": "0"},
+                     "GIT_CONFIG_GLOBAL": os.devnull, "GIT_TERMINAL_PROMPT": "0",
+                     "GIT_NO_LAZY_FETCH": "1", "GIT_ALLOW_PROTOCOL": ""},
             )
         except (OSError, subprocess.SubprocessError):
             raise RouteAdmissionError("direct review denied: policy source unavailable") from None

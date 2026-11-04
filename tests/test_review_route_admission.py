@@ -51,6 +51,63 @@ def external(tmp_path, monkeypatch):
     return tmp_path, manifest, commit
 
 
+def legacy_git_read_toolchain(tmp_path, monkeypatch):
+    """Reject the new flag and ignore its env replacement, like older Git."""
+    import os
+    import shutil
+
+    original_path = os.defpath
+    real_git = shutil.which('git', path=original_path)
+    assert real_git
+    bindir = tmp_path / 'legacy-git-bin'
+    bindir.mkdir()
+    wrapper = bindir / 'git'
+    wrapper.write_text(
+        '#!' + sys.executable + '\nimport os, sys\n'
+        'if "--no-lazy-fetch" in sys.argv[1:]:\n    raise SystemExit(129)\n'
+        'env = dict(os.environ)\nenv.pop("GIT_NO_LAZY_FETCH", None)\n'
+        + f'os.execve({real_git!r}, [{real_git!r}, *sys.argv[1:]], env)\n')
+    wrapper.chmod(0o755)
+    monkeypatch.setattr(os, 'defpath', str(bindir) + os.pathsep + original_path)
+    return real_git, {'PATH': original_path, 'GIT_CONFIG_NOSYSTEM': '1',
+                      'GIT_CONFIG_GLOBAL': os.devnull, 'GIT_TERMINAL_PROMPT': '0'}
+
+
+def missing_blob_with_local_promisor(root, oid, tmp_path, real_git, environment):
+    """A local SSH stub proves helper execution without any real connection."""
+    import shlex
+
+    marker = tmp_path / 'remote-helper-ran'
+    helper = tmp_path / 'local-ssh-stub'
+    helper.write_text('#!/bin/sh\nprintf x > ' + shlex.quote(str(marker)) + '\nexit 1\n')
+    helper.chmod(0o755)
+    for args in (('remote', 'add', 'lazy', 'ssh://example.invalid/repo'),
+                 ('config', 'remote.lazy.promisor', 'true'),
+                 ('config', 'core.sshCommand', str(helper))):
+        subprocess.run([real_git, '-C', str(root), *args], env=environment,
+                       check=True, capture_output=True, timeout=10)
+    (root / '.git/objects' / oid[:2] / oid[2:]).unlink()
+    probe = subprocess.run([real_git, '-C', str(root), 'cat-file', 'blob', oid],
+                           env=environment, capture_output=True, timeout=10)
+    assert probe.returncode != 0 and marker.is_file()
+    marker.unlink()
+    return marker
+
+
+def test_legacy_git_admits_local_policy_but_never_fetches_missing_blob(external, monkeypatch, tmp_path):
+    root, _, commit = external
+    commit()
+    real_git, environment = legacy_git_read_toolchain(tmp_path, monkeypatch)
+    assert policy.require_direct_llm_admission() is None
+    oid = subprocess.check_output(
+        [real_git, '-C', str(root), 'rev-parse', 'HEAD:.ai/capabilities.json'],
+        env=environment, timeout=10).decode().strip()
+    marker = missing_blob_with_local_promisor(root, oid, tmp_path, real_git, environment)
+    with pytest.raises(policy.RouteAdmissionError, match='consumer policy evidence'):
+        policy.require_direct_llm_admission()
+    assert not marker.exists()
+
+
 @pytest.mark.parametrize('owner', ['Manolii-org', 'BURO-BUILT', 'CPDcheck', 'Impaktful'])
 def test_estate_policy_denied_despite_working_tree_external_claim_and_key(external, monkeypatch, owner):
     root, manifest, commit = external
@@ -499,7 +556,11 @@ def test_valid_first_policy_plus_failed_second_blob_denied(external, monkeypatch
     original = policy.subprocess.run
     reads = []
     def fail_second(args, **kwargs):
-        assert '--no-lazy-fetch' in args
+        assert '--no-lazy-fetch' not in args
+        assert '--no-replace-objects' in args
+        assert kwargs['env']['GIT_NO_LAZY_FETCH'] == '1'
+        assert kwargs['env']['GIT_ALLOW_PROTOCOL'] == ''
+        assert kwargs['env']['GIT_TERMINAL_PROMPT'] == '0'
         if 'cat-file' in args:
             reads.append(args[-1])
             if len(reads) == 2:

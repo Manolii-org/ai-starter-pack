@@ -617,6 +617,30 @@ def test_large_non_url_and_hyphenated_identifiers_remain_safe():
     j._require_safe_packet("ordinary-field-" * 130000 + " = ordinary")
 
 
+@pytest.mark.parametrize("prefix", ["", "+", "-", "'", '"'])
+def test_maximal_token_scanners_preserve_assignment_and_uri_boundaries(prefix):
+    value = "offline" + "-material"
+    assert j._credential_assignment(prefix + "SERVICE_DSN' := " + value)
+    assert not j._credential_assignment(prefix + "SERVICE_DSN_extra := " + value)
+    assert j._uri_userinfo(prefix + "custom+driver://offline" + "@example.invalid")
+    assert not j._uri_userinfo(prefix + "custom+driver://example.invalid/path")
+
+
+def test_maximal_token_scanners_reject_long_sensitive_tokens_without_restart():
+    field = "ordinary-" * 150000 + "DSN"
+    assert j._credential_assignment(field + " = " + "offline-material")
+    scheme = "offline+" * 180000
+    assert j._uri_userinfo(scheme + "://offline" + "@example.invalid")
+
+
+@pytest.mark.parametrize("scheme", ["\u0130", "\u0131", "\u017f", "\u212a"])
+def test_uri_scheme_scanner_preserves_unicode_case_insensitive_matches(scheme):
+    source = scheme + "://offline" + "@example.invalid"
+    assert j._uri_userinfo(source)
+    with pytest.raises(ValueError, match="sensitive review material"):
+        j._require_safe_packet(source)
+
+
 @pytest.mark.parametrize("unavailable", ["missing", "sensitive", "budget"])
 @pytest.mark.parametrize("severity", ["ERROR", "WARNING"])
 @pytest.mark.parametrize("acknowledged", [True, False])
