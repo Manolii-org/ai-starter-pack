@@ -75,7 +75,7 @@ def _patch_endpoint(monkeypatch, proxied: bool):
         endpoint = ("proxy-key", "https://proxy.example/v1/messages", True)
     else:
         endpoint = ("sk-ant-direct", "https://api.anthropic.com/v1/messages", False)
-    monkeypatch.setattr(MODULE, "_endpoint", lambda direct=False: endpoint)
+    monkeypatch.setattr(MODULE, "_endpoint", lambda direct=False, role=None: endpoint)
 
 
 def _fake_urlopen(monkeypatch, responses: list[bytes]) -> list[dict]:

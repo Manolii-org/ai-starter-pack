@@ -204,7 +204,7 @@ def test_specialist_real_role_denial_persists_missing_coverage(monkeypatch, tmp_
     module = load('run-specialists.py')
     with monkeypatch.context() as patch:
         patch.setattr(module.os, 'environ', NoCredentialReads(
-            GITHUB_REPOSITORY='Manolii-org/ai-starter-pack', LITELLM_PROXY_URL='https://proxy.example'))
+            GITHUB_REPOSITORY='ExternalExample/project', LITELLM_PROXY_URL='https://proxy.example'))
         patch.setattr(module, '_urlopen_https', lambda *a, **k: pytest.fail('network dispatch'))
         result = module._invoke_skill('security-boundary-test', 'complete source', tmp_path)
     marker = json.loads((tmp_path / 'security-boundary-test.json').read_text())
@@ -306,7 +306,7 @@ def test_specialist_cli_persists_policy_denial_before_any_key_read(monkeypatch, 
         '--diff', str(diff), '--candidates-dir', str(output)])
     with monkeypatch.context() as patch:
         patch.setattr(module.os, 'environ', NoCredentialReads(
-            GITHUB_REPOSITORY='Manolii-org/ai-starter-pack', LITELLM_PROXY_URL='https://proxy.example'))
+            GITHUB_REPOSITORY='ExternalExample/project', LITELLM_PROXY_URL='https://proxy.example'))
         patch.setattr(module, '_urlopen_https', lambda *a, **k: pytest.fail('network dispatch'))
         with pytest.raises(SystemExit) as exc:
             module.main()
@@ -328,7 +328,7 @@ def test_broad_cli_persists_policy_denial_before_any_key_read(monkeypatch, tmp_p
     output = tmp_path / 'output'
     with monkeypatch.context() as patch:
         patch.setattr(module.os, 'environ', NoCredentialReads(
-            GITHUB_REPOSITORY='Manolii-org/ai-starter-pack', LITELLM_PROXY_URL='https://proxy.example'))
+            GITHUB_REPOSITORY='ExternalExample/project', LITELLM_PROXY_URL='https://proxy.example'))
         patch.setattr(module, '_urlopen_https', lambda *a, **k: pytest.fail('network dispatch'))
         assert module.run_broad_agents(manifest, diff, output, agents) == 0
     marker = json.loads((output / 'security-deep-dive.json').read_text())
