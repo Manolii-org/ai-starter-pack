@@ -120,6 +120,8 @@ def test_native_haiku_has_no_redundant_fallback_and_short_alias_is_independent()
 
 def test_unqualified_kimi_candidate_has_no_serving_route():
     config = yaml.safe_load((ROOT / "deploy/litellm-proxy/config.yaml").read_text())
+    assert all(row["litellm_params"]["model"] != "fireworks_ai/accounts/fireworks/models/kimi-k2p6"
+               for row in config["model_list"])
     assert all("kimi-k3" not in row["litellm_params"]["model"] for row in config["model_list"])
     routing = json.loads((ROOT / ".claude/model-routing.json").read_text())
     candidate = routing["fallback"]["alternatives"]["kimi-k3"]
