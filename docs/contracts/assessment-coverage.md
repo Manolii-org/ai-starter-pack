@@ -137,3 +137,27 @@ That later artifact requires fresh exact-head checks and review. Existing
 protected-role, source-admission and release gates remain unchanged. No merge,
 workflow adoption, provider call, deployment or protected activation follows
 from publication of this helper correction.
+
+## Workflow adoption after the helper
+
+The direct assessment producer loads its helper from the accepted immutable PR
+base; reusable callers load it from their trusted pack reference. Candidate code
+cannot replace it. Both workflows now install Semgrep 1.182.1 and Bandit 1.9.4 in
+a job-temporary virtual environment. The installer snapshots the existing auto
+rules and the pinned Semgrep language catalog outside candidate source; the
+producer binds their bytes and exact target inventories to completion evidence.
+
+Each consumer clears committed scratch, downloads only the current producer's
+artifact ID and verifies run/source/runtime bindings and output digests before
+model invocation. Missing or partial scans fail closed. Only Bandit's findings
+exit 1 is accepted; Semgrep uses its default successful exit 0. Inline suppression
+is disabled, while incomplete parses remain incomplete with findings retained.
+The empty-diff route verifies the actual immutable diff; skipped required scans
+are never clean. This supersedes the helper's dormant-only status above.
+
+Hosted checks on the adoption PR exercise its proposed workflow with the already
+accepted base helper. Source tests alone do not establish hosted scanner
+completion, effectiveness, provider qualification or protected-role acceptance.
+No release, consumer adoption, deployment or protected-role activation is included.
+Rollback source and generated outputs together; findings-only legacy artifacts
+cannot satisfy the new completion contract.
