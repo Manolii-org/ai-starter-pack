@@ -21,6 +21,15 @@ VALID_SOURCES = {"env", "doppler", "broker", "mcp"}
 VALID_RETRIEVAL = {"eager", "deferred"}
 VALID_PRIVILEGE = {"standard", "managed", "privileged"}
 VALID_MODES = {"capabilities", "legacy"}
+# Read-only PR Assessment reviewers. None of these names is a credential
+# capability, and none grants a write or deploy secret.
+READ_ONLY_DIRECT_REVIEWERS = frozenset({
+    "docs-fact-check",
+    "scope-adherence",
+    "security-boundary-test",
+    "security-deep-dive",
+    "shell-security",
+})
 
 class RouteAdmissionError(ValueError):
     """The requested transport has no admitted consumer policy (no secrets)."""
@@ -83,7 +92,84 @@ def selected_review_roles(environ=None):
     return result
 
 
-def require_direct_llm_admission(repo_root=None, environ=None):
+def admitted_reviewers(manifest):
+    """Roles a manifest admits on the direct-review route.
+
+    The manifest must grant no credentials. ``resolve_manifest`` is the
+    capability check: a non-empty resolution is a write or secret grant and
+    is rejected. The returned set is exactly ``direct_review`` after every
+    name is checked against the read-only reviewer allowlist.
+    """
+    if not isinstance(manifest, dict):
+        raise TypeError("manifest must be a JSON object")
+    if resolve_manifest(manifest):
+        raise ValueError("direct-review policy grants credentials")
+    if manifest.get("capabilities"):
+        raise ValueError("direct-review policy must not select capabilities")
+    roles = manifest.get("direct_review")
+    if not isinstance(roles, list) or any(type(item) is not str or not item for item in roles):
+        raise TypeError("direct_review must be a list of role names")
+    if len(roles) != len(set(roles)):
+        raise ValueError("direct_review contains duplicates")
+    unknown = [item for item in roles if item not in READ_ONLY_DIRECT_REVIEWERS]
+    if unknown:
+        raise ValueError(
+            "direct_review admits a role outside the read-only set: " + ", ".join(unknown))
+    return set(roles)
+
+
+def _readonly_estate_admission(manifest, repository, role):
+    """True when this manifest admits ``role`` and nothing else."""
+    if (type(manifest.get("version")) is not int or manifest.get("version") != 1
+            or manifest.get("mode") != "capabilities"
+            or manifest.get("consumer_scope") != "estate"
+            or not isinstance(manifest.get("consumer_repository"), str)
+            or manifest["consumer_repository"].lower() != repository.lower()
+            or not isinstance(role, str)):
+        return False
+    try:
+        roles = admitted_reviewers(manifest)
+    except (TypeError, ValueError):
+        return False
+    return role in roles
+
+
+def readonly_proxy_fallback(role, repo_root=None, environ=None):
+    """True when ``role`` is admitted by the estate read-only policy.
+
+    An admitted reviewer stays on the already-configured CI proxy, including
+    when a direct key is present. Callers check this before reading that key.
+    An external ``llm-anthropic`` grant does not qualify: that lane stays on
+    Anthropic.
+    """
+    if role not in READ_ONLY_DIRECT_REVIEWERS:
+        return False
+    env = os.environ if environ is None else environ
+    repository = env.get("GITHUB_REPOSITORY", "")
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository):
+        return False
+    root = Path.cwd() if repo_root is None else Path(repo_root)
+    revision = "HEAD"
+    if env.get("GITHUB_ACTIONS") == "true":
+        try:
+            event = _load_json(env.get("GITHUB_EVENT_PATH", ""), "launch event")
+            if event["repository"]["full_name"].lower() != repository.lower():
+                return False
+            revision = (event["pull_request"]["base"]["sha"] if "pull_request" in event
+                        else env.get("GITHUB_SHA", ""))
+            if not isinstance(revision, str) or not re.fullmatch(r"[0-9a-fA-F]{40}", revision):
+                return False
+        except (OSError, UnicodeError, TypeError, ValueError, KeyError, AttributeError):
+            return False
+    try:
+        manifests = _policy_manifests(root, revision)
+    except RouteAdmissionError:
+        return False
+    return bool(manifests) and all(
+        _readonly_estate_admission(manifest, repository, role) for manifest in manifests)
+
+
+def require_direct_llm_admission(repo_root=None, environ=None, role=None):
     """Admit the external-consumer lane before looking up any credential.
 
     `first_party` is a reviewer requirement, never spending authority. Estate
@@ -112,28 +198,52 @@ def require_direct_llm_admission(repo_root=None, environ=None):
                 raise ValueError("missing immutable policy revision")
         except (OSError, UnicodeError, TypeError, ValueError, KeyError, AttributeError):
             raise RouteAdmissionError("direct review denied: invalid launcher policy provenance") from None
-    def read_git(*args):
-        try:
-            result = subprocess.run(
-                ["git", "--no-pager", "--no-replace-objects", "--no-lazy-fetch",
-                 "-C", str(root), "-c", "core.fsmonitor=false", *args],
-                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=5,
-                # Never pass provider credentials or allow implicit object fetch.
-                env={"PATH": os.defpath, "GIT_CONFIG_NOSYSTEM": "1",
-                     "GIT_CONFIG_GLOBAL": os.devnull, "GIT_TERMINAL_PROMPT": "0"},
-            )
-        except (OSError, subprocess.SubprocessError):
-            raise RouteAdmissionError("direct review denied: policy source unavailable") from None
-        if result.returncode:
-            raise RouteAdmissionError("direct review denied: policy source unavailable")
-        return result.stdout
+    for manifest in _policy_manifests(root, revision):
+        repo_name = manifest.get("consumer_repository")
+        legacy = (
+            type(manifest.get("version")) is int and manifest["version"] == 1
+            and manifest.get("mode") == "capabilities"
+            and "llm-anthropic" in manifest.get("capabilities", [])
+            and manifest.get("consumer_scope") == "external"
+            and isinstance(repo_name, str)
+            and repo_name.lower() == repository.lower()
+        )
+        # Estate read-only reviewers are not admitted here. This function
+        # authorizes direct Anthropic credits for the external lane only.
+        # A missing role does not blanket-admit that lane.
+        if not legacy:
+            raise RouteAdmissionError("direct review denied: invalid or conflicting consumer policy evidence")
 
+
+def _git_bytes(root, *args):
+    try:
+        result = subprocess.run(
+            ["git", "--no-pager", "--no-replace-objects",
+             "-C", str(root), "-c", "core.fsmonitor=false", *args],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=5,
+            # Never pass provider credentials or allow implicit object fetch.
+            # GIT_NO_LAZY_FETCH is the portable form of --no-lazy-fetch (git
+            # 2.43 rejects the flag). An empty protocol list blocks transport.
+            env={"PATH": os.defpath, "GIT_CONFIG_NOSYSTEM": "1",
+                 "GIT_CONFIG_GLOBAL": os.devnull, "GIT_TERMINAL_PROMPT": "0",
+                 "GIT_NO_LAZY_FETCH": "1", "GIT_ALLOW_PROTOCOL": ""},
+        )
+    except (OSError, subprocess.SubprocessError):
+        raise RouteAdmissionError("direct review denied: policy source unavailable") from None
+    if result.returncode:
+        raise RouteAdmissionError("direct review denied: policy source unavailable")
+    return result.stdout
+
+
+def _policy_manifests(root, revision):
+    """Committed policy blobs at ``revision``. Never a working tree."""
     paths = {".ai/capabilities.json", "config/agent-capabilities.json"}
     # Prove absence with a successful immutable-tree enumeration. A failed
     # blob read must never mean "absent" after another policy was admitted.
-    entries = read_git("ls-tree", "-rz", revision, "--", *sorted(paths))
+    entries = _git_bytes(root, "ls-tree", "-rz", revision, "--", *sorted(paths))
     if not entries:
         raise RouteAdmissionError("direct review denied: missing committed capability policy evidence")
+    manifests = []
     for entry in entries.rstrip(b"\0").split(b"\0"):
         try:
             metadata, path = entry.decode("ascii").split("\t", 1)
@@ -141,19 +251,13 @@ def require_direct_llm_admission(repo_root=None, environ=None):
             if (path not in paths or mode not in {"100644", "100755"} or kind != "blob"
                     or not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", oid)):
                 raise ValueError("invalid policy tree entry")
-            manifest = json.loads(read_git("cat-file", "blob", oid).decode("utf-8"))
+            manifest = json.loads(_git_bytes(root, "cat-file", "blob", oid).decode("utf-8"))
             resolve_manifest(manifest)
-            admitted = (
-                type(manifest.get("version")) is int and manifest["version"] == 1
-                and manifest.get("mode") == "capabilities"
-                and "llm-anthropic" in manifest.get("capabilities", [])
-                and manifest.get("consumer_scope") == "external"
-                and manifest.get("consumer_repository", "").lower() == repository.lower()
-            )
         except (UnicodeError, TypeError, ValueError, AttributeError):
-            admitted = False
-        if not admitted:
-            raise RouteAdmissionError("direct review denied: invalid or conflicting consumer policy evidence")
+            raise RouteAdmissionError(
+                "direct review denied: invalid or conflicting consumer policy evidence") from None
+        manifests.append(manifest)
+    return manifests
 
 CANONICAL_TABLE = {
     # capability: (secret_names, source, retrieval, privilege)

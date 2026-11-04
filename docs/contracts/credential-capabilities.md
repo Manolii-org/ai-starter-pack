@@ -169,7 +169,13 @@ keys. Existing capability-name resolution outside review admission is unchanged.
 This is local admission under trusted launcher/base-source custody, not independent
 proof of credential ownership, account entitlement, data-transfer permission or
 server-side isolation against a hostile process. It cannot authorize an estate
-exception. The shared helper is included in reusable assessment hydration and in
+exception for direct Anthropic credits. An estate manifest may instead admit
+only the read-only reviewers in `direct_review` with `capabilities: []` (no
+secret names). That grant does not select `llm-anthropic` and never sends the reviewer
+to `api.anthropic.com`, even when a direct key is present. Those reviewers
+run on the already-configured CI proxy. Any other role, or any manifest
+that resolves a credential, stays denied. The
+shared helper is included in reusable assessment hydration and in
 the normal plugin/registry generation. A mixed/older consumer missing the compatible
 helper retains ordinary proxy calls but cannot admit direct execution. No credential
 provisioning, provider/model

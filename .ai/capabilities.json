@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "mode": "capabilities",
+  "capabilities": [],
+  "consumer_scope": "estate",
+  "consumer_repository": "Manolii-org/ai-starter-pack",
+  "direct_review": [
+    "docs-fact-check",
+    "scope-adherence",
+    "security-boundary-test",
+    "security-deep-dive",
+    "shell-security"
+  ]
+}

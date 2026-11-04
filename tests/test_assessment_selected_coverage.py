@@ -138,7 +138,7 @@ def test_specialist_cli_writes_failed_protected_role_with_current_binding(launch
     source = tmp_path / 'input.diff'
     source.write_text('+full source\n')
     # Exercise admission, not the provider. Existing policy has no direct grant.
-    monkeypatch.setattr(specialists, 'require_direct_llm_admission', lambda: (_ for _ in ()).throw(specialists.RouteAdmissionError('direct review denied: missing committed capability policy evidence')))
+    monkeypatch.setattr(specialists, 'require_direct_llm_admission', lambda *args, **kwargs: (_ for _ in ()).throw(specialists.RouteAdmissionError('direct review denied: missing committed capability policy evidence')))
     monkeypatch.delenv('CLIENT_AI_POLICY', raising=False)
     monkeypatch.setattr(specialists, '_urlopen_https', lambda *a, **k: pytest.fail('network'))
     monkeypatch.setattr(sys, 'argv', ['run-specialists.py', '--skills', 'security-boundary-test', '--diff', str(source), '--candidates-dir', str(instance.candidates_dir)])

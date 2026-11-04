@@ -245,7 +245,7 @@ def test_preparation_does_not_wire_or_weaken_live_admission(interface, deep_repo
     else:
         monkeypatch.delenv('CLIENT_AI_POLICY', raising=False)
     monkeypatch.setattr(module, '_proxy_base', lambda: 'https://proxy.example')
-    def denied():
+    def denied(*_args, **_kwargs):
         raise module.RouteAdmissionError('offline policy refusal')
     monkeypatch.setattr(module, 'require_direct_llm_admission', denied)
     result = module.invoke_agent(role, '', 'Complete supplied evidence')
