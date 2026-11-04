@@ -16,7 +16,7 @@ universe: unregistered
 
 requires:
   - plugin: platform/framework
-    ref: "^1.14"
+    ref: "2.0.0"
   # platform/om is opt-in — it needs a Knowledge Layer MCP backend:
   # - plugin: platform/om
   #   ref: "^0.1"
