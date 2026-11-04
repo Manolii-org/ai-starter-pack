@@ -902,10 +902,11 @@ def test_actual_installer_is_job_temporary_not_global(tmp_path, workflow):
     binaries = tmp_path/'bin'
     binaries.mkdir()
     shim = binaries/'python3'
+    child = '#!/usr/bin/python3\nimport json,os,pathlib,sys\nif sys.argv[1:] != ["-I","-"]:\n pathlib.Path(os.environ["RUNNER_TEMP"],"install-args").write_text("\\n".join(sys.argv[1:])+"\\n")\n'
     shim.write_text('#!/usr/bin/python3\nimport pathlib,sys\n'
                     'assert sys.argv[1:3] == ["-m","venv"]\n'
                     'target=pathlib.Path(sys.argv[3]);(target/"bin").mkdir(parents=True)\n'
-                    '(target/"bin/python").write_text("#!/bin/sh\\nprintf \'%s\\\\n\' \\"$@\\" > \\"$RUNNER_TEMP/install-args\\"\\n")\n'
+                    f'(target/"bin/python").write_text({child!r})\n'
                     '(target/"bin/python").chmod(0o700)\n')
     shim.chmod(0o700)
     env={**os.environ,'PATH':str(binaries)+':/usr/bin:/bin','RUNNER_TEMP':str(tmp_path),'GITHUB_PATH':str(tmp_path/'path-output')}
@@ -1004,3 +1005,47 @@ def test_actual_empty_diff_skip_needs_no_artifact_but_still_checks_source(source
     empty = subprocess.run(['bash','-e','-c',check['run']],cwd=root,env=controls,capture_output=True)
     assert empty.returncode == 0 and not (root/'.ai/sast-findings.json').exists()
 
+
+
+@pytest.mark.parametrize('workflow', ['pr-assessment.yml', 'pr-assessment-reusable.yml'])
+@pytest.mark.parametrize('case', ['rules', 'wrapped', 'missing', 'wrong-version'])
+def test_actual_installer_snapshot_binds_pinned_catalog_and_rules(tmp_path, monkeypatch, workflow, case):
+    import importlib.metadata
+    import sys
+    import types
+    import urllib.request
+    document = yaml.safe_load((ROOT / '.github/workflows' / workflow).read_text())
+    install = next(s for s in document['jobs']['sast']['steps'] if s.get('name') == 'Install scanner CLIs')
+    script = install['run'].split("<<'PY_SNAPSHOT'\n", 1)[1].split('\nPY_SNAPSHOT', 1)[0]
+    package = tmp_path / 'package'
+    (package / 'semgrep_interfaces').mkdir(parents=True)
+    catalog = [{'keys': ['python'], 'exts': ['.py'], 'shebangs': ['python3']}]
+    (package / 'semgrep_interfaces/lang.json').write_text(json.dumps(catalog))
+    monkeypatch.setitem(sys.modules, 'semgrep', types.SimpleNamespace(__file__=str(package / '__init__.py')))
+    versions = {'semgrep': '1.182.1', 'bandit': '1.9.4'}
+    monkeypatch.setattr(importlib.metadata, 'version', lambda name: '0.0.0' if case == 'wrong-version' else versions[name])
+    rules = {'rules': [{'id': 'fixture-rule', 'languages': ['python']}]}
+    payload = {} if case == 'missing' else {'rule_config': json.dumps(rules)} if case == 'wrapped' else rules
+    class Response:
+        def __enter__(self): return self
+        def __exit__(self, *args): return False
+        def read(self, size):
+            assert size == 32 * 1024 * 1024 + 1
+            return json.dumps(payload).encode()
+    class Opener:
+        def open(self, request, timeout):
+            assert case != 'wrong-version'
+            assert request.full_url == 'https://semgrep.dev/c/auto' and timeout == 30
+            return Response()
+    monkeypatch.setattr(urllib.request, 'build_opener', lambda handler: Opener())
+    monkeypatch.setenv('RUNNER_TEMP', str(tmp_path))
+    if case in ('missing', 'wrong-version'):
+        with pytest.raises(ValueError): exec(compile(script, '<actual-installer>', 'exec'), {})
+        assert not (tmp_path / 'scanner-contract.json').exists()
+    else:
+        exec(compile(script, '<actual-installer>', 'exec'), {})
+        contract = json.loads((tmp_path / 'scanner-contract.json').read_bytes())
+        raw = (tmp_path / 'scanner-rules.json').read_bytes()
+        assert json.loads(raw) == rules
+        assert contract == {'versions': versions, 'registry': 'https://semgrep.dev/c/auto',
+                            'languages': catalog, 'rules_sha256': hashlib.sha256(raw).hexdigest()}
