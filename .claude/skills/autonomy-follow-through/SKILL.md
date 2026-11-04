@@ -1,6 +1,6 @@
 ---
 name: autonomy-follow-through
-version: 1.1.2
+version: 1.1.3
 description: "Shared termination + escalation loop for routine-native autonomy and /watch-pr. Stops on done/blocked_on_human/blocked_on_infra/superseded/gave_up; merges when safe."
 type: skill
 model: sonnet
@@ -26,7 +26,7 @@ tags:
 
 ## Readiness and review recovery
 
-The author or authorized agent may mark a PR ready once its complete assigned initial scope and commitment ledger are satisfied, deterministic checks and user-facing verification pass, required fast checks and secret scanning pass on the current head, and no demonstrated HIGH defect or input/security refusal remains. Another person's approval is not required for readiness; review workflows may follow it. Independent current-head MERGE review, `CHANGES_REQUESTED`, guards, kill switches, native protections and Merge-When-Safe remain mandatory.
+The author or authorized agent may mark a PR ready once its complete assigned initial scope and commitment ledger are satisfied, deterministic checks and user-facing verification pass, required fast checks and secret scanning pass on the current head, and no demonstrated Critical/P0 or HIGH/P1 defect or input/security refusal remains. Another person's approval is not required for readiness; review workflows may follow it. Independent current-head MERGE review, `CHANGES_REQUESTED`, guards, kill switches, native protections and Merge-When-Safe remain mandatory.
 
 Carry existing authority through in-scope repairs/new heads without renewed consent. Findings hold affected boundaries, not diagnosis/repair/verification/independent work. Reproduce/resolve findings, batch repairs, verify new heads; respect existing automated repair owners.
 
@@ -58,7 +58,7 @@ Policy: `config/autonomy-executor-policy.yaml`; max repair rounds default 5. Pas
 
 Bound passive heartbeats separately: record owner's explicit wait deadline/wake lease. Without one, permit only one one-shot for an unchanged pending operation, then existing subscription/accepted handoff. Never reset expired waits/chain one-shots. At bound, persist pending status/evidence/actual owner, suspend active wait chain; timeout means `blocked_on_infra`, never consent/PASS. Retain user-authorized durable schedules. Without real continuation, terminate this invocation blocked_on_infra, report monitoring unavailable with pending-work evidence, and perform incident/escalation actions. Resume active work on substantive events/decisive evidence under retry rules.
 
-Use owning runtime dispatch policy: reuse its named `infra` agent/model-plane binding, deterministic broker or batched main-thread route. Unavailable agent types never justify new supervisors/stopping supported authorized routes. Preserve credential/sensitivity boundaries; aliases do not prove providers.
+Before the first authenticated-read round, establish one owning-repository-approved deterministic broker on the main thread or in a local process and verify its credential/raw-response boundaries. Bind every round and wake to that same broker; return only permitted sanitized evidence. Keep credentials and raw authenticated responses out of delegated model context, including a persistent named `infra` agent. Preserve provider/plane verification: aliases do not prove providers. Without an approved broker preserving these boundaries, terminate `blocked_on_infra`; never select an unverified fallback.
 
 Each round:
 1. Batch authorized PR/CI/review/thread/complete-label reads; keep credentials/raw authenticated payloads out of delegated model context; return permitted sanitized evidence.
