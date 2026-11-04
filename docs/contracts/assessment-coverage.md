@@ -91,3 +91,49 @@ still requires trusted launcher/SAST/source provenance, complete source scope,
 accepted capability/policy for every selected role, permitted routes and actual
 receipt behavior, plus a fresh coordinated recovery identity with prior uncertain
 outcomes reconciled. These source interfaces establish none of those gates.
+
+## Staged SAST helper source
+
+The SAST evidence helper and generated copies are dormant source. Existing
+assessment workflows remain unchanged. Local synthetic helper tests do not
+establish hosted scanner completion or authenticated producer provenance. Later
+workflow wiring needs an accepted helper-containing base or trusted `pack_ref`,
+plus fresh exact-head reviews and checks. This slice does not resolve existing
+assessment failures or authorize release, consumer installation, deployment or
+protected-role activation.
+
+The dormant helper retains inline-suppressed findings and refuses changed,
+removed, added or untracked scanner configuration before scanning. Its consumer
+rechecks immutable base/head configuration, relevant index entries and working bytes before publication;
+configuration hashes alone do not authorize candidate-controlled policy.
+
+
+## Dormant scanner-contract correction
+
+The helper source now supports an exact installer snapshot of the existing
+Semgrep auto rules and the pinned package's language catalog. Its contract
+requires Semgrep 1.182.1 and Bandit 1.9.4, matching observed binary/report
+versions and explicit complete immutable target inventories. Passing the full
+tracked inventory prevents default test-directory exclusions from silently
+omitting intended tests. Missing completion fields, partial targets, changed
+rules/configuration, malformed output, crashed or unknown execution remain
+incomplete while findings and duplicate entry positions are retained. Inline
+suppression markers cannot omit findings because both suppression mechanisms
+are disabled; an actually partial inventory remains incomplete. A crashed 5,572-entry synthetic inventory is retained
+without being promoted to completed coverage; it is not a replacement for any
+historical hosted artifact.
+
+This is **dormant source only**. Every workflow, hydration/broad-agent test and
+role/capability policy remains at accepted main. No current workflow constructs
+the new installer snapshot or invokes this helper. The helper cannot bootstrap
+its own producer authority, authenticate a standalone caller or establish
+protected-role acceptance. Local synthetic checks do not establish hosted
+scanner completion, model effectiveness or live route qualification.
+
+The separately held integration must later adopt the exact corrected helper
+through an independently accepted base or trusted pack reference, wire its
+installer/producer/consumer contract and restore all deferred workflow tests.
+That later artifact requires fresh exact-head checks and review. Existing
+protected-role, source-admission and release gates remain unchanged. No merge,
+workflow adoption, provider call, deployment or protected activation follows
+from publication of this helper correction.
