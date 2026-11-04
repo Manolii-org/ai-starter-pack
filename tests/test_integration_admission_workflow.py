@@ -24,7 +24,11 @@ def test_candidate_config_is_never_the_command_authority() -> None:
     assert 'git show "${BASE_SHA}:${CONFIG_PATH}"' in text
     assert "trusted-config.json" in text
     assert "repository: Manolii-org/ai-starter-pack" in text
-    assert "${{ inputs.pack_ref }}" in text
+    # The pack checkout follows the caller's override or this workflow's own
+    # commit. It is never the candidate head.
+    assert "inputs.pack_ref || job.workflow_sha" in text
+    assert "ref: ${{ steps.pack.outputs.ref }}" in text
+    assert "ref: ${{ inputs.head_sha }}" in text
     assert "sparse-checkout-cone-mode: false" in text
     assert "bootstrap=true" in text
     assert "BOOTSTRAP" in text
