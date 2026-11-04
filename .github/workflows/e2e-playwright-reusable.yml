@@ -334,7 +334,7 @@ jobs:
           echo "ref=$PACK_REF" >> "$GITHUB_OUTPUT"
 
       - name: Checkout pack failure classifier
-        if: ${{ always() }}
+        if: ${{ always() && steps.pack.outcome == 'success' }}
         continue-on-error: true
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
@@ -365,7 +365,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Classify Playwright failures
-        if: ${{ always() }}
+        if: ${{ always() && steps.pack.outcome == 'success' }}
         id: classify
         continue-on-error: true
         uses: ./.manolii-pack-classifier/.github/actions/classify-playwright-failures

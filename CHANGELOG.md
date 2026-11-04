@@ -42,7 +42,10 @@
   job fails if that is empty; it never falls back to the default branch.
   v1 stays frozen: `release-tag.yml` moves the `v2` alias and does not move
   `v1`. Callers that still pass `pack_ref: v1` keep the old behaviour until
-  they drop that input or pin `v2.0.0`.
+  they drop that input or pin `v2.0.0`. The Jev judge shadow still reads
+  `inputs.pack_ref` itself, not the resolved SHA: an empty input skips the
+  shadow, and a caller that wants receipts passes a release tag such as
+  `pack_ref: v2.0.0`.
 - **No Anthropic substitute when the proxy is down.** With
   `LITELLM_FALLBACK_MODE=1`, the prompt classifier used to tell sessions to
   replace the open-weights tier aliases with Anthropic models
