@@ -5,12 +5,15 @@ keep their existing lane. No proxy advisor excerpt counts as either review.
 """
 
 import hashlib
+import importlib.machinery
+import importlib.util
 import json
 import os
 import re
 import urllib.error
 import urllib.parse
 import urllib.request
+from pathlib import Path
 
 ROLES = frozenset(
     {"security-boundary-test", "shell-security", "sast-scan", "security-deep-dive"}
@@ -129,6 +132,34 @@ def _parse(text, source):
     return data["findings"]
 
 
+class _PrivacySourceLoader(importlib.machinery.SourceFileLoader):
+    def get_code(self, fullname):
+        return self.source_to_code(self.get_data(self.path), self.path)
+
+
+def _screen_input(system, user, diff):
+    # Reuse the exact hydrated Judge privacy guard, as the deep-review adapter
+    # already does. Never resolve an ambient package or stale bytecode cache.
+    path = Path(__file__).resolve().parents[1] / "run-judge.py"
+    try:
+        spec = importlib.util.spec_from_file_location(
+            "_protected_input_guard", path,
+            loader=_PrivacySourceLoader("_protected_input_guard", str(path)))
+        if spec is None or spec.loader is None:
+            raise ImportError("privacy guard loader missing")
+        guard = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(guard)
+    except Exception:
+        raise ValueError("protected review privacy guard unavailable") from None
+    if not all(isinstance(value, str) for value in (system, user, diff)):
+        raise ValueError("protected review requires complete text inputs")
+    # Raw request text has no source-proof authority. Preserve all its bytes
+    # while dropping any string subclass's unverified reference-span metadata.
+    checked = tuple(str.__str__(value) for value in (system, user, diff))
+    guard._require_safe_packet(checked)
+    return checked
+
+
 def review(source, system, user, diff, base, key):
     """Blind full-input legs; union findings, never vote away a detected issue."""
     if not enabled() or source not in QUALIFICATION_ROLES:
@@ -136,6 +167,7 @@ def review(source, system, user, diff, base, key):
     head = os.environ.get("PR_HEAD_SHA", "")
     if not re.fullmatch(r"[0-9a-f]{40}", head):
         raise ValueError("security review requires the exact candidate head")
+    system, user, diff = _screen_input(system, user, diff)
     inventory, _ = _request(base, key, "/model/info")
     models = {}
     for row in inventory.get("data", []):
