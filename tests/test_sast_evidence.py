@@ -1037,7 +1037,19 @@ def test_actual_installer_snapshot_binds_pinned_catalog_and_rules(tmp_path, monk
             assert case != 'wrong-version'
             assert request.full_url == 'https://semgrep.dev/c/auto' and timeout == 30
             return Response()
-    monkeypatch.setattr(urllib.request, 'build_opener', lambda handler: Opener())
+    def opener(handler):
+        request = urllib.request.Request('https://semgrep.dev/c/auto')
+        from email.message import Message
+        for url in ('http://semgrep.dev/c/p/default', 'https://evil.test/rules',
+                    'https://semgrep.dev@evil.test/rules', 'https://semgrep.dev:444/rules'):
+            with pytest.raises(ValueError):
+                handler.redirect_request(request, None, 302, 'Found', Message(), url)
+        redirected = handler.redirect_request(request, None, 302, 'Found', Message(),
+                                             'https://semgrep.dev/c/p/default')
+        assert redirected.full_url == 'https://semgrep.dev/c/p/default'
+        assert handler.max_redirections == 3
+        return Opener()
+    monkeypatch.setattr(urllib.request, 'build_opener', opener)
     monkeypatch.setenv('RUNNER_TEMP', str(tmp_path))
     if case in ('missing', 'wrong-version'):
         with pytest.raises(ValueError): exec(compile(script, '<actual-installer>', 'exec'), {})

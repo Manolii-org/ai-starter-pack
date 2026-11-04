@@ -481,19 +481,25 @@ jobs:
           "$SCANNER_ENV/bin/python" -I - <<'PY_SNAPSHOT'
           import hashlib, importlib.metadata, json, os
           from pathlib import Path
-          import urllib.request
+          import urllib.request, urllib.parse
           import semgrep
           import yaml
 
           versions = {name: importlib.metadata.version(name) for name in ("semgrep", "bandit")}
           if versions != {"semgrep": "1.182.1", "bandit": "1.9.4"}:
               raise ValueError("scanner installer version mismatch")
-          class NoRedirect(urllib.request.HTTPRedirectHandler):
+          class RegistryRedirect(urllib.request.HTTPRedirectHandler):
+              max_redirections = 3
               def redirect_request(self, req, fp, code, msg, headers, newurl):
-                  return None
+                  target = urllib.parse.urlsplit(newurl)
+                  if (target.scheme != "https" or target.hostname != "semgrep.dev"
+                          or target.username is not None or target.password is not None
+                          or target.port not in (None, 443)):
+                      raise ValueError("scanner registry redirect refused")
+                  return super().redirect_request(req, fp, code, msg, headers, newurl)
           request = urllib.request.Request("https://semgrep.dev/c/auto", headers={
               "Accept": "application/json", "User-Agent": "Semgrep/1.182.1"})
-          with urllib.request.build_opener(NoRedirect()).open(request, timeout=30) as response:
+          with urllib.request.build_opener(RegistryRedirect()).open(request, timeout=30) as response:
               raw = response.read(32 * 1024 * 1024 + 1)
           if len(raw) > 32 * 1024 * 1024:
               raise ValueError("scanner rules exceed bound")
