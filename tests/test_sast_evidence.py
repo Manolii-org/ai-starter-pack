@@ -1008,7 +1008,7 @@ def test_actual_empty_diff_skip_needs_no_artifact_but_still_checks_source(source
 
 
 @pytest.mark.parametrize('workflow', ['pr-assessment.yml', 'pr-assessment-reusable.yml'])
-@pytest.mark.parametrize('case', ['rules', 'wrapped', 'missing', 'wrong-version'])
+@pytest.mark.parametrize('case', ['rules', 'wrapped', 'uppercase', 'missing', 'wrong-version'])
 def test_actual_installer_snapshot_binds_pinned_catalog_and_rules(tmp_path, monkeypatch, workflow, case):
     import importlib.metadata
     import sys
@@ -1025,7 +1025,9 @@ def test_actual_installer_snapshot_binds_pinned_catalog_and_rules(tmp_path, monk
     versions = {'semgrep': '1.182.1', 'bandit': '1.9.4'}
     monkeypatch.setattr(importlib.metadata, 'version', lambda name: '0.0.0' if case == 'wrong-version' else versions[name])
     rules = {'rules': [{'id': 'fixture-rule', 'languages': ['python']}]}
-    payload = {} if case == 'missing' else {'rule_config': json.dumps(rules)} if case == 'wrapped' else rules
+    payload = {} if case == 'missing' else {'rule_config': json.dumps(rules)} if case == 'wrapped' else copy.deepcopy(rules)
+    if case == 'uppercase':
+        payload['rules'][0]['languages'] = ['PYTHON']
     class Response:
         def __enter__(self): return self
         def __exit__(self, *args): return False

@@ -388,8 +388,12 @@ jobs:
                   document = yaml.safe_load(document)
           if not isinstance(document, dict) or not isinstance(document.get("rules"), list) or not document["rules"]:
               raise ValueError("scanner rules unavailable")
-          rules = json.dumps(document, sort_keys=True, separators=(",", ":")).encode()
           catalog = json.loads((Path(semgrep.__file__).parent / "semgrep_interfaces/lang.json").read_bytes())
+          # Semgrep's own language resolver is case-insensitive (for example C#).
+          aliases = {key.lower(): key for row in catalog for key in row["keys"]}
+          for rule in document["rules"]:
+              rule["languages"] = [aliases[language.lower()] for language in rule["languages"]]
+          rules = json.dumps(document, sort_keys=True, separators=(",", ":")).encode()
           languages = [{"keys": row["keys"], "exts": row.get("exts") or [],
                         "shebangs": row.get("shebangs") or []} for row in catalog]
           contract = {"versions": versions, "registry": "https://semgrep.dev/c/auto",
