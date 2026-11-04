@@ -1283,10 +1283,9 @@ def test_repo_manifest_schema_valid():
     jsonschema.validate(doc, schema)
 
 
-def test_shipped_caret_ref_resolves_to_the_current_pack_version():
-    """`ref: "^1.14"` in the shipped manifest must keep resolving the current
-    framework (caret semantics), and the committed native-guidance lock must
-    record that version, so a release bump cannot leave either behind."""
+def test_shipped_exact_ref_resolves_to_the_current_pack_version():
+    """The new v2 scaffold pins exactly its matching framework release;
+    the committed native-guidance lock records the same version."""
     import re
 
     import yaml
@@ -1296,7 +1295,7 @@ def test_shipped_caret_ref_resolves_to_the_current_pack_version():
     ref = next(r["ref"] for r in yaml.safe_load((REPO / "ai-manifest.yaml").read_text())["requires"]
                if r["plugin"] == "platform/framework")
     # The resolver's own range check, not a re-derivation of caret semantics.
-    assert ref.startswith("^") and load_resolve_module().version_satisfies(version, ref), (ref, version)
+    assert ref == version and load_resolve_module().version_satisfies(version, ref), (ref, version)
     lock = json.loads((REPO / ".ai/native-guidance-lock.json").read_text())
     assert lock["ref"] == ref and lock["resolved_version"] == version
 

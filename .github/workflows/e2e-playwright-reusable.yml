@@ -52,8 +52,8 @@ on:
       node_version:
         type: string
         required: false
-        default: '22'
-        description: Node version for setup-node.
+        default: '24'
+        description: Node version for setup-node. v2 defaults to 24; supported callers may explicitly override with 22.
       workdir:
         type: string
         required: false

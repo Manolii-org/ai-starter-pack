@@ -182,7 +182,7 @@ table.
 | **ci-reusable** | `runs_on=ubuntu-latest`, `node_version=24`, `package_manager=npm`, `pnpm_version=''`, `install_command=''`, `lint_command=npx eslint .`, `typecheck_command=npx tsc --noEmit`, `test_command=npm test -- --coverage`, `test_timeout_minutes=15: number`, `build_command=npm run build`, `build_timeout_minutes=15: number`, `audit_command=''`, `skip_lint=false: boolean`, `skip_typecheck=false: boolean`, `skip_test=false: boolean`, `skip_build=false: boolean`, `skip_security_audit=false: boolean` | none | none |
 | **claude-md-contract-reusable** | `runs_on=ubuntu-latest`, `python_version=3.12`, `require_contract=false: boolean` | none | none |
 | **coverage-ratchet-reusable** | `runs_on=ubuntu-latest`, `node_version=''`, `python_version=''`, `setup_command=''`, `install_command=npm ci`, `coverage_command` (req), `metric_command` (req), `baseline_file=.ci/coverage-baseline.txt`, `mode=enforce`, `require_baseline=false: boolean`, `fail_on_inert=false: boolean`, `auto_commit_baseline=false: boolean`, `cache_path=''`, `cache_key=''`, `timeout_minutes=30: number`, `job_timeout_minutes=65: number` | `GH_PAT` | `activation` |
-| **e2e-playwright-reusable** | `runs_on=ubuntu-latest`, `node_version=22`, `workdir=.`, `install_command=npm ci`, `build_command=''`, `browsers=chromium`, `playwright_args_json=[]`, `test_env=''`, `artifact_name=''`, `artifact_paths=playwright-report/\ntest-results/\ne2e-artifacts/`, `retention_days=14: number`, `timeout_minutes=30: number`, `job_timeout_minutes=90: number`, `pack_ref=v1`, `classify_results=test-results/`, `fail_on_inert=false: boolean` | `E2E_TEST_USER_EMAIL`, `E2E_TEST_USER_PASSWORD`, `VERCEL_BYPASS_SECRET` | `activation`, `test_failure_class`, `autofix_eligible`, `retryable` |
+| **e2e-playwright-reusable** | `runs_on=ubuntu-latest`, `node_version=24`, `workdir=.`, `install_command=npm ci`, `build_command=''`, `browsers=chromium`, `playwright_args_json=[]`, `test_env=''`, `artifact_name=''`, `artifact_paths=playwright-report/\ntest-results/\ne2e-artifacts/`, `retention_days=14: number`, `timeout_minutes=30: number`, `job_timeout_minutes=90: number`, `pack_ref=v1`, `classify_results=test-results/`, `fail_on_inert=false: boolean` | `E2E_TEST_USER_EMAIL`, `E2E_TEST_USER_PASSWORD`, `VERCEL_BYPASS_SECRET` | `activation`, `test_failure_class`, `autofix_eligible`, `retryable` |
 | **email-quality-reusable** | `pack_ref` (req), `profile_path=config/email-quality.json`, `sender_path` (req) | `UNSPAM_API_TOKEN` (req), `SENDER_TOKEN` | none |
 | **fast-tier-reusable** | `gates` (req), `budget_minutes=5: number`, `job_timeout_minutes=15: number`, `runs_on=ubuntu-latest`, `max_parallel=10: number`, `checkout_fetch_depth=0: number` | none | `verdict`, `breakdown` |
 | **integration-admission-reusable** | `config_path=config/integration-admission.json`, `base_sha` (req), `head_sha` (req), `installation_id` (req), `accepted_producer` (req), `pack_ref=v1`, `evidence_bundle_json=[]`, `runs_on=ubuntu-latest`, `shadow=true: boolean`, `timeout_minutes=15: number` | none | `plan`, `verdict` |
@@ -192,7 +192,7 @@ table.
 | **pr-autofix-loop-reusable** | `provider_mode=anthropic`, `litellm_proxy_url=''`, `model=''`, `runs_on=ubuntu-latest`, `max_successful_fixes=1`, `trusted_agent_bots=''` | `ANTHROPIC_API_KEY`, `LITELLM_MASTER_KEY`, `GH_PAT` | `activation` |
 | **pre-production-tier-reusable** | `gates` (req), `budget_minutes=45: number`, `job_timeout_minutes=60: number`, `runs_on=ubuntu-latest`, `max_parallel=4: number`, `environment=''`, `checkout_fetch_depth=0: number`, `open_issue_on_failure=false: boolean` | `GATE_SECRETS` | `verdict`, `breakdown` |
 | **restore-drill-reusable** | `resource_group` (req), `sql_server` (req), `source_database` (req), `sanity_queries=SELECT COUNT(*) AS table_count FROM INFORMATION_SCHEMA.TABLES`, `db_auth=sql-auth`, `sqlcmd_version=1.9.0`, `sqlcmd_sha256=b896bac71cf6ad8feca125bb42be61999116d8566a078ed475893372ccf8c0f2`, `timeout_minutes=45: number`, `runs_on=ubuntu-latest` | `DRILL_SQL_USER`, `DRILL_SQL_PASSWORD`, `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID` | none |
-| **secret-scan-reusable** | `runs_on=ubuntu-latest`, `node_version=22`, `python_version=3.12`, `require_gitleaks_license=false: boolean`, `npm_audit_omit_dev=false: boolean`, `gitleaks_version=8.30.0`, `fail_on_inert=false: boolean` | `GITLEAKS_LICENSE` | `npm_audit_activation`, `pip_audit_activation` |
+| **secret-scan-reusable** | `runs_on=ubuntu-latest`, `node_version=24`, `python_version=3.12`, `require_gitleaks_license=false: boolean`, `npm_audit_omit_dev=false: boolean`, `gitleaks_version=8.30.0`, `fail_on_inert=false: boolean` | `GITLEAKS_LICENSE` | `npm_audit_activation`, `pip_audit_activation` |
 | **static-review-reusable** | `runs_on=ubuntu-latest`, `node_version=24`, `python_version=3.14` | none | none |
 | **tier-gate-summary-reusable** | `gate_name` (req), `tier=fast`, `applies: boolean` (req), `skip_reason=no files in scope changed`, `command=''`, `runs_on=ubuntu-latest`, `working_directory=.`, `timeout_minutes=10: number`, `setup_command=''`, `checkout_fetch_depth=0: number` | none | `verdict`, `applied` |
 | **ui-smoke-reusable** | `base_url` (req), `routes=''`, `profile=default`, `config_path=config/qa.json`, `pack_ref=v1`, `playwright_version=1.63.0`, `axe_core_version=4.10.3`, `node_version=22`, `runs_on=ubuntu-latest`, `timeout_minutes=10: number`, `artifact_name=''` | `VERCEL_BYPASS_SECRET` | `status` |
@@ -333,11 +333,16 @@ Auto-bump reusable-workflow pins via this custom manager:
 }
 ```
 
-Tag strategy: immutable vX.Y.Z + moving `v1` major alias (regex tracks the moving tag).
-The alias is moved by `release-tag.yml` on every release. It was documented as
-moving long before anything moved it — `v1` sat on v1.7.2 while releases ran to
-v1.8.0, so anyone extending the alias silently got stale content. Treat a `v1`
-that lags the newest vX.Y.Z as a release-workflow bug, not as intended pinning.
+Tag strategy: immutable vX.Y.Z plus a moving alias within the matching major.
+`release-tag.yml` derives that alias from the released tag: a v2 release moves
+only `v2`; it must leave `v1` and all immutable tags unchanged. Production
+consumers adopt an exact version or commit in their own PRs. A floating alias
+does not establish independent consumer qualification.
+
+The v2 line changes the Playwright and secret-scan Node defaults from 22 to 24;
+`ci-reusable` already used 24. All three retain explicit `node_version` overrides.
+See [Node runtime support](../../docs/node-runtime-support.md) for the release,
+supported Node 22 overrides, library floors and pinned consumer qualification.
 
 ## Decision Log
 
