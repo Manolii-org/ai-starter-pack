@@ -52,6 +52,8 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -157,3 +159,24 @@ def test_generated_protected_identity(monkeypatch, tmp_path, layout, identity):
     protected.deny_unmocked_network.__wrapped__(monkeypatch)
     protected.test_protected_identity_is_stable_in_all_shipped_judges(
         monkeypatch, tmp_path, layout, identity)
+
+
+def test_rendered_review_contracts_run_without_generated_artifacts(tmp_path):
+    """Consumers run canonical contracts without pack-only artifact dependencies."""
+    from tests.test_copier_render import render
+
+    default_render = tmp_path / "consumer"
+    render(default_render)
+    for path in ("plugin", "registry", "tests/test_pack_plugin_parity.py"):
+        assert not (default_render / path).exists(), path
+    modules = ["tests/test_review_route_admission.py",
+               "tests/test_broad_agents_complete_input.py", "tests/test_protected_review.py"]
+    for path in modules:
+        assert (default_render / path).is_file(), path
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", *modules],
+        cwd=default_render, capture_output=True, text=True, timeout=600,
+        env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+    )
+    assert result.returncode == 0, result.stdout[-8000:] + result.stderr[-2000:]
+    assert "skipped" not in result.stdout
