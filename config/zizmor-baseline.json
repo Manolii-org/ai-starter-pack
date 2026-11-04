@@ -182,12 +182,6 @@
       "severity": "Medium"
     },
     {
-      "fingerprint": "e354a185fc5166fe",
-      "ident": "artipacked",
-      "path": ".github/workflows/pr-assessment-reusable.yml",
-      "severity": "Medium"
-    },
-    {
       "fingerprint": "d6f78910f1db79b5",
       "ident": "template-injection",
       "path": ".github/workflows/pr-assessment-reusable.yml",
