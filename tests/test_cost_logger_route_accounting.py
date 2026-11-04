@@ -105,13 +105,25 @@ def test_unknown_model_keeps_warning_and_plane_specific_estimate(monkeypatch, tm
 
 
 @pytest.mark.parametrize("model", ["kimi-k3", "accounts/fireworks/models/kimi-k3",
-                                  "fireworks_ai/accounts/fireworks/models/kimi-k3",
-                                  "tier-0-oss-heavy", "tier-2-agentic",
-                                  "tier-2-agentic-fallback-fireworks", "tier-3-tool-fallback-kimi-fireworks"])
-def test_migrated_serverless_model_uses_its_actual_rates_and_provider_bucket(tmp_path, model):
+                                  "fireworks_ai/accounts/fireworks/models/kimi-k3"])
+def test_historical_candidate_model_cost_is_not_dispatch_authority(tmp_path, model):
     logger = load("scripts/session-cost-logger.py")
     transcript(tmp_path, [model])
     result = logger.parse_subagents(tmp_path)
     assert result["subagent_ant_cost"] == 0
     assert result["subagent_proxy_cost"] == 18
     assert result["subagent_total_cost"] == 18
+
+
+@pytest.mark.parametrize("model", ["minimax-m3", "accounts/fireworks/models/minimax-m3",
+                                  "fireworks_ai/accounts/fireworks/models/minimax-m3",
+                                  "minimax/minimax-m3", "openrouter/minimax/minimax-m3",
+                                  "tier-2-agentic", "tier-2-agentic-pro",
+                                  "tier-2-agentic-pro-fallback-openrouter"])
+def test_ordinary_agentic_reuses_existing_m3_rate_and_provider_bucket(tmp_path, model):
+    logger = load("scripts/session-cost-logger.py")
+    transcript(tmp_path, [model])
+    result = logger.parse_subagents(tmp_path)
+    assert result["subagent_ant_cost"] == 0
+    assert result["subagent_proxy_cost"] == 1.5
+    assert result["subagent_total_cost"] == 1.5
