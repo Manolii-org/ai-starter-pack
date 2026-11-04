@@ -182,13 +182,35 @@ def _get_branch() -> str:
         return "unknown"
 
 
+def _session_start_baseline() -> Optional[str]:
+    """Return only an explicit existing commit, never an unvalidated ref."""
+    baseline = (os.environ.get("SESSION_RETRO_START_SHA") or "").strip()
+    if not re.fullmatch(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}", baseline):
+        return None
+    try:
+        checked = subprocess.run(
+            ["git", "-C", str(REPO_ROOT), "cat-file", "-t", baseline],
+            capture_output=True, text=True, timeout=5, check=False,
+        )
+        if checked.returncode != 0 or checked.stdout.strip() != "commit":
+            return None
+        return baseline
+    except Exception as e:
+        print(f"[session-retro] start_baseline: {type(e).__name__}", file=sys.stderr)
+        return None
+
+
 def _git_diff_stats() -> str:
+    # Only an explicit session-start commit can attribute this session's diff.
+    baseline = _session_start_baseline()
+    if baseline is None:
+        return ""
     try:
         r = subprocess.run(
-            ["git", "-C", str(REPO_ROOT), "diff", "--shortstat", "origin/main...HEAD"],
-            capture_output=True, text=True, timeout=5,
+            ["git", "-C", str(REPO_ROOT), "diff", "--shortstat", baseline, "HEAD", "--"],
+            capture_output=True, text=True, timeout=5, check=False,
         )
-        return (r.stdout or "").strip()
+        return (r.stdout or "").strip() if r.returncode == 0 else ""
     except Exception as e:
         print(f"[session-retro] git_diff_stats: {type(e).__name__}", file=sys.stderr)
         return ""
@@ -209,8 +231,31 @@ def _resolve_entity() -> Optional[str]:
     return None
 
 
+def _configured_local_only() -> bool:
+    """Owner policy wins over ambient keys; invalid policy fails closed.
+
+    Unlike Stop's --local-only (synchronous leg only), this policy also
+    disables background flush/drain. Values never appear in diagnostics.
+    """
+    if os.environ.get("SESSION_RETRO_LOCAL_ONLY", "").strip().lower() not in ("", "0", "false"):
+        return True
+    try:
+        if not CONFIG_PATH.exists():
+            return False  # Legacy installations keep their existing behavior.
+        cfg = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+        if not isinstance(cfg, dict):
+            raise TypeError("expected object")
+        policy = cfg.get("local_only", False)
+        if not isinstance(policy, bool):
+            raise TypeError("local_only must be boolean")
+        return policy
+    except (OSError, ValueError, TypeError):
+        print("[session-retro] invalid delivery policy; local-only", file=sys.stderr)
+        return True
+
+
 def _kl_ready(entity: Optional[str], local_only: bool) -> bool:
-    if local_only or not entity:
+    if local_only or _configured_local_only() or not entity:
         return False
     return bool((os.environ.get("MCP_API_KEY") or "").strip())
 
@@ -315,6 +360,8 @@ def _kl_url() -> Optional[str]:
     per-deployment secret in disguise, so we never invent one; callers
     skip the network leg when None.
     """
+    if _configured_local_only():
+        return None
     for key in ("KL_MCP_URL", "KNOWLEDGE_LAYER_MCP_URL"):
         val = os.environ.get(key) or ""
         if val.strip():
@@ -612,6 +659,113 @@ def plain_text_note(branch: str, signals: dict, dscore: int, fclass: str, diff_s
     if confusion:
         lines += ["", "### AI Confusion"] + [f"- {ev}" for ev in confusion[:8]]
     return "\n".join(lines)
+
+
+def capture_receipt_v2(record: dict, binding: dict, readback: dict | None = None) -> dict:
+    """Pure legacy adapter; supplied evidence is not authorization or persistence.
+
+    No file, environment, network or model access. A future trusted sink adapter
+    must supply verified readback and retain this result using the existing store.
+    """
+    import hashlib
+
+    allowed = {
+        "organization", "repository", "provider", "provider_run_id", "operator_id",
+        "operator_evidence", "trigger", "package_revision", "hook_revision",
+        "sanitized_artifact_id", "sanitized_artifact_sha256", "coverage",
+        "missing_sources", "expected_record_id", "store_reference", "outcome",
+    }
+    if not isinstance(record, dict) or not isinstance(binding, dict) or set(binding) - allowed:
+        raise ValueError("capture_binding_rejected")
+
+    def pointer(value, *, legacy_identity=False):
+        if value is None or value == "":
+            return None
+        # Preserve punctuation and Unicode in existing IDs and Git refs.
+        pattern = r"[^\s\x00-\x1f\x7f]{1,512}" if legacy_identity else r"[A-Za-z0-9_.:/@-]{1,512}"
+        if not isinstance(value, str) or not re.fullmatch(pattern, value):
+            raise ValueError("capture_pointer_rejected")
+        # Retain opaque owner-local pointers, never URLs or userinfo forms.
+        if "://" in value or (":" in value and "@" in value):
+            raise ValueError("capture_pointer_rejected")
+        # Reject recognizable credential/token forms and narrative/header text.
+        if not legacy_identity and re.search(r"(?i)(?:bearer|password|secret|token|api[-_]?key)[-_:]", value):
+            raise ValueError("capture_pointer_rejected")
+        if re.search(r"(?<![A-Za-z0-9_])(?:sk-|ghp_|github_pat_|eyJ)[A-Za-z0-9_-]{12,}", value):
+            raise ValueError("capture_pointer_rejected")
+        return value
+
+    def pointers(values):
+        if not isinstance(values, list) or len(values) > 64:
+            raise ValueError("capture_evidence_rejected")
+        result = [pointer(value) for value in values]
+        if any(value is None for value in result):
+            raise ValueError("capture_evidence_rejected")
+        return result
+
+    digest = binding.get("sanitized_artifact_sha256")
+    if digest is not None and (not isinstance(digest, str) or not re.fullmatch(r"[a-f0-9]{64}", digest)):
+        raise ValueError("capture_artifact_hash_rejected")
+    trigger = binding.get("trigger", "unknown")
+    if trigger not in {"automatic_hook", "manual_summary", "recovery", "backfill", "unknown"}:
+        raise ValueError("capture_trigger_rejected")
+    outcome = binding.get("outcome", "unknown")
+    if outcome not in {"pending", "failed", "no_actionable_signal", "unknown"}:
+        raise ValueError("capture_outcome_rejected")
+    evidence = pointers(binding.get("operator_evidence", []))
+    fields = {
+        "schema": "session-capture-receipt/v2",
+        "capture_id": pointer(record.get("capture_id"), legacy_identity=True),
+        "source_session_id": pointer(record.get("source_session_id") or record.get("session_id"), legacy_identity=True),
+        "provider_run_id": pointer(binding.get("provider_run_id")),
+        "organization": pointer(binding.get("organization")),
+        "entity": pointer(record.get("entity")),
+        "repository": pointer(binding.get("repository")),
+        "ref": pointer(record.get("branch"), legacy_identity=True),
+        "start_baseline": pointer(record.get("start_baseline")),
+        "provider": pointer(binding.get("provider")),
+        "operator_id": pointer(binding.get("operator_id")) if evidence else None,
+        "operator_evidence": evidence,
+        "trigger": trigger,
+        "package_revision": pointer(binding.get("package_revision")),
+        "hook_revision": pointer(binding.get("hook_revision")),
+        "coverage": pointer(binding.get("coverage")),
+        "missing_sources": pointers(binding.get("missing_sources", [])),
+        "sanitized_artifact_id": pointer(binding.get("sanitized_artifact_id")),
+        "sanitized_artifact_sha256": digest,
+        "store_reference": pointer(binding.get("store_reference")),
+        "persisted_record_id": None,
+        "delivery_state": outcome,
+        "verification_evidence": [],
+        "legacy_kl_written": record.get("kl_written") if isinstance(record.get("kl_written"), bool) else None,
+    }
+    if record.get("delivery_policy") == "local_only":
+        fields["delivery_state"] = "local_only"
+    elif record.get("kl_written") is True and outcome in {"unknown", "pending"}:
+        fields["delivery_state"] = "acknowledged_unverified"
+    if readback is not None and fields["delivery_state"] != "local_only":
+        required = {"organization", "entity", "store_reference", "capture_id", "record_id", "artifact_sha256", "evidence"}
+        if not isinstance(readback, dict) or set(readback) != required:
+            raise ValueError("capture_readback_rejected")
+        proof = pointers(readback["evidence"])
+        expected = pointer(binding.get("expected_record_id"))
+        matches = (
+            all(fields[name] is not None and readback[name] == fields[name]
+                for name in ("organization", "entity", "store_reference", "capture_id"))
+            and expected is not None and readback["record_id"] == expected
+            and digest is not None and readback["artifact_sha256"] == digest
+            and fields["sanitized_artifact_id"] is not None and bool(proof)
+            and outcome not in {"failed", "no_actionable_signal"}
+        )
+        if matches:
+            fields["delivery_state"] = "verified"
+            fields["persisted_record_id"] = expected
+            fields["verification_evidence"] = proof
+        else:
+            # Ambiguous/mismatched response is not safe to blindly retry.
+            fields["delivery_state"] = "unknown"
+    fields["receipt_id"] = hashlib.sha256(json.dumps(fields, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    return fields
 
 
 def _write_local_record(record: dict) -> Path:
@@ -1380,6 +1534,8 @@ def mode_kl_only(session_id: str = "") -> None:
                     continue
                 if str(candidate.get("session_id") or "") != session_id:
                     continue
+                if candidate.get("delivery_policy") == "local_only":
+                    continue
                 if candidate.get("kl_written") is True:
                     # Codex P2 2026-07-19 (ai-starter-pack line 965):
                     # remember that this session HAS a flushed snapshot so
@@ -1482,6 +1638,8 @@ def mode_kl_only(session_id: str = "") -> None:
                 # succeeded, then a follow-up flush that hits the JSONL
                 # fallback, must not re-upload the same row.
                 if candidate.get("kl_written") is True:
+                    continue
+                if candidate.get("delivery_policy") == "local_only":
                     continue
                 if str(candidate.get("session_id") or "") == session_id:
                     cid = str(candidate.get("capture_id") or "")
@@ -1750,6 +1908,8 @@ def mode_kl_drain(max_sessions: int = 10) -> None:
         if not isinstance(candidate, dict):
             continue
         if candidate.get("kl_written") is True:
+            continue
+        if candidate.get("delivery_policy") == "local_only":
             continue
         if _lease_fresh(candidate):
             continue
@@ -2034,6 +2194,8 @@ def mode_stop(session_id: str, local_only: bool = False, force: bool = False,
         "kl_written": False,
         "entity": entity,
         "source": "ai-starter-pack",
+        "delivery_policy": "local_only" if _configured_local_only() else "legacy_optional",
+        "start_baseline": _session_start_baseline(),
     }
 
     if os.environ.get("SESSION_RETRO_DRY_RUN"):
@@ -2088,7 +2250,7 @@ def mode_stop(session_id: str, local_only: bool = False, force: bool = False,
 
     # KL network leg (optional). Callers that must stay within Stop budget use --local-only
     # and background a second invocation without --local-only for this path.
-    if _kl_ready(entity, local_only):
+    if record["delivery_policy"] != "local_only" and _kl_ready(entity, local_only):
         assert entity is not None
         safe_branch = branch.replace("/", "-").replace(" ", "-")
         branch_tag = f"branch:{safe_branch}"
