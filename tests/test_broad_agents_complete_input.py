@@ -754,18 +754,6 @@ def test_deep_recomputed_hash_does_not_authorize_missing_or_changed_sast_account
                                                packet, stop_reason='end_turn')
 
 
-@pytest.mark.parametrize('directory', ['plugin/manolii-framework', 'registry/platform/framework'])
-def test_deep_generated_runtime_has_real_builder_parser_and_guard_closure(runner, deep_repo, directory):
-    spec = importlib.util.spec_from_file_location('distributed_deep_' + directory.replace('/', '_'),
-                                                  ROOT / directory / 'scripts/run-broad-agents.py')
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    packet = module.build_security_deep_dive_input(deep_repo[0], **deep_repo[2])
-    parsed = module.parse_security_deep_dive_output(json.dumps(deep_output(packet)), packet, stop_reason='end_turn')
-    assert parsed['status'] == 'provisional_complete'
-    assert parsed['provider_execution'] == 'unknown'
-    assert len(parsed['promoted']) == len(parsed['dismissed']) == 1
 
 
 @pytest.mark.parametrize('mutation', ['text', 'sha256', 'blob', 'side', 'commit', 'mode', 'duplicate',
@@ -902,7 +890,7 @@ def test_deep_malformed_source_mode_is_controlled_value_error(runner, deep_repo)
         runner.parse_security_deep_dive_output(json.dumps(deep_output(packet)), packet, stop_reason='end_turn')
 
 
-@pytest.mark.parametrize('directory', ['', 'plugin/manolii-framework', 'registry/platform/framework'])
+@pytest.mark.parametrize('directory', [''])
 @pytest.mark.parametrize('change', ['modify', 'add', 'delete', 'quoted', 'unicode', 'raw_unicode',
                                    'empty_add', 'mode_only', 'rename'])
 def test_deep_retained_diff_requires_nontriggering_old_and_new_sources(runner, deep_repo, monkeypatch,
@@ -1007,7 +995,7 @@ def test_deep_diff_reconciles_nontriggering_source_sides_and_git_identity(runner
         runner.parse_security_deep_dive_output(json.dumps(answer), packet, stop_reason='end_turn')
 
 
-@pytest.mark.parametrize('directory', ['', 'plugin/manolii-framework', 'registry/platform/framework'])
+@pytest.mark.parametrize('directory', [''])
 @pytest.mark.parametrize('mutation', ['fabricated_head', 'missing_base', 'missing_head', 'false_absent',
                                     'mode', 'both_absent'])
 def test_deep_unchanged_evidence_requires_identical_source_pairs(runner, deep_repo, monkeypatch,

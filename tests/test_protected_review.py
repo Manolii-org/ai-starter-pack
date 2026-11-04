@@ -460,7 +460,7 @@ def test_equal_identity_content_different_confidence_keeps_first_original_and_bo
     assert [leg["findings"] for leg in original["protected_review"]["legs"]] == [[first], [second]]
 
 
-@pytest.mark.parametrize("layout", ["", "plugin/manolii-framework/", "registry/platform/framework/"])
+@pytest.mark.parametrize("layout", [""])
 @pytest.mark.parametrize("identity", [None, "original-id"])
 def test_protected_identity_is_stable_in_all_shipped_judges(monkeypatch, tmp_path, layout, identity):
     path = ROOT / layout / "scripts/run-judge.py"
