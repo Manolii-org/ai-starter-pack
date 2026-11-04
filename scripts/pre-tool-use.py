@@ -411,6 +411,23 @@ agent_sensitivity = _load_agent_sensitivity(_agent_key)
 agent_sensitivity_rank = SENSITIVITY_ORDER.get(agent_sensitivity, SENSITIVITY_ORDER["internal"])
 model_omitted = model is None or model == "" or model == "default"
 
+disabled_routes = {
+    name
+    for section in ("tier_definitions", "tier_aliases", "proxy_intercepted_models")
+    for name, entry in routing_config.get(section, {}).items()
+    if isinstance(entry, dict) and entry.get("enabled") is False
+}
+if recommended in disabled_routes or model in disabled_routes:
+    print(json.dumps({
+        "decision": "block",
+        "reason": (
+            f"[OSS-GUARD] Agent dispatch blocked: {subagent_type!r} requests an unavailable "
+            "route pending qualification. Do not substitute another model; update the "
+            "routing contract only after the required qualification succeeds."
+        ),
+    }))
+    sys.exit(0)
+
 if agent_sensitivity_rank > SENSITIVITY_ORDER["internal"] and not routing_config_loaded:
     print(json.dumps({
         "decision": "block",

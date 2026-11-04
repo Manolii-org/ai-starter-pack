@@ -117,43 +117,30 @@ def test_native_haiku_has_no_redundant_fallback_and_short_alias_is_independent()
     assert models[fallbacks["haiku"][0]].startswith("anthropic/")
 
 
-def test_kimi_serverless_routes_and_metadata_use_verified_replacement():
+
+def test_unqualified_kimi_candidate_has_no_serving_route():
     config = yaml.safe_load((ROOT / "deploy/litellm-proxy/config.yaml").read_text())
+    assert all("kimi-k3" not in row["litellm_params"]["model"] for row in config["model_list"])
     routing = json.loads((ROOT / ".claude/model-routing.json").read_text())
-    aliases = {"tier-0-oss-heavy", "tier-2-agentic", "tier-2-agentic-fallback-fireworks", "tier-3-tool-fallback-kimi-fireworks"}
-    for row in config["model_list"]:
-        assert row["litellm_params"]["model"] != "fireworks_ai/accounts/fireworks/models/kimi-k2p6"
-        if row["model_name"] in aliases:
-            assert row["litellm_params"]["model"] == "fireworks_ai/accounts/fireworks/models/kimi-k3"
-            assert row["model_info"] == {"input_cost_per_token": 0.000003,
-                                          "cache_read_input_token_cost": 0.0000003,
-                                          "output_cost_per_token": 0.000015}
-    for name in ("tier-0-oss-heavy", "tier-2-agentic"):
-        tier = routing["tier_definitions"][name]
-        assert tier["model"] == "accounts/fireworks/models/kimi-k3"
-        assert (tier["cost_per_m_input"], tier["cost_per_m_output"]) == (3.0, 15.0)
-        assert tier["context_window"] == 1048576
-        assert tier["intelligence_score"] is None  # Never inherit the previous model's score.
+    candidate = routing["fallback"]["alternatives"]["kimi-k3"]
+    assert candidate["enabled"] is False and candidate["status"] == "inactive-pending-qualification"
+    assert candidate["model"] == "accounts/fireworks/models/kimi-k3"
+    assert (candidate["cost_per_m_input"], candidate["cost_per_m_output"]) == (3.0, 15.0)
+    assert candidate["context_window"] == 1048576
     assert "tier-2-agentic-pro" in routing["data_classification"]["internal"]["allowed_tiers"]
 
 
-def test_kimi_replacement_does_not_inherit_performance_qualification():
+def test_kimi_candidate_and_heavy_tier_require_real_qualification():
     routing = json.loads((ROOT / ".claude/model-routing.json").read_text())
-    fields = {
-        "tier-0-oss-heavy": ("swebench_pro", "swebench_verified", "baseline_swebench_pro"),
-        "tier-2-agentic": ("swebench", "baseline_swebench", "gdpval_aa_elo", "throughput_tok_per_sec"),
-    }
-    for name, metrics in fields.items():
-        tier = routing["tier_definitions"][name]
-        assert tier["model"] == "accounts/fireworks/models/kimi-k3"
-        for metric in metrics:
-            assert tier[metric] is None, (name, metric)
-        assert tier["fallback_chain"]["primary"]["smoke_tested"] is None
-    assert routing["tier_aliases"]["tier-2-agentic"]["throughput_tok_per_sec"] is None
-    for name in ("standard", "heavy"):
-        assert routing["fallback"]["tier_map"][name]["params"] is None
-    assert routing["browser_automation"]["stagehand_llm"]["secondary"]["monthly_estimate_20_tasks_day"] is None
+    candidate = routing["fallback"]["alternatives"]["kimi-k3"]
+    for metric in ("swebench_pro", "swebench_verified", "baseline_swebench_pro", "intelligence_score"):
+        assert candidate[metric] is None, metric
+    assert candidate["litellm_alias"] is None and candidate["fallback_chain"] == {}
+    heavy = routing["tier_definitions"]["tier-0-oss-heavy"]
+    assert heavy["enabled"] is False and heavy["model"] is None and heavy["fallback_chain"] == {}
+    assert routing["tier_aliases"]["tier-0-oss-heavy"]["enabled"] is False
+    assert routing["fallback"]["tier_map"]["heavy"]["model_id"] is None
+    assert routing["browser_automation"]["stagehand_llm"]["secondary"]["model_id"] is None
     threshold = routing["sync_sources"]["intelligence_ratings"]["tier_thresholds"]["heavy_tier_oss"]
     assert "intelligence_score >= 42" in threshold and ">5pp" in threshold
-    assert "Current primary: Kimi K3, unqualified" in threshold
-    assert "Smoke test + 8-case fitness eval required" in routing["tier_definitions"]["tier-0-oss-heavy"]["eval_status"]
+    assert "Smoke test + 8-case fitness eval required".lower() in heavy["eval_status"].lower()

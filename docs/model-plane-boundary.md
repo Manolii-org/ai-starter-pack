@@ -378,3 +378,17 @@ Standalone and reusable GitHub workflows forward the non-secret repository
 variable `ANTHROPIC_DIRECT_BASE_URL` in every review phase. External direct-mode
 consumers must configure that origin explicitly; a credential or capability
 alone does not select a provider endpoint. Ordinary proxy mode is unchanged.
+
+
+### Unqualified model candidates
+
+Kimi K3 is retained as an inactive catalog candidate. It has no bundled serving
+row or automatic fallback edge. The OSS heavy tier is unavailable until a model
+has the required intelligence baseline, smoke test and eight-case fitness eval;
+no other model is silently substituted for a heavy assignment.
+
+The ordinary `tier-2-agentic` alias reuses the existing `tier-2-agentic-pro`
+MiniMax M3 Fireworks route and its existing OpenRouter fallback. Its recorded
+2026-10-28 acceptance probe qualifies that existing ordinary route, not the
+separate heavy tier. Existing internal/public clearance and credentials remain
+unchanged. Catalog prices and provider capabilities do not grant qualification.
