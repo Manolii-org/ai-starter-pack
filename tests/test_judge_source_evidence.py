@@ -1438,3 +1438,45 @@ def test_judge_never_salvages_an_earlier_drop_when_final_verdict_is_invalid(repo
     monkeypatch.setattr(j, '_urlopen_https', lambda *a, **kw: Response(json.dumps({
         'content': [{'type': 'text', 'text': text}], 'stop_reason': 'end_turn'}).encode()))
     assert j.Judge('unused', 1, head).invoke_judge_agent([candidate]) is None
+
+
+@pytest.mark.parametrize("decision", ["keep", "drop"])
+@pytest.mark.parametrize("source_state", ["head", "deleted"])
+def test_unsupported_dispositions_are_not_final_shadow_labels(repo, monkeypatch, decision, source_state):
+    root, base = safe_subject(repo)
+    path = "policy.py"
+    head = base
+    if source_state == "deleted":
+        path = "test_policy.py"
+        (root / path).unlink()
+        git(root, "add", "-A")
+        git(root, "commit", "-m", "Delete source for unsupported disposition")
+        head = git(root, "rev-parse", "HEAD")
+        monkeypatch.setenv("PR_BASE_SHA", base)
+    f = finding(path, 2)
+    verdict = answer(f, decision)
+    verdict["decisions"][0]["evidence_ids"] = [loc(f)] if source_state == "deleted" else []
+    judge = j.Judge(str(root), 1, head)
+    judge.judge_log_dir = root / "logs"
+    monkeypatch.setattr(j, "_endpoint", lambda **kw:
+                        ("offline", "https://example.invalid/v1/messages", False))
+    monkeypatch.setattr(j, "_urlopen_https", lambda *a, **kw: Response(json.dumps({
+        "content": [{"type": "text", "text": json.dumps(verdict)}],
+        "stop_reason": "end_turn"}).encode()))
+    result = judge.invoke_judge_agent([f])
+    assert not result["complete"] and result["surviving"] == []
+    assert result["dropped_count"] == 0
+    assert result["decisions"][0]["decision"] == "investigate"
+    assert result["decisions"][0]["proposed_decision"] == decision
+    monkeypatch.setattr(judge, "load_candidates", lambda: [f])
+    monkeypatch.setattr(judge, "invoke_judge_agent", lambda _: result)
+    monkeypatch.setattr(judge, "post_review_to_github", lambda *a: pytest.fail("unsupported post"))
+    monkeypatch.setattr(judge, "_post_no_findings_comment", lambda: pytest.fail("false clean"))
+    monkeypatch.setattr(judge, "_post_advisory_warning", lambda *a: False)
+    assert judge.run() == 0 and judge._adjudication_incomplete
+    rows = [json.loads(line) for line in (judge.judge_log_dir / f"1-{head[:8]}.jsonl").read_text().splitlines()]
+    assert [row["decision"] for row in rows] == ["investigate"]
+    shadow_spec = importlib.util.spec_from_file_location("unsupported_shadow_labels", ROOT / "scripts/jev_judge_shadow.py")
+    shadow = importlib.util.module_from_spec(shadow_spec)
+    shadow_spec.loader.exec_module(shadow)
+    assert shadow.load_decisions(judge.judge_log_dir, 1, head) == {}
