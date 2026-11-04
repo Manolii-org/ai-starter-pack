@@ -743,3 +743,264 @@ def test_malformed_evidence_roots_keep_consumer_cli_static(source, tmp_path, mon
     assert module.main() == 1
     assert capsys.readouterr().err == "SAST evidence unavailable or incomplete\n"
     assert len(calls) == 4 and not (root / ".ai/sast-findings.json").exists()
+
+
+import yaml
+
+@pytest.mark.parametrize('workflow', ['pr-assessment.yml', 'pr-assessment-reusable.yml'])
+@pytest.mark.parametrize('case', ['zero', 'findings', 'missing', 'malformed', 'failure', 'cancel', 'reported-errors', 'partial-metrics'])
+def test_real_workflow_producer_cli_and_all_consumer_gates(source, tmp_path, workflow, case):
+    path = ROOT / '.github/workflows' / workflow
+    if not path.exists():
+        pytest.skip('reusable workflow is Pack-only')
+    root, env, _ = source
+    document = yaml.safe_load(path.read_text())
+    jobs = document['jobs']
+    if 'sast' not in jobs:
+        pytest.skip('rendered consumer delegates the producer to its pinned reusable workflow')
+    producer = jobs['sast']
+    assert producer['steps'][0]['with']['ref'] == '${{ github.event.pull_request.head.sha }}'
+    assert producer['outputs']['artifact_id'] == '${{ steps.artifact.outputs.artifact-id }}'
+    assert 'continue-on-error' not in next(s for s in producer['steps'] if s.get('id') == 'scan')
+    upload = next(s for s in producer['steps'] if s.get('id') == 'artifact')
+    assert upload['if'] == 'always()' and upload['with']['if-no-files-found'] == 'error'
+    runtime = tmp_path / 'runtime'
+    runtime.mkdir()
+    write_scanner_contract(runtime)
+    env.update(RUNNER_TEMP=str(runtime), BASE_SHA=json.loads(Path(env['GITHUB_EVENT_PATH']).read_text())['pull_request']['base']['sha'])
+    if workflow == 'pr-assessment-reusable.yml':
+        guard = next(s for s in producer['steps'] if s.get('name') == 'Require fresh SAST runtime checkout')
+        assert subprocess.run(['bash','-e','-c',guard['run']], cwd=root, env=env, capture_output=True).returncode == 0
+        checkout = next(s for s in producer['steps'] if s.get('name') == 'Check out trusted SAST runtime')
+        assert checkout['with']['repository'] == 'Manolii-org/ai-starter-pack'
+        assert checkout['with']['ref'] == '${{ inputs.pack_ref }}'
+        # Offline substitute for only the checkout action, not the load/producer.
+        pack = root/'.pack-sast'
+        helper = pack/'scripts/lib/sast_evidence.py'
+        helper.parent.mkdir(parents=True)
+        shutil.copyfile(ROOT/'scripts/lib/sast_evidence.py', helper)
+        for args in [('init','-q'), ('config','user.email','fixture@example.test'),
+                     ('config','user.name','Offline fixture'), ('add','.'), ('commit','-qm','trusted fixture')]:
+            subprocess.run(['git',*args], cwd=pack, check=True, capture_output=True)
+    loader = next(s for s in producer['steps'] if s.get('name') == 'Load trusted SAST normalizer')
+    loaded = subprocess.run(['bash','-e','-c',loader['run']], cwd=root, env=env, capture_output=True)
+    assert loaded.returncode == 0, loaded.stderr.decode()
+    assert (runtime/'sast-evidence.py').read_bytes() == (ROOT/'scripts/lib/sast_evidence.py').read_bytes()
+    binaries = tmp_path/'bin'
+    binaries.mkdir()
+    for scanner in ('semgrep', 'bandit'):
+        script = binaries/scanner
+        data = report(scanner, case != 'zero')
+        if case == 'reported-errors':
+            data['errors'] = [{'type': 'parse_error'}]
+        if case == 'partial-metrics' and scanner == 'bandit':
+            data['metrics'] = {'_totals': None, './app.py': None}
+        payload = '{' if case == 'malformed' else json.dumps(data)
+        code = 2 if case == 'failure' else 130 if case == 'cancel' else 0 if case in ('zero', 'missing', 'malformed') else (1 if scanner == 'bandit' else 0)
+        script.write_text('#!/usr/bin/python3\nimport json,sys,pathlib\n'
+                          'if "--version" in sys.argv: print("1.182.1" if pathlib.Path(sys.argv[0]).name == "semgrep" else "1.9.4");sys.exit(0)\n'
+                          f'flag={"--output" if scanner == "semgrep" else "-o"!r}\n'
+                          + (f'pathlib.Path(sys.argv[sys.argv.index(flag)+1]).write_text({payload!r})\n' if case != 'missing' else '') +
+                          f'sys.exit({code})\n')
+        script.chmod(0o700)
+    env.update(PATH=str(binaries)+':/usr/bin:/bin', RUNNER_TEMP=str(runtime), GITHUB_OUTPUT=str(tmp_path/'outputs'))
+    step = next(s for s in producer['steps'] if s.get('id') == 'scan')
+    executed = subprocess.run(['bash', '-e', '-c', step['run']], cwd=root, env=env, capture_output=True)
+    good = case in ('zero', 'findings')
+    assert executed.returncode == (0 if good else 1), executed.stderr.decode()
+    outputs = dict(line.split('=', 1) for line in Path(env['GITHUB_OUTPUT']).read_text().splitlines())
+    assert len(json.loads((runtime/'sast-output/sast-findings.json').read_text())) == (0 if case in ('zero', 'missing', 'malformed') else 4)
+    for job in ('specialists', 'broad-agents', 'judge'):
+        steps = jobs[job]['steps']
+        validation = next(s for s in steps if s.get('name') == 'Validate SAST producer evidence')
+        assert validation['env']['SAST_EVIDENCE_SHA256'] == '${{ needs.sast.outputs.evidence_sha256 }}'
+        assert validation['env']['SAST_FINDINGS_SHA256'] == '${{ needs.sast.outputs.findings_sha256 }}'
+        download = next(s for s in steps if s.get('with', {}).get('artifact-ids'))
+        assert len([s for s in steps if 'download-artifact@' in s.get('uses', '')
+                    and (s.get('with', {}).get('name') == 'sast-findings' or s.get('with', {}).get('artifact-ids'))]) == 1
+        assert download['with']['artifact-ids'] == '${{ needs.sast.outputs.artifact_id }}'
+        assert not {'run-id', 'repository', 'github-token'} & set(download['with'])
+        assert steps.index(download) < steps.index(validation)
+        assert steps.index(validation) < next(i for i,s in enumerate(steps) if s.get('name') == {'specialists':'Run specialist skills','broad-agents':'Run broad agents','judge':'Run judge'}[job])
+        destination = root/'.ai/sast'
+        prepare = next(s for s in steps if s.get('name') == 'Drop committed SAST evidence before download')
+        assert prepare['env']['SAST_ARTIFACT_ID'] == '${{ needs.sast.outputs.artifact_id }}'
+        prepared = subprocess.run(['bash','-e','-c',prepare['run']], cwd=root,
+                                  env={**env,'SAST_RESULT':'success','SAST_ARTIFACT_ID':'123'},capture_output=True)
+        assert prepared.returncode == 0, prepared.stderr.decode()
+        shutil.copytree(runtime/'sast-output', destination, dirs_exist_ok=True)
+        checked_env = {**env, 'SAST_RESULT':'success', 'SAST_EVIDENCE_SHA256':outputs['evidence_sha256'],
+                       'SAST_FINDINGS_SHA256':outputs['findings_sha256']}
+        checked = subprocess.run(['bash','-e','-c',validation['run']], cwd=root, env=checked_env, capture_output=True)
+        assert checked.returncode == (0 if good else 1), checked.stderr.decode()
+        if good:
+            assert (root/'.ai/sast-findings.json').read_bytes() == (destination/'sast-findings.json').read_bytes()
+        else:
+            assert not (root/'.ai/sast-findings.json').exists()
+        (destination/'sast-findings.json').write_text('[]')
+        rejected = subprocess.run(['bash','-e','-c',validation['run']], cwd=root, env=checked_env, capture_output=True)
+        assert rejected.returncode == 1 and rejected.stderr == b'SAST evidence unavailable or incomplete\n'
+    guard = next(s for s in jobs['judge']['steps'] if s.get('name') == 'Fail when an upstream assessment stage failed')
+    assert "needs.sast.result == 'failure'" in guard['if'] and "needs.sast.result == 'cancelled'" in guard['if']
+
+
+@pytest.mark.parametrize('kind', ['symlink', 'dangling', 'file', 'directory'])
+def test_reusable_checkout_refuses_candidate_redirect_before_any_write(tmp_path, kind):
+    path = ROOT/'.github/workflows/pr-assessment-reusable.yml'
+    if not path.exists():
+        pytest.skip('reusable workflow is Pack-only')
+    steps = yaml.safe_load(path.read_text())['jobs']['sast']['steps']
+    guard = next(s for s in steps if s.get('name') == 'Require fresh SAST runtime checkout')
+    checkout = next(s for s in steps if s.get('name') == 'Check out trusted SAST runtime')
+    assert steps.index(guard) < steps.index(checkout)
+    work = tmp_path/'source'
+    work.mkdir()
+    outside = tmp_path/'outside'
+    outside.mkdir()
+    sentinel = outside/'sentinel'
+    sentinel.write_text('untouched')
+    candidate = work/'.pack-sast'
+    if kind in ('symlink', 'dangling'):
+        candidate.symlink_to(outside if kind == 'symlink' else tmp_path/'missing', target_is_directory=True)
+    elif kind == 'file':
+        candidate.write_text('candidate')
+    else:
+        candidate.mkdir()
+    run = subprocess.run(['bash','-e','-c',guard['run']], cwd=work, capture_output=True)
+    assert run.returncode == 1 and sentinel.read_text() == 'untouched'
+    assert run.stderr == b'::error::SAST runtime checkout must be fresh\n'
+
+
+def test_direct_loader_uses_base_object_not_candidate_helper(source, tmp_path):
+    root, env, git = source
+    path = ROOT/'.github/workflows/pr-assessment.yml'
+    document = yaml.safe_load(path.read_text())
+    if 'sast' not in document['jobs']:
+        pytest.skip('consumer delegates SAST to its reusable')
+    base = json.loads(Path(env['GITHUB_EVENT_PATH']).read_text())['pull_request']['base']['sha']
+    candidate = root/'scripts/lib/sast_evidence.py'
+    candidate.write_text('raise RuntimeError("candidate normalizer must not execute")\n')
+    git('add','.')
+    git('commit','-qm','candidate helper replacement')
+    env.update(BASE_SHA=base, RUNNER_TEMP=str(tmp_path))
+    loader = next(s for s in document['jobs']['sast']['steps'] if s.get('name') == 'Load trusted SAST normalizer')
+    loaded = subprocess.run(['bash','-e','-c',loader['run']], cwd=root, env=env, capture_output=True)
+    assert loaded.returncode == 0
+    assert (tmp_path/'sast-evidence.py').read_bytes() == (ROOT/'scripts/lib/sast_evidence.py').read_bytes()
+    assert (tmp_path/'sast-evidence.py').read_bytes() != candidate.read_bytes()
+
+
+@pytest.mark.parametrize('workflow', ['pr-assessment.yml', 'pr-assessment-reusable.yml'])
+def test_actual_installer_is_job_temporary_not_global(tmp_path, workflow):
+    path = ROOT/'.github/workflows'/workflow
+    if not path.exists():
+        pytest.skip('Pack-only workflow')
+    document = yaml.safe_load(path.read_text())
+    if 'sast' not in document['jobs']:
+        pytest.skip('consumer delegates SAST to its reusable')
+    install = next(s for s in document['jobs']['sast']['steps'] if s.get('name') == 'Install scanner CLIs')
+    binaries = tmp_path/'bin'
+    binaries.mkdir()
+    shim = binaries/'python3'
+    shim.write_text('#!/usr/bin/python3\nimport pathlib,sys\n'
+                    'assert sys.argv[1:3] == ["-m","venv"]\n'
+                    'target=pathlib.Path(sys.argv[3]);(target/"bin").mkdir(parents=True)\n'
+                    '(target/"bin/python").write_text("#!/bin/sh\\nprintf \'%s\\\\n\' \\"$@\\" > \\"$RUNNER_TEMP/install-args\\"\\n")\n'
+                    '(target/"bin/python").chmod(0o700)\n')
+    shim.chmod(0o700)
+    env={**os.environ,'PATH':str(binaries)+':/usr/bin:/bin','RUNNER_TEMP':str(tmp_path),'GITHUB_PATH':str(tmp_path/'path-output')}
+    run=subprocess.run(['bash','-e','-c',install['run']],cwd=tmp_path,env=env,capture_output=True)
+    assert run.returncode == 0, run.stderr.decode()
+    assert (tmp_path/'path-output').read_text() == str(tmp_path/'sast-scanners/bin')+'\n'
+    assert (tmp_path/'install-args').read_text().splitlines() == ['-m','pip','install','--quiet','--disable-pip-version-check','semgrep==1.182.1','bandit==1.9.4']
+
+
+@pytest.mark.parametrize('job', ['classify', 'specialists', 'broad-agents'])
+def test_real_restore_fetch_keeps_merge_base_when_empty_head_forks_behind_base(source, tmp_path, job):
+    path = ROOT/'.github/workflows/pr-assessment.yml'
+    document = yaml.safe_load(path.read_text())
+    if job not in document['jobs']:
+        pytest.skip('consumer delegates assessment to its reusable')
+    root, env, git = source
+    event = json.loads(Path(env['GITHUB_EVENT_PATH']).read_text())
+    fork = event['pull_request']['base']['sha']
+    git('checkout','-q','--detach',fork)
+    git('checkout','-qb','empty-review')
+    git('commit','-qm','empty metadata commit','--allow-empty')
+    head = git('rev-parse','HEAD')
+    git('checkout','-q','--detach',fork)
+    git('checkout','-qb','moved-base')
+    (root/'base-only.txt').write_text('base advanced\n')
+    git('add','.')
+    git('commit','-qm','advance base')
+    base = git('rev-parse','HEAD')
+    event['pull_request']['base']['sha'] = base
+    event['pull_request']['head']['sha'] = head
+    Path(env['GITHUB_EVENT_PATH']).write_text(json.dumps(event))
+    module = load()
+    restore = next(s for s in document['jobs'][job]['steps'] if s.get('name') == 'Restore trusted runtime from PR base')
+    actual_fetch = next(line.strip() for line in restore['run'].splitlines() if line.strip().startswith('git fetch '))
+    for label, command in [('negative-control','git fetch --depth=1 origin "$BASE_SHA"'), ('actual',actual_fetch)]:
+        checkout = tmp_path/label
+        subprocess.run(['git','clone','-q',root.as_uri(),str(checkout)],check=True,capture_output=True)
+        subprocess.run(['git','checkout','-q','--detach',head],cwd=checkout,check=True,capture_output=True)
+        fetched = subprocess.run(['bash','-e','-c',command],cwd=checkout,env={**env,'BASE_SHA':base},capture_output=True)
+        assert fetched.returncode == 0
+        if label == 'negative-control':
+            with pytest.raises(subprocess.CalledProcessError):
+                module.verify(checkout,tmp_path,env,'','','skipped')
+        else:
+            result = module.verify(checkout,tmp_path,env,'','','skipped')
+            assert result['status'] == 'skipped' and result['reason'] == 'empty_diff'
+
+
+@pytest.mark.parametrize('workflow', ['pr-assessment.yml', 'pr-assessment-reusable.yml'])
+@pytest.mark.parametrize('job', ['specialists', 'broad-agents', 'judge'])
+@pytest.mark.parametrize('result,artifact_id', [('success',''),('success','0'),('success','unknown'),
+                                               ('success','123,456'),('success',' 123'),('failure','123')])
+def test_actual_consumer_stops_missing_or_unqualified_id_before_download(source, workflow, job, result, artifact_id):
+    root, env, _ = source
+    path = ROOT/'.github/workflows'/workflow
+    if not path.exists():
+        pytest.skip('Pack-only workflow')
+    document = yaml.safe_load(path.read_text())
+    if job not in document['jobs']:
+        pytest.skip('consumer delegates assessment to its reusable')
+    prepare = next(s for s in document['jobs'][job]['steps'] if s.get('name') == 'Drop committed SAST evidence before download')
+    marker = root/'.ai/sast/cache'
+    marker.parent.mkdir(parents=True)
+    marker.write_text('untrusted old scratch')
+    checked = subprocess.run(['bash','-e','-c',prepare['run']],cwd=root,
+                             env={**env,'SAST_RESULT':result,'SAST_ARTIFACT_ID':artifact_id},capture_output=True)
+    assert checked.returncode == 1
+    assert checked.stderr == b'::error::Qualified SAST artifact ID is required\n'
+    assert marker.read_text() == 'untrusted old scratch'  # fails before any subsequent step
+
+
+@pytest.mark.parametrize('workflow', ['pr-assessment.yml', 'pr-assessment-reusable.yml'])
+@pytest.mark.parametrize('job', ['specialists', 'broad-agents', 'judge'])
+def test_actual_empty_diff_skip_needs_no_artifact_but_still_checks_source(source, workflow, job):
+    root, env, _ = source
+    path = ROOT/'.github/workflows'/workflow
+    if not path.exists():
+        pytest.skip('Pack-only workflow')
+    document = yaml.safe_load(path.read_text())
+    if job not in document['jobs']:
+        pytest.skip('consumer delegates assessment to its reusable')
+    steps = document['jobs'][job]['steps']
+    prepare = next(s for s in steps if s.get('name') == 'Drop committed SAST evidence before download')
+    check = next(s for s in steps if s.get('name') == 'Validate SAST producer evidence')
+    download = next(s for s in steps if s.get('with',{}).get('artifact-ids'))
+    assert download['if'] == "needs.sast.result != 'skipped'"
+    controls = {**env,'SAST_RESULT':'skipped','SAST_ARTIFACT_ID':'',
+                'SAST_EVIDENCE_SHA256':'','SAST_FINDINGS_SHA256':''}
+    prepared = subprocess.run(['bash','-e','-c',prepare['run']],cwd=root,env=controls,capture_output=True)
+    assert prepared.returncode == 0
+    not_empty = subprocess.run(['bash','-e','-c',check['run']],cwd=root,env=controls,capture_output=True)
+    assert not_empty.returncode == 1 and not (root/'.ai/sast-findings.json').exists()
+    event = json.loads(Path(env['GITHUB_EVENT_PATH']).read_text())
+    event['pull_request']['base']['sha'] = event['pull_request']['head']['sha']
+    Path(env['GITHUB_EVENT_PATH']).write_text(json.dumps(event))
+    empty = subprocess.run(['bash','-e','-c',check['run']],cwd=root,env=controls,capture_output=True)
+    assert empty.returncode == 0 and not (root/'.ai/sast-findings.json').exists()
+
