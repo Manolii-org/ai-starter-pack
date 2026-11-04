@@ -188,30 +188,6 @@
       "severity": "Medium"
     },
     {
-      "fingerprint": "d6f78910f1db79b5",
-      "ident": "template-injection",
-      "path": ".github/workflows/pr-assessment-reusable.yml",
-      "severity": "High"
-    },
-    {
-      "fingerprint": "d6f78910f1db79b5",
-      "ident": "template-injection",
-      "path": ".github/workflows/pr-assessment-reusable.yml",
-      "severity": "High"
-    },
-    {
-      "fingerprint": "d6f78910f1db79b5",
-      "ident": "template-injection",
-      "path": ".github/workflows/pr-assessment-reusable.yml",
-      "severity": "High"
-    },
-    {
-      "fingerprint": "d6f78910f1db79b5",
-      "ident": "template-injection",
-      "path": ".github/workflows/pr-assessment-reusable.yml",
-      "severity": "High"
-    },
-    {
       "fingerprint": "ed44922c8b92f9ad",
       "ident": "excessive-permissions",
       "path": ".github/workflows/pr-assessment.yml",

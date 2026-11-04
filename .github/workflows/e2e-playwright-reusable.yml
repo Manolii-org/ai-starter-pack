@@ -126,11 +126,11 @@ on:
       pack_ref:
         type: string
         required: false
-        default: v1
+        default: ''
         description: >-
-          Ref of Manolii-org/ai-starter-pack to load the failure classifier
-          from. Callers on an immutable pin should pass the same tag — the
-          pack cannot discover its own ref.
+          Override the pack revision that provides the failure classifier.
+          Default: this reusable workflow's own commit (job.workflow_sha).
+          Never the moving v1 alias and never the default branch.
       classify_results:
         type: string
         required: false
@@ -321,13 +321,25 @@ jobs:
 
       # Advisory: never changes the job conclusion (continue-on-error + the
       # action itself exits 0). A pack_ref without the action just skips it.
-      - name: Checkout pack failure classifier
+      - name: Resolve pack revision
+        id: pack
         if: ${{ always() }}
+        env:
+          PACK_REF: ${{ inputs.pack_ref || job.workflow_sha }}
+        run: |
+          if [ -z "$PACK_REF" ]; then
+            echo "::error::Could not resolve this workflow's own pack commit; pass pack_ref: <40-char commit SHA>"
+            exit 1
+          fi
+          echo "ref=$PACK_REF" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout pack failure classifier
+        if: ${{ always() && steps.pack.outcome == 'success' }}
         continue-on-error: true
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           repository: Manolii-org/ai-starter-pack
-          ref: ${{ inputs.pack_ref }}
+          ref: ${{ steps.pack.outputs.ref }}
           path: .manolii-pack-classifier
           persist-credentials: false
           sparse-checkout: |
@@ -353,7 +365,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Classify Playwright failures
-        if: ${{ always() }}
+        if: ${{ always() && steps.pack.outcome == 'success' }}
         id: classify
         continue-on-error: true
         uses: ./.manolii-pack-classifier/.github/actions/classify-playwright-failures

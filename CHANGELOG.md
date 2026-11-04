@@ -24,11 +24,9 @@
   the github-actions manager, still one grouped and reviewed PR).
   `REUSABLE-WORKFLOWS.md` examples now show `@<sha> # vX.Y.Z`.
 - **`pack_ref` follows the `uses:` pin.** Several reusables load pack code
-  from `pack_ref`, whose default is the moving `v1` alias — so a SHA-pinned
-  `uses:` still ran code from wherever `v1` points. Docs now set `pack_ref` to
-  the same commit SHA, and a Renovate regex manager updates
-  `pack_ref: <sha> # vX.Y.Z` together with the `uses:` pin. (The `v1` default
-  itself is unchanged: changing it is a v2 contract change.)
+  from `pack_ref`. Docs set explicit `pack_ref` examples to the same commit
+  SHA, and a Renovate regex manager updates `pack_ref: <sha> # vX.Y.Z`
+  together with the `uses:` pin. The default itself changes in v2 (below).
 - `check-pinned-uses.py` parses YAML (flow mappings and quoted keys are
   checked too); `workflow-security-reusable.yml` fails loudly if its own pack
   revision cannot be resolved, installs hash-pinned PyYAML, and audits
@@ -37,6 +35,17 @@
 
 ### Changed
 
+- **v2 migration: `pack_ref` defaults to this workflow's own commit.**
+  `pr-assessment-reusable`, `ui-smoke-reusable`, `e2e-playwright-reusable`
+  and `integration-admission-reusable` no longer default `pack_ref` to the
+  moving `v1` alias. An empty input resolves to `job.workflow_sha` and the
+  job fails if that is empty; it never falls back to the default branch.
+  v1 stays frozen: `release-tag.yml` moves the `v2` alias and does not move
+  `v1`. Callers that still pass `pack_ref: v1` keep the old behaviour until
+  they drop that input or pin `v2.0.0`. The Jev judge shadow still reads
+  `inputs.pack_ref` itself, not the resolved SHA: an empty input skips the
+  shadow, and a caller that wants receipts passes a release tag such as
+  `pack_ref: v2.0.0`.
 - **No Anthropic substitute when the proxy is down.** With
   `LITELLM_FALLBACK_MODE=1`, the prompt classifier used to tell sessions to
   replace the open-weights tier aliases with Anthropic models

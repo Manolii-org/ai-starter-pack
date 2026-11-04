@@ -9,6 +9,18 @@ paths:
   .github/workflows/workflow-security-reusable.yml:
     ignore:
       - 'property "workflow_sha" is not defined'
+  .github/workflows/pr-assessment-reusable.yml:
+    ignore:
+      - 'property "workflow_sha" is not defined'
+  .github/workflows/ui-smoke-reusable.yml:
+    ignore:
+      - 'property "workflow_sha" is not defined'
+  .github/workflows/e2e-playwright-reusable.yml:
+    ignore:
+      - 'property "workflow_sha" is not defined'
+  .github/workflows/integration-admission-reusable.yml:
+    ignore:
+      - 'property "workflow_sha" is not defined'
   .github/workflows/migration-run-gate-reusable.yml:
     ignore:
       # ports comes from fromJSON(inputs.db_ports_json) — a sequence at runtime.

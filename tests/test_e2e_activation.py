@@ -99,3 +99,11 @@ def test_default_inert_run_still_passes(tmp_path) -> None:
     """v1 compatibility: without the opt-in an inert run warns but passes."""
     proc, _ = _execute(tmp_path, "  4 skipped\n")
     assert proc.returncode == 0
+
+
+def test_classifier_does_not_run_when_pack_resolution_fails() -> None:
+    steps = {step["name"]: step for step in _spec()["jobs"]["e2e"]["steps"] if step.get("name")}
+    gate = "always() && steps.pack.outcome == 'success'"
+    assert gate in steps["Checkout pack failure classifier"]["if"]
+    assert gate in steps["Classify Playwright failures"]["if"]
+    assert steps["Upload e2e artifacts"]["if"] == "${{ always() }}"
