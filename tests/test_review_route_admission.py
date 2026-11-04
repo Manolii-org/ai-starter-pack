@@ -265,11 +265,6 @@ def test_reusable_hydrates_shared_policy_dependency():
     assert 'scripts/lib/agent_capabilities.py' in data['env']['ASSESSMENT_RUNTIME_FILES'].split()
 
 
-def test_generated_policy_and_entry_points_match_canonical():
-    for prefix in ['plugin/manolii-framework', 'registry/platform/framework']:
-        for path in ['scripts/lib/agent_capabilities.py', 'scripts/run-pr-classifier.py',
-                     'scripts/run-specialists.py', 'scripts/run-judge.py', 'scripts/run-broad-agents.py']:
-            assert (ROOT / prefix / path).read_bytes() == (ROOT / path).read_bytes()
 
 
 @pytest.mark.parametrize('value', ['{broken', '[]', 'null'])

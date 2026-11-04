@@ -50,8 +50,17 @@ regressions on the `scripts/run-judge.py` they actually run).
 """
 from __future__ import annotations
 
+import importlib.util
 import json
+import sys
 from pathlib import Path
+
+import pytest
+from tests import test_broad_agents_complete_input as broad
+from tests import test_protected_review as protected
+from tests.test_broad_agents_complete_input import deep_output
+
+pytest_plugins = ["tests.test_broad_agents_complete_input"]
 
 ROOT = Path(__file__).resolve().parents[1]
 PLUGIN_ROOT = ROOT / "plugin" / "manolii-framework"
@@ -101,3 +110,50 @@ def test_review_evidence_and_companion_ship_without_drift():
         assert (root / prefix / "scripts/ci/review_evidence.py").read_bytes() == (root / "scripts/ci/review_evidence.py").read_bytes()
         assert (root / prefix / "skills/autonomy-follow-through/review-evidence.md").read_bytes() == (root / ".claude/skills/autonomy-follow-through/review-evidence.md").read_bytes()
         assert (root / prefix / "skills/autonomy-follow-through/SKILL.md").read_bytes() == (root / ".claude/skills/autonomy-follow-through/SKILL.md").read_bytes()
+
+
+def test_generated_policy_and_entry_points_match_canonical():
+    for prefix in ['plugin/manolii-framework', 'registry/platform/framework']:
+        for path in ['scripts/lib/agent_capabilities.py', 'scripts/run-pr-classifier.py',
+                     'scripts/run-specialists.py', 'scripts/run-judge.py', 'scripts/run-broad-agents.py']:
+            assert (ROOT / prefix / path).read_bytes() == (ROOT / path).read_bytes()
+
+
+@pytest.mark.parametrize('directory', ['plugin/manolii-framework', 'registry/platform/framework'])
+def test_deep_generated_runtime_has_real_builder_parser_and_guard_closure(runner, deep_repo, directory):
+    spec = importlib.util.spec_from_file_location('distributed_deep_' + directory.replace('/', '_'),
+                                                  ROOT / directory / 'scripts/run-broad-agents.py')
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    packet = module.build_security_deep_dive_input(deep_repo[0], **deep_repo[2])
+    parsed = module.parse_security_deep_dive_output(json.dumps(deep_output(packet)), packet, stop_reason='end_turn')
+    assert parsed['status'] == 'provisional_complete'
+    assert parsed['provider_execution'] == 'unknown'
+    assert len(parsed['promoted']) == len(parsed['dismissed']) == 1
+
+
+
+@pytest.mark.parametrize('directory', ['plugin/manolii-framework', 'registry/platform/framework'])
+@pytest.mark.parametrize('change', ['modify', 'add', 'delete', 'quoted', 'unicode', 'raw_unicode',
+                                   'empty_add', 'mode_only', 'rename'])
+def test_generated_retained_diff_sources(runner, deep_repo, monkeypatch, directory, change):
+    broad.test_deep_retained_diff_requires_nontriggering_old_and_new_sources(
+        runner, deep_repo, monkeypatch, directory, change)
+
+
+@pytest.mark.parametrize('directory', ['plugin/manolii-framework', 'registry/platform/framework'])
+@pytest.mark.parametrize('mutation', ['fabricated_head', 'missing_base', 'missing_head', 'false_absent',
+                                    'mode', 'both_absent'])
+def test_generated_unchanged_source_pairs(runner, deep_repo, monkeypatch, directory, mutation):
+    broad.test_deep_unchanged_evidence_requires_identical_source_pairs(
+        runner, deep_repo, monkeypatch, directory, mutation)
+
+
+@pytest.mark.parametrize('layout', ['plugin/manolii-framework/', 'registry/platform/framework/'])
+@pytest.mark.parametrize('identity', [None, 'original-id'])
+def test_generated_protected_identity(monkeypatch, tmp_path, layout, identity):
+    protected.estate.__wrapped__(monkeypatch)
+    protected.deny_unmocked_network.__wrapped__(monkeypatch)
+    protected.test_protected_identity_is_stable_in_all_shipped_judges(
+        monkeypatch, tmp_path, layout, identity)

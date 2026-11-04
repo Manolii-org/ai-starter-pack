@@ -859,3 +859,20 @@ def test_standard_keeps_codex_review_unless_opted_out(default_render, tmp_path):
 def test_strict_refuses_manolii_hosted_services(tmp_path, flag):
     with pytest.raises(subprocess.CalledProcessError):
         render(tmp_path / "bad", isolation_profile="strict", **{flag: "true"})
+
+
+def test_rendered_review_contracts_run_without_generated_artifacts(default_render):
+    """Consumers run canonical contracts without pack-only artifact dependencies."""
+    for path in ("plugin", "registry", "tests/test_pack_plugin_parity.py"):
+        assert not (default_render / path).exists(), path
+    modules = ["tests/test_review_route_admission.py",
+               "tests/test_broad_agents_complete_input.py", "tests/test_protected_review.py"]
+    for path in modules:
+        assert (default_render / path).is_file(), path
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", *modules],
+        cwd=default_render, capture_output=True, text=True, timeout=600,
+        env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+    )
+    assert result.returncode == 0, result.stdout[-8000:] + result.stderr[-2000:]
+    assert "skipped" not in result.stdout
