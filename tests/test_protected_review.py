@@ -919,6 +919,7 @@ def test_copied_specialist_companion_uses_source_not_initializer_or_cached_bytec
     import shutil
     consumer = tmp_path / "consumer"
     for relative in ["scripts/run-specialists.py", "scripts/lib/agent_capabilities.py",
+                     "scripts/run-judge.py", ".ai/security/token-shapes.json",
                      ".claude/skills/security-boundary-test/SKILL.md"]:
         dest = consumer / relative
         dest.parent.mkdir(parents=True, exist_ok=True)
@@ -968,3 +969,69 @@ def test_older_consumer_missing_companion_keeps_ordinary_proxy_and_marks_estate_
     _, error = module._invoke_skill("security-boundary-test", DIFF, tmp_path)
     assert error and len(calls) == 1
     assert json.loads((tmp_path / "security-boundary-test.json").read_text())["skipped"] == "protected_review_incomplete"
+
+
+@pytest.mark.parametrize("field", ["system", "user", "diff"])
+@pytest.mark.parametrize("material", [
+    "db_" + "password = 'offline-material'",
+    "Bearer " + "offline" * 5,
+    "custom+transport://offline-user" + "@example.invalid/source",
+])
+def test_sensitive_input_refuses_before_any_proxy_request(monkeypatch, field, material):
+    monkeypatch.setattr(pr, "_request", lambda *a, **kw: pytest.fail("privacy refusal reached proxy"))
+    arguments = dict(source="security-boundary-test", system="Review source", user="Review complete input",
+                     diff=DIFF, base="https://proxy.example", key="offline")
+    arguments[field] = material
+    with pytest.raises(ValueError, match="sensitive review material"):
+        pr.review(**arguments)
+
+
+@pytest.mark.parametrize("failure", ["missing_guard", "invalid_catalog"])
+def test_input_screening_failure_never_dispatches(monkeypatch, failure):
+    monkeypatch.setattr(pr, "_request", lambda *a, **kw: pytest.fail("screening failure reached proxy"))
+    if failure == "missing_guard":
+        def absent(*args, **kwargs):
+            raise FileNotFoundError("offline missing helper")
+        monkeypatch.setattr(pr._PrivacySourceLoader, "get_data", absent)
+    else:
+        read = Path.read_text
+        def invalid_catalog(path, *args, **kwargs):
+            return "{broken" if path.name == "token-shapes.json" else read(path, *args, **kwargs)
+        monkeypatch.setattr(Path, "read_text", invalid_catalog)
+    with pytest.raises(ValueError, match="guard unavailable|catalog invalid"):
+        pr.review("security-boundary-test", "Review", "Complete input", DIFF,
+                  "https://proxy.example", "offline")
+
+
+def test_input_cannot_claim_unverified_source_reference_spans(monkeypatch):
+    class UnverifiedSource(str):
+        reference_spans = ((0, 11),)
+    monkeypatch.setattr(pr, "_request", lambda *a, **kw: pytest.fail("unverified source proof reached proxy"))
+    unsafe = UnverifiedSource("db_" + "password = 'offline-material'")
+    with pytest.raises(ValueError, match="sensitive review material"):
+        pr.review("security-boundary-test", "Review", unsafe, DIFF,
+                  "https://proxy.example", "offline")
+
+
+def test_input_screen_matches_serialized_text_when_str_is_overridden(monkeypatch):
+    class MisleadingString(str):
+        def __str__(self):
+            return "Ordinary review input"
+    unsafe = MisleadingString("db_" + "password = 'offline-material'")
+    assert "offline-material" in json.dumps(unsafe)
+    monkeypatch.setattr(pr, "_request", lambda *a, **kw: pytest.fail("unscreened underlying text reached proxy"))
+    with pytest.raises(ValueError, match="sensitive review material"):
+        pr.review("security-boundary-test", "Review", unsafe, DIFF,
+                  "https://proxy.example", "offline")
+
+
+def test_request_construction_uses_only_the_screened_builtin_strings(monkeypatch):
+    class MisleadingSystem(str):
+        def __add__(self, other):
+            return "db_" + "password = 'offline-material'" + other
+    sent = install(monkeypatch)
+    pr.review("security-boundary-test", MisleadingSystem("Review source"), "Complete input", DIFF,
+              "https://proxy.example", "offline")
+    assert len(sent) == 2
+    assert all("offline-material" not in json.dumps(payload) for payload in sent)
+    assert all(payload["system"].startswith("Review source") for payload in sent)
