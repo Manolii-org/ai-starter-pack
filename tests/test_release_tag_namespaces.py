@@ -1,4 +1,4 @@
-"""release-tag.yml accepts pack and component tags; only pack tags move v1."""
+"""release-tag.yml accepts pack and component tags; v2+ moves that major."""
 
 from __future__ import annotations
 
@@ -42,6 +42,7 @@ def test_refuses_everything_else(tag: str) -> None:
 
 def _alias(tag: str, tmp_path: Path) -> subprocess.CompletedProcess[str]:
     """Run the alias step with a curl stub that records each call."""
+    tmp_path.mkdir(parents=True, exist_ok=True)
     log = tmp_path / "curl.log"
     stub = tmp_path / "curl"
     stub.write_text(f"#!/bin/sh\necho \"$@\" >> {log}\ncat >/dev/null\n", encoding="utf-8")
@@ -56,10 +57,13 @@ def _alias(tag: str, tmp_path: Path) -> subprocess.CompletedProcess[str]:
 
 def test_only_pack_tags_move_the_major_alias(tmp_path: Path) -> None:
     assert "if" not in STEPS["Move major-version alias"], "outcome contract: load-bearing step"
-    component = _alias("email-capture-v0.2.6", tmp_path)
+    component = _alias("email-capture-v0.2.6", tmp_path / "component")
     assert component.returncode == 0 and component.calls == ""  # type: ignore[attr-defined]
-    pack = _alias("v1.23.0", tmp_path)
-    assert pack.returncode == 0 and "git/refs/tags/v1" in pack.calls  # type: ignore[attr-defined]
+    frozen = _alias("v1.23.0", tmp_path / "v1")
+    assert frozen.returncode == 0 and frozen.calls == ""  # type: ignore[attr-defined]
+    pack = _alias("v2.0.0", tmp_path / "v2")
+    assert pack.returncode == 0 and "git/refs/tags/v2" in pack.calls  # type: ignore[attr-defined]
+    assert "git/refs/tags/v1" not in pack.calls  # type: ignore[attr-defined]
 
 
 def test_tag_is_annotated_with_optional_notes() -> None:

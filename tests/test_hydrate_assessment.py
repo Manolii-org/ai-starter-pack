@@ -161,12 +161,11 @@ def test_pack_checkout_is_conditional() -> None:
 def test_pack_ref_input_exists_and_defaults_to_major_alias() -> None:
     inputs = _workflow()[True]["workflow_call"]["inputs"]
     assert "pack_ref" in inputs
-    # The moving major alias is only safe because release-tag.yml moves it.
-    assert inputs["pack_ref"]["default"] == "v1"
+    # Empty default resolves to this reusable's own commit. v1 is frozen.
+    assert inputs["pack_ref"]["default"] == ""
     release = (REPO_ROOT / ".github/workflows/release-tag.yml").read_text()
-    assert "Move major-version alias" in release, (
-        "pack_ref defaults to the v1 alias, so release-tag.yml must move it"
-    )
+    assert "Move major-version alias" in release
+    assert '[[ "$MAJOR" != "v1" ]]' in release
 
 
 def test_scratch_checkout_is_cleaned_up() -> None:

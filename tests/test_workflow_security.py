@@ -351,6 +351,14 @@ def test_documented_callers_pin_pack_ref_to_the_uses_sha():
         assert "default: v1" not in text
         assert "inputs.pack_ref || job.workflow_sha" in text
         assert "Could not resolve this workflow's own pack commit" in text
+    # actionlint 1.31.1 does not model job.workflow_sha. The ignore is
+    # per-file and only that message; dropping it fails the security job.
+    actionlint = (ROOT / ".github" / "actionlint.yaml").read_text()
+    for name in anchored:
+        path = f".github/workflows/{name}.yml:"
+        assert path in actionlint
+        section = actionlint.split(path, 1)[1].split("\n  .github/", 1)[0]
+        assert 'property "workflow_sha" is not defined' in section
     doc = (ROOT / ".github/workflows/REUSABLE-WORKFLOWS.md").read_text()
     blocks = _re.findall(r"```ya?ml\n(.*?)```", doc, flags=_re.S)
     checked = 0
