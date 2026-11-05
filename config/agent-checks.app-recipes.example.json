@@ -24,6 +24,7 @@
       "paths": ["src/*", "app/*", "pages/*", "components/*", "lib/*", "tsconfig*.json", "package.json"],
       "environment": "node-deps",
       "tools": ["node"],
+      "append_changed_paths": false,
       "commands": [["npx", "--no-install", "tsc", "--noEmit"]]
     },
     {

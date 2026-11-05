@@ -122,18 +122,6 @@
       "severity": "High"
     },
     {
-      "fingerprint": "d45e6042ef02f11f",
-      "ident": "artipacked",
-      "path": ".github/workflows/email-capture-conformance.yml",
-      "severity": "Medium"
-    },
-    {
-      "fingerprint": "e4bf12565125c914",
-      "ident": "artipacked",
-      "path": ".github/workflows/email-capture-live-conformance.yml",
-      "severity": "Medium"
-    },
-    {
       "fingerprint": "3daa48375a7e35aa",
       "ident": "template-injection",
       "path": ".github/workflows/integration-admission-reusable.yml",
