@@ -17,6 +17,16 @@
 
 ## Unreleased
 
+### Added
+
+- **Four skills ported from the retired `shared-ai-skills` library:**
+  `systematic-debugging`, `root-cause-tracing`, `tool-design` and
+  `mcp-builder`. Upstream MIT notices are retained in each skill's
+  Attribution section. The library's Trail of Bits-derived skills
+  (`differential-review`, `sharp-edges`, `property-based-testing`,
+  `static-analysis`) were not ported: upstream is CC BY-SA 4.0, not the MIT
+  their frontmatter claimed.
+
 ### Security
 
 - **Production identifier removed; leak lint widened.** A production Supabase
