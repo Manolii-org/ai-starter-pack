@@ -2,6 +2,18 @@
 
 ## [2.0.0] — pending qualification
 
+### Added
+
+- `scripts/agent-merge.py`: the merge path for agents that merge interactively
+  rather than through an auto-merge workflow. It refuses unless the PR is at the
+  reviewed head, `mergeable_state` is clean, every required check passed on that
+  head, no review thread is unresolved, and the Codex advisory review at that head
+  has no P0/P1 (P2/P3 need `--accept-findings`). It lists tripped path guards and
+  refuses an unacknowledged one into main/prod/release. `--check` evaluates only.
+- `classify-playwright-failures` input `messages: "false"`: keeps file, title,
+  project and class but leaves error text out of the summary and JSON record, for
+  consumers that withhold authenticated reporter output from logs. Default unchanged.
+
 ### Changed
 
 - Playwright and reusable secret-scan default to Node 24. `ci-reusable` already

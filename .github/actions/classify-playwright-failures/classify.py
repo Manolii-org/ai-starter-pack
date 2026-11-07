@@ -127,6 +127,15 @@ def _cell(value: str) -> str:
     return value.replace("|", "\\|").replace("\n", " ")
 
 
+def omit_messages(data: dict) -> dict:
+    """Drop report-derived error text, keeping code-authored fields (file, title,
+    project, class, status). For consumers whose policy withholds authenticated
+    reporter output from logs: error messages can echo page content."""
+    data["failures"] = [{**f, "message": ""} for f in data["failures"]]
+    data["messages"] = "omitted"
+    return data
+
+
 def markdown(data: dict, title: str) -> str:
     cls = data["test_failure_class"]
     lines = [f"### {title}", ""]
@@ -143,12 +152,15 @@ def markdown(data: dict, title: str) -> str:
     if counts:
         lines += ["", f"By class: {counts}"]
     if data["failures"]:
-        lines += ["", "| Class | Test | Project | First error line |", "| --- | --- | --- | --- |"]
+        with_messages = data.get("messages") != "omitted"
+        if with_messages:
+            lines += ["", "| Class | Test | Project | First error line |", "| --- | --- | --- | --- |"]
+        else:
+            lines += ["", "| Class | Test | Project |", "| --- | --- | --- |"]
         for f in data["failures"]:
             test = f"{f['file']} › {f['title']}" if f["file"] else f["title"]
-            lines.append(
-                f"| `{f['class']}` | {_cell(test)} | {_cell(f['project'])} | {_cell(f['message'])} |"
-            )
+            row = f"| `{f['class']}` | {_cell(test)} | {_cell(f['project'])} |"
+            lines.append(row + (f" {_cell(f['message'])} |" if with_messages else ""))
         if data["failures_truncated"]:
             lines.append(f"\n…and {data['failures_truncated']} more.")
     if data["source"] == "stdout":
@@ -183,9 +195,13 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--json", default="", help="Write the JSON record here")
     ap.add_argument("--github-output", default="", help="Append key=value outputs here")
     ap.add_argument("--title", default="Playwright failure classification")
+    ap.add_argument("--omit-messages", action="store_true",
+                    help="Leave error text out of the summary and JSON record (file/title/class stay)")
     args = ap.parse_args(argv)
     job_failed = args.job_status.strip().lower() in ("failure", "failed", "cancelled")
     data = classify(_lines(args.results), _lines(args.log), job_failed, _lines(args.test_log))
+    if args.omit_messages:
+        data = omit_messages(data)
     if args.json:
         Path(args.json).parent.mkdir(parents=True, exist_ok=True)
         Path(args.json).write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")

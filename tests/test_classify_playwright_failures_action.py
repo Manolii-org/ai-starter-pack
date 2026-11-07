@@ -110,3 +110,32 @@ def test_stdout_fallback_only_without_json(tmp_path):
     rep.write_text(json.dumps(_report(status="passed")))
     kv, rec, _, _ = _run(tmp_path, "--results", str(rep), "--test-log", str(out), "--job-status", "failure")
     assert rec["source"] == "json" and kv["test_failure_class"] == "unclassified"
+
+
+def test_omit_messages_keeps_names_and_drops_error_text(tmp_path):
+    report = tmp_path / "r.json"
+    report.write_text(json.dumps(_report(errors=["expect(locator) failed: SYNTHETIC_PAGE_TEXT"], file="login.spec.ts")))
+    kv, rec, summary, stdout = _run(tmp_path, "--results", str(report), "--omit-messages")
+    assert kv["failed_tests"] == "1"
+    assert rec["messages"] == "omitted"
+    assert rec["failures"][0]["file"] == "login.spec.ts" and rec["failures"][0]["title"]
+    assert rec["failures"][0]["message"] == ""
+    assert "| Class | Test | Project |" in summary and "First error line" not in summary
+    assert "login.spec.ts" in summary
+    for text in (json.dumps(rec), summary, stdout):
+        assert "SYNTHETIC_PAGE_TEXT" not in text
+
+
+def test_messages_are_kept_by_default(tmp_path):
+    report = tmp_path / "r.json"
+    report.write_text(json.dumps(_report(errors=["expect(locator) failed: VISIBLE_DETAIL"])))
+    _, rec, summary, _ = _run(tmp_path, "--results", str(report))
+    assert "messages" not in rec
+    assert "First error line" in summary and "VISIBLE_DETAIL" in summary
+
+
+def test_action_wires_the_messages_input():
+    action = (ROOT / ".github/actions/classify-playwright-failures/action.yml").read_text()
+    assert 'IN_MESSAGES: ${{ inputs.messages }}' in action
+    assert 'if [ "$IN_MESSAGES" = "false" ]; then extra+=(--omit-messages); fi' in action
+    assert '"${extra[@]}"' in action

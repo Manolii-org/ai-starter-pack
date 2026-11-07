@@ -41,6 +41,13 @@ inputs:
     description: Step-summary heading.
     required: false
     default: "Playwright failure classification"
+  messages:
+    description: >-
+      "false" leaves error text out of the step summary and JSON record, keeping
+      file, title, project and class. Use where policy withholds authenticated
+      reporter output from logs (error messages can echo page content).
+    required: false
+    default: "true"
 outputs:
   test_failure_class:
     description: "none | product | test-defect | environment | external-dependency | unclassified"
@@ -67,9 +74,13 @@ runs:
         IN_JOB_STATUS: ${{ inputs.job-status }}
         IN_JSON: ${{ inputs.json-path }}
         IN_TITLE: ${{ inputs.title }}
+        IN_MESSAGES: ${{ inputs.messages }}
       run: |
+        extra=()
+        if [ "$IN_MESSAGES" = "false" ]; then extra+=(--omit-messages); fi
         python3 "$GITHUB_ACTION_PATH/classify.py" \
           --results "$IN_RESULTS" --log "$IN_LOGS" --test-log "$IN_TEST_LOGS" --job-status "$IN_JOB_STATUS" \
           --json "$IN_JSON" --title "$IN_TITLE" \
+          "${extra[@]}" \
           --summary "$GITHUB_STEP_SUMMARY" --github-output "$GITHUB_OUTPUT" \
           || echo "::warning::failure classification errored (advisory; job conclusion unchanged)"
