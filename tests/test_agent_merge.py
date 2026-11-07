@@ -195,3 +195,58 @@ def test_thread_resolution_reads_the_rest_and_graphql_shapes():
     assert not am.thread_resolved({"resolved": False})
     assert am.thread_resolved({"isResolved": True})
     assert not am.thread_resolved({"path": "unknown shape"})
+
+
+def worker_review(body, head=HEAD, state="completed", cid=5):
+    return {"id": cid, "user": BOT, "updated_at": "2026-11-07T03:00:00Z",
+            "body": f"{am.CODEX_MARKER}\n### Codex code review\n\nRevision `{head}`\n\n"
+                    f"Execution: **{state}** (reason).\n\n```text\n{body}\n```\n"}
+
+
+def test_worker_revision_format_is_recognised_and_enforced():
+    review = worker_review("- [P1] Avoid cancelling a release")
+    assert am.codex_review_at([review], HEAD) is review
+    gh = FakeGitHub(routes(pr(), comments=[review]))
+    _, refusals, _ = am.evaluate(gh, "o/r", 7, None, None, False)
+    assert "Codex advisory review has P0/P1 findings at this head" in refusals
+
+
+def test_incomplete_worker_review_is_reported_not_enforced():
+    gh = FakeGitHub(routes(pr(), comments=[worker_review("", state="failed")]))
+    _, refusals, notes = am.evaluate(gh, "o/r", 7, None, None, False)
+    assert refusals == [] and any("did not complete (failed)" in n for n in notes)
+
+
+def test_trailers_parse_like_check_guarded_paths():
+    ack = am.acknowledged_guards([], ["fix\n\nguarded-path: deploy-workflows, migrations\nX: y"])
+    assert ack == {"deploy-workflows", "migrations"}
+
+
+def test_head_is_required_to_merge_but_not_to_check(monkeypatch):
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    assert am.main(["o/r", "7"]) == 2          # merge without --head: refused before any call
+    assert am.main(["o/r", "7", "--check"]) == 2  # passes the --head rule, stops at the missing token
+
+
+class GraphQLOnly:
+    """REST thread route absent; GraphQL answers in two pages, or with a null PR."""
+
+    def __init__(self, pages):
+        self.pages = list(pages)
+
+    def get(self, path):
+        return None
+
+    def request(self, method, path, body=None):
+        return self.pages.pop(0)
+
+
+def test_graphql_threads_are_paginated_and_null_safe():
+    page1 = {"data": {"repository": {"pullRequest": {"reviewThreads": {
+        "pageInfo": {"hasNextPage": True, "endCursor": "c1"}, "nodes": [{"isResolved": True}]}}}}}
+    page2 = {"data": {"repository": {"pullRequest": {"reviewThreads": {
+        "pageInfo": {"hasNextPage": False}, "nodes": [{"isResolved": False}, {"isResolved": True}]}}}}}
+    assert am.unresolved_threads(GraphQLOnly([page1, page2]), "o/r", 7) == 1
+    with pytest.raises(RuntimeError):
+        am.unresolved_threads(GraphQLOnly([{"data": {"repository": {"pullRequest": None}}}]), "o/r", 7)

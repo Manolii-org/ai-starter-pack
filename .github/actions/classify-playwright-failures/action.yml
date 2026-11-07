@@ -45,7 +45,9 @@ inputs:
     description: >-
       "false" leaves error text out of the step summary and JSON record, keeping
       file, title, project and class. Use where policy withholds authenticated
-      reporter output from logs (error messages can echo page content).
+      reporter output from logs (error messages can echo page content). Titles
+      are still published: keep test titles free of sensitive data
+      (parameterized titles can carry it).
     required: false
     default: "true"
 outputs:

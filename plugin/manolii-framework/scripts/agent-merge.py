@@ -6,7 +6,7 @@ than through a repository's auto-merge workflow, which has its own gate. It
 refuses unless, at the PR's current head:
 
   1. the PR is open, not a draft, and still at the head the caller reviewed
-     (--head, when given);
+     (--head, required to merge; --check may omit it);
   2. GitHub reports mergeable_state "clean" (or "has_hooks"). "blocked" and
      "unstable" are refused with the reason: a blocked PR merged with an admin
      token silently bypasses a rule;
@@ -14,10 +14,12 @@ refuses unless, at the PR's current head:
      protection) has a latest run that succeeded, was skipped or neutral;
   4. no review thread is unresolved anywhere on the PR (a thread opened on an
      earlier commit still counts);
-  5. the Codex advisory review bound to this head has no [P0]/[P1] finding, and
-     any [P2]/[P3] finding is acknowledged with --accept-findings, so reading the
-     review is a precondition rather than a habit. Head binding and the trusted
-     author follow the pack's codex-pr-review comment format.
+  5. when a completed Codex advisory review is bound to this head, it has no
+     [P0]/[P1] finding, and any [P2]/[P3] finding is acknowledged with
+     --accept-findings, so reading the review is a precondition rather than a
+     habit. A review that is running blocks; a missing or incomplete one is
+     reported, not required (the review is advisory). Both comment formats are
+     recognised: the "<sub>head" footer and the worker's "Revision" line.
 
 It also lists the path guards the PR trips (.ai/guards.json at the base, matched
 as the check-guarded-paths action matches them) and whether each is acknowledged
@@ -53,10 +55,12 @@ OK_CONCLUSIONS = {"success", "skipped", "neutral"}
 MERGEABLE_OK = {"clean", "has_hooks"}
 CODEX_MARKER = "<!-- codex-pr-review:v1 -->"
 CODEX_FOOTER = re.compile(r"<sub>head `([0-9a-f]{10,40})`</sub>\s*$", re.I)
+# The pack's codex review worker publishes "Revision `<sha>`" and an execution state.
+CODEX_REVISION = re.compile(r"^Revision `([0-9a-f]{10,40})`\s*$", re.I | re.M)
+CODEX_EXECUTION = re.compile(r"^Execution: \*\*([a-z_-]+)\*\*", re.M)
 GITHUB_ACTIONS_BOT_ID = 41898282
 BLOCKING = re.compile(r"\[P[01]\]")
 FINDING = re.compile(r"\[P[0-3]\]")
-TRAILER = re.compile(r"^Guarded-Path:\s*([a-z0-9][a-z0-9-]{0,63})\s*$", re.M)
 PROMOTION_BASES = re.compile(r"^(main|prod|release/.+)$")
 
 
@@ -116,10 +120,17 @@ def codex_review_at(comments: list, head: str):
         if (user.get("id") != GITHUB_ACTIONS_BOT_ID or user.get("type") != "Bot"
                 or not body.startswith(CODEX_MARKER)):
             continue
-        m = CODEX_FOOTER.search(body)
+        m = CODEX_FOOTER.search(body) or CODEX_REVISION.search(body)
         if m and head.lower().startswith(m.group(1).lower()):
             found.append(c)
     return max(found, key=lambda c: (str(c.get("updated_at") or ""), int(c.get("id") or 0)), default=None)
+
+
+def codex_execution(body: str) -> str:
+    """Worker execution state ("completed", "failed", ...); "completed" for the
+    footer format, which is only published for a finished review."""
+    m = CODEX_EXECUTION.search(body)
+    return m.group(1) if m else "completed"
 
 
 def codex_findings(body: str) -> list[str]:
@@ -190,9 +201,13 @@ def trailer_block(message: str) -> str:
 
 
 def acknowledged_guards(labels: list[str], commit_messages: list[str]) -> set:
+    """Labels guard-ok:<id>, and Guarded-Path trailers parsed as check-guarded-paths
+    parses them: key case-insensitive, comma-separated ids."""
     ack = {lab.split(":", 1)[1] for lab in labels if lab.startswith("guard-ok:")}
     for message in commit_messages:
-        ack |= set(TRAILER.findall(trailer_block(message)))
+        for line in trailer_block(message).splitlines():
+            if line.lower().startswith("guarded-path:"):
+                ack.update(g.strip() for g in line.split(":", 1)[1].split(",") if g.strip())
     return ack
 
 
@@ -239,14 +254,22 @@ def unresolved_threads(gh: GitHub, repo: str, number: int) -> int:
     if isinstance(threads, list):
         return sum(1 for t in threads if not thread_resolved(t))
     owner, name = repo.split("/")
-    query = ("query($o:String!,$n:String!,$p:Int!){repository(owner:$o,name:$n){pullRequest(number:$p)"
-             "{reviewThreads(first:100){nodes{isResolved}}}}}")
-    data = gh.request("POST", "/graphql", {"query": query, "variables": {"o": owner, "n": name, "p": number}})
-    nodes = (((data or {}).get("data") or {}).get("repository") or {}).get("pullRequest", {}) \
-        .get("reviewThreads", {}).get("nodes")
-    if nodes is None:
-        raise RuntimeError("could not read review threads (neither REST route nor GraphQL answered)")
-    return sum(1 for n in nodes if not n.get("isResolved"))
+    query = ("query($o:String!,$n:String!,$p:Int!,$c:String){repository(owner:$o,name:$n){pullRequest(number:$p)"
+             "{reviewThreads(first:100,after:$c){pageInfo{hasNextPage endCursor}nodes{isResolved}}}}}")
+    unresolved, cursor = 0, None
+    while True:
+        data = gh.request("POST", "/graphql", {"query": query,
+                                               "variables": {"o": owner, "n": name, "p": number, "c": cursor}})
+        pr = (((data or {}).get("data") or {}).get("repository") or {}).get("pullRequest") or {}
+        threads = pr.get("reviewThreads") or {}
+        nodes = threads.get("nodes")
+        if nodes is None:
+            raise RuntimeError("could not read review threads (neither REST route nor GraphQL answered)")
+        unresolved += sum(1 for n in nodes if not (n or {}).get("isResolved"))
+        page = threads.get("pageInfo") or {}
+        if not page.get("hasNextPage"):
+            return unresolved
+        cursor = page.get("endCursor")
 
 
 def evaluate(gh: GitHub, repo: str, number: int, expected_head: str | None,
@@ -293,9 +316,12 @@ def evaluate(gh: GitHub, repo: str, number: int, expected_head: str | None,
     comments = gh.paged(f"/repos/{repo}/issues/{number}/comments")
     review = codex_review_at(comments, head)
     codex_running = [n for n, r in runs.items() if "codex" in n.lower() and r.get("status") != "completed"]
-    if review is None:
+    state = codex_execution(review["body"]) if review else None
+    if review is None or state != "completed":
         if codex_running:
             refusals.append("Codex advisory review for this head is still running")
+        elif review is not None:
+            notes.append(f"Codex advisory review for this head did not complete ({state}); not enforced")
         else:
             notes.append("no Codex advisory review for this head (advisory; not required)")
     else:
@@ -341,6 +367,9 @@ def main(argv=None) -> int:
     ap.add_argument("--allow-unstable", action="store_true",
                     help="accept 'unstable' (only non-required checks red) after reading them")
     args = ap.parse_args(argv)
+    if not args.check and not args.head:
+        print("--head <reviewed sha> is required to merge (use --check to evaluate without it)", file=sys.stderr)
+        return 2
     token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
     if not token:
         print("GH_TOKEN is not set", file=sys.stderr)
