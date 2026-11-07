@@ -202,6 +202,10 @@ QA lanes (finalise gate at push/PR, `ui-smoke` on affected routes, preview/produ
 - `assess-model` — Model Change Protocol: 15-item checklist before adding/removing/re-routing any AI model
 - `completeness-check` — invariant verification for multi-phase projects (advisory PASS/FAIL)
 - `phase-gate` — gate before advancing a project phase (advisory PASS/FAIL)
+- `systematic-debugging` — reproduce, isolate, identify, fix, verify
+- `root-cause-tracing` — trace an error back to its originating cause
+- `tool-design` — designing tool interfaces for AI agents
+- `mcp-builder` — building Model Context Protocol servers
 - {Add project-specific skills}
 
 ## Sub-Agents
