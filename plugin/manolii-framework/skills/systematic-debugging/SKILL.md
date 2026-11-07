@@ -337,13 +337,17 @@ SELECT * FROM users ORDER BY updated_at DESC LIMIT 10;
 ### 8.3 Network Debugging
 
 ```typescript
-// Log all API responses
+// Log all API responses (redact query strings: they often carry tokens or PII)
+const redact = (raw: string) => {
+  const u = new URL(raw);
+  return `${u.origin}${u.pathname}${u.search ? "?[redacted]" : ""}`;
+};
 page.on("response", (response) => {
-  console.log(response.url(), response.status());
+  console.log(redact(response.url()), response.status());
 });
 // Capture failed requests
 page.on("requestfailed", (request) => {
-  console.log("FAILED:", request.url(), request.failure()?.errorText);
+  console.log("FAILED:", redact(request.url()), request.failure()?.errorText);
 });
 ```
 

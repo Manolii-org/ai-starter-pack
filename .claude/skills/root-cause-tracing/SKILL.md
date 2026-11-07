@@ -200,6 +200,10 @@ git bisect good v1.2.0
 
 git bisect good  # or
 git bisect bad
+
+# When the first bad commit is reported (or you abandon the search),
+# restore your original checkout and end the bisection:
+git bisect reset
 ```
 
 ### 5.2 Log Correlation

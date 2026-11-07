@@ -87,7 +87,7 @@ interface Tool {
     properties: {
       success: { type: "boolean" },
       data: { type: "array", items: { type: "object" } },
-      error: { type: "string", nullable: true },
+      error: { type: ["string", "null"] },
     },
   },
 }
@@ -139,23 +139,30 @@ interface Tool {
 // ❌ WRONG - No constraints
 {
   parameters: {
-    age: { type: "number" },
-    email: { type: "string" },
+    type: "object",
+    properties: {
+      age: { type: "number" },
+      email: { type: "string" },
+    },
   },
 }
 // ✅ CORRECT - Validated inputs
 {
   parameters: {
-    age: {
-      type: "integer",
-      minimum: 0,
-      maximum: 150,
+    type: "object",
+    properties: {
+      age: {
+        type: "integer",
+        minimum: 0,
+        maximum: 150,
+      },
+      email: {
+        type: "string",
+        format: "email",
+        maxLength: 255,
+      },
     },
-    email: {
-      type: "string",
-      format: "email",
-      maxLength: 255,
-    },
+    required: ["email"],
   },
 }
 ```
@@ -248,16 +255,25 @@ const executeTools = [
 ### 5.1 Resource Pattern
 
 ```typescript
-// Expose data as resources
+// Expose fixed data as resources and parameterized data as resource templates
 {
   resources: [
     {
-      uri: "file:///src/{path}",
+      uri: "config://app/settings",
+      name: "App Settings",
+      mimeType: "application/json",
+    },
+  ],
+  resourceTemplates: [
+    {
+      uriTemplate: "file:///src/{path}",
+      name: "Source file",
       mimeType: "text/plain",
       description: "Source code files",
     },
     {
-      uri: "db://users/{id}",
+      uriTemplate: "db://users/{id}",
+      name: "User record",
       mimeType: "application/json",
       description: "User records",
     },
@@ -275,8 +291,9 @@ const executeTools = [
       name: "code_review",
       description: "Review code for issues",
       arguments: [
-        { name: "file", type: "string", required: true },
-        { name: "focus", type: "string", enum: ["security", "performance", "style"] },
+        { name: "file", description: "Path of the file to review", required: true },
+        // Prompt arguments have only name/description/required; describe allowed values in text.
+        { name: "focus", description: "One of: security, performance, style", required: false },
       ],
     },
   ],

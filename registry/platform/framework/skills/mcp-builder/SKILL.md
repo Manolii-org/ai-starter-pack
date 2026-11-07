@@ -69,8 +69,18 @@ MCP is a standard protocol for AI agents to interact with external tools:
 ### 2.1 Basic MCP Server
 
 ```typescript
+#!/usr/bin/env node
+// src/index.ts — tsc preserves this shebang in dist/index.js, so the "bin" entry runs directly.
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import {
+  CallToolRequestSchema,
+  ListToolsRequestSchema,
+  ListResourcesRequestSchema,
+  ReadResourceRequestSchema,
+  McpError,
+  ErrorCode,
+} from '@modelcontextprotocol/sdk/types.js';
 const server = new Server({
   name: 'my-mcp-server',
   version: '1.0.0',
@@ -136,13 +146,28 @@ const searchUsersTool: Tool = {
 ### 3.2 Tool Handler
 
 ```typescript
-server.setRequestHandler('tools/call', async (request) => {
-  const { name, arguments: args } = request.params;
+// Handlers are registered with the SDK's request schemas, not method strings.
+server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
+  const { name, arguments: args = {} } = request.params;
+  // Authorize the *caller* before dispatch (see 6.2) — never infer identity from the outbound API key.
+  const role = getCallerRole(extra);
+  if (!checkPermission(name, role)) {
+    throw new McpError(ErrorCode.InvalidRequest, `Role '${role}' may not call ${name}`);
+  }
   switch (name) {
-    case 'search_users':
-      return handleSearchUsers(args);
+    case 'search_users': {
+      // Validate arguments before dispatch; the JSON Schema is advisory to the client.
+      const { query, limit } = args as Record<string, unknown>;
+      if (typeof query !== 'string' || query.trim() === '') {
+        throw new McpError(ErrorCode.InvalidParams, 'query must be a non-empty string');
+      }
+      if (limit !== undefined && (typeof limit !== 'number' || !Number.isInteger(limit) || limit < 1)) {
+        throw new McpError(ErrorCode.InvalidParams, 'limit must be a positive integer');
+      }
+      return handleSearchUsers({ query, limit });
+    }
     case 'create_user':
-      return handleCreateUser(args);
+      return handleCreateUser(args as CreateUserArgs);
     default:
       throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${name}`);
   }
@@ -162,7 +187,7 @@ async function handleSearchUsers(args: { query: string; limit?: number }) {
 ### 3.3 Registering Tools
 
 ```typescript
-server.setRequestHandler('tools/list', async () => {
+server.setRequestHandler(ListToolsRequestSchema, async () => {
   return {
     tools: [
       searchUsersTool,
@@ -194,10 +219,12 @@ async function handleCreateUser(args: CreateUserArgs) {
     return { content: [{ type: 'text', text: JSON.stringify(user) }] };
   } catch (error) {
     if (error.code === 'UNIQUE_VIOLATION') {
-      throw new McpError(
-        ErrorCode.InvalidParams,
-        'User with this email already exists'
-      );
+      // A domain failure the agent can recover from: return it as a tool result
+      // (isError) so the model sees the message, rather than a protocol error.
+      return {
+        isError: true,
+        content: [{ type: 'text', text: 'User with this email already exists. Search for the existing user or use a different email.' }],
+      };
     }
     throw new McpError(
       ErrorCode.InternalError,
@@ -230,7 +257,7 @@ async function handleCreateUser(args: CreateUserArgs) {
 ### 5.1 Defining Resources
 
 ```typescript
-server.setRequestHandler('resources/list', async () => {
+server.setRequestHandler(ListResourcesRequestSchema, async () => {
   return {
     resources: [
       {
@@ -253,7 +280,7 @@ server.setRequestHandler('resources/list', async () => {
 ### 5.2 Resource Handler
 
 ```typescript
-server.setRequestHandler('resources/read', async (request) => {
+server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
   const { uri } = request.params;
   if (uri === 'db://users/schema') {
     const schema = await db.getTableSchema('users');
@@ -265,7 +292,9 @@ server.setRequestHandler('resources/read', async (request) => {
       }],
     };
   }
-  throw new McpError(ErrorCode.NotFound, `Resource not found: ${uri}`);
+  // The SDK has no ErrorCode.NotFound. Use the resource-not-found code your protocol
+  // revision specifies (-32002 in earlier revisions; InvalidParams -32602 in newer ones).
+  throw new McpError(ErrorCode.InvalidParams, `Resource not found: ${uri}`);
 });
 ```
 
@@ -310,7 +339,18 @@ function checkPermission(tool: string, userRole: string): boolean {
   }
   return false; // Deny unknown roles
 }
+// The role comes from the authenticated *caller* (e.g. the verified token on an
+// HTTP transport), never from this server's own outbound API key. Default to the
+// least-privileged role when no identity is present.
+function getCallerRole(extra: { authInfo?: { scopes?: string[] } }): string {
+  const scopes = extra.authInfo?.scopes ?? [];
+  if (scopes.includes('admin')) return 'admin';
+  if (scopes.includes('write')) return 'write';
+  return 'read';
+}
 ```
+
+Enforce `checkPermission` in the `CallToolRequestSchema` handler **before** dispatch (see 3.2), so a read-only caller can never reach `create_user`.
 
 ---
 
@@ -334,6 +374,11 @@ function checkPermission(tool: string, userRole: string): boolean {
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.0.0",
+    "typescript": "^5.0.0"
   }
 }
 ```
