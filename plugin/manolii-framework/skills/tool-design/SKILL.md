@@ -158,7 +158,7 @@ interface Tool {
       },
       email: {
         type: "string",
-        format: "email",
+        format: "email", // only enforced if the validator asserts formats (e.g. Ajv + ajv-formats)
         maxLength: 255,
       },
     },

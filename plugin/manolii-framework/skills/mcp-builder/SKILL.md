@@ -341,7 +341,8 @@ function checkPermission(tool: string, userRole: string): boolean {
 }
 // The role comes from the authenticated *caller* (e.g. the verified token on an
 // HTTP transport), never from this server's own outbound API key. Default to the
-// least-privileged role when no identity is present.
+// least-privileged role when no identity is present — or, if your server
+// requires authentication even for reads, reject calls with no authInfo instead.
 function getCallerRole(extra: { authInfo?: { scopes?: string[] } }): string {
   const scopes = extra.authInfo?.scopes ?? [];
   if (scopes.includes('admin')) return 'admin';
