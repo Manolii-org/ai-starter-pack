@@ -473,7 +473,11 @@ def ready_identity(root: Path, item: dict) -> str:
             dirnames[:] = sorted(d for d in dirnames if d not in READY_IDENTITY_SKIP)
             for entry in sorted(dirnames + filenames):
                 full = os.path.join(directory, entry)
-                add(Path(full).relative_to(root).as_posix(), full, os.lstat(full))
+                try:
+                    details = os.lstat(full)
+                except FileNotFoundError:
+                    continue  # removed while walking; it is no longer part of the setup
+                add(Path(full).relative_to(root).as_posix(), full, details)
     return digest.hexdigest()
 
 
@@ -488,12 +492,19 @@ def dotenv_identity(root: Path, plan: dict, key: bytes) -> dict:
     for directory in sorted(directories):
         for path in sorted(inside(root, directory).glob(".env*")):
             name = path.relative_to(root).as_posix()
-            if path.is_symlink():
-                data = b"symlink\0" + os.fsencode(os.readlink(path))
-            elif path.is_file():
-                data = b"regular\0" + path.read_bytes()
-            else:
-                continue
+            # Unreadable files and .env* directories still bind their state,
+            # rather than blocking the run or silently dropping out.
+            try:
+                if path.is_symlink():
+                    data = b"symlink\0" + os.fsencode(os.readlink(path))
+                elif path.is_file():
+                    data = b"regular\0" + path.read_bytes()
+                elif path.is_dir():
+                    data = b"directory\0" + encoded(sorted(entry.name for entry in path.iterdir()))
+                else:
+                    data = b"other\0"
+            except OSError:
+                data = b"unreadable\0" + encoded(oct(path.lstat().st_mode))
             result[name] = hmac.new(key, data, hashlib.sha256).hexdigest()
     return result
 

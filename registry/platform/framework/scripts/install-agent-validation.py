@@ -512,7 +512,7 @@ def source_identity(plan: OutputPlan, paths: dict, hashes: dict, previous) -> di
         return previous["layout"]["source"]
     top = Path(local_git(SOURCE, "rev-parse", "--show-toplevel").decode().strip())
     commit = local_git(SOURCE, "rev-parse", "HEAD").decode().strip()
-    if not re.fullmatch(r"[0-9a-f]{40}", commit):
+    if not re.fullmatch(GIT_OBJECT_ID, commit):
         raise ValueError("source must identify an immutable Git commit")
     identities = {}
     for logical, path in paths.items():
@@ -690,8 +690,9 @@ def uncovered_managed_inputs(root: Path, config: dict, explicit: bool) -> list[s
     """Managed inputs (and the recipe) that select no check in the owner recipe."""
     names = [destination(root, logical, explicit).relative_to(root).as_posix() for logical in FILES]
     names.append("config/agent-checks.json")
+    # Same default as agent-check: a check without paths selects every file.
     patterns = [p for check in config.get("checks", []) if isinstance(check, dict)
-                for p in check.get("paths", []) if isinstance(p, str)]
+                for p in check.get("paths", ["*"]) if isinstance(p, str)]
     return [n for n in names if not any(fnmatch.fnmatchcase(n, p) for p in patterns)]
 
 

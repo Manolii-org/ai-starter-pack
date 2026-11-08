@@ -1299,6 +1299,32 @@ class AgentCheckTests(unittest.TestCase):
         stored = "".join(p.read_text() for p in state.rglob("*.json"))
         self.assertNotIn("MODE=", stored)
 
+    def test_unreadable_or_directory_dotenv_binds_state_without_blocking(self):
+        runner = load("agent-check")
+        plan = {"checks": [], "environments": []}
+        (self.root / ".env.d").mkdir()
+        (self.root / ".env.d/one").write_text("a")
+        first = runner.dotenv_identity(self.root, plan, b"k" * 32)
+        (self.root / ".env.d/two").write_text("b")
+        self.assertNotEqual(first, runner.dotenv_identity(self.root, plan, b"k" * 32))
+        secret = self.root / ".env.local"
+        secret.write_text("X=1")
+        with mock.patch.object(Path, "read_bytes", side_effect=PermissionError("denied")):
+            identity = runner.dotenv_identity(self.root, plan, b"k" * 32)
+        self.assertIn(".env.local", identity)
+
+    def test_ready_identity_tolerates_entries_removed_during_the_walk(self):
+        runner = load("agent-check")
+        (self.root / "node_modules/pkg").mkdir(parents=True)
+        (self.root / "node_modules/pkg/a.js").write_text("a")
+        real = os.lstat
+        def vanishing(path, *args, **kwargs):
+            if str(path).endswith("a.js"):
+                raise FileNotFoundError(path)
+            return real(path, *args, **kwargs)
+        with mock.patch.object(runner.os, "lstat", side_effect=vanishing):
+            runner.ready_identity(self.root, {"ready_paths": ["node_modules"]})
+
     def test_fresh_failure_revokes_the_cached_pass_for_the_same_candidate(self):
         flag = self.root / "node_modules/flag"
         flag.parent.mkdir()
@@ -1572,6 +1598,10 @@ class SurfaceTests(unittest.TestCase):
         partial = {"checks": [{"id": "some", "paths": [p for p in managed if not p.endswith("SKILL.md")]}]}
         self.assertEqual(installer.uncovered_managed_inputs(root, partial, False),
                          [p for p in managed if p.endswith("SKILL.md")])
+
+    def test_installer_coverage_uses_the_runner_default_for_checks_without_paths(self):
+        installer = load("install-agent-validation")
+        self.assertEqual(installer.uncovered_managed_inputs(Path("/fixture"), {"checks": [{"id": "all"}]}, False), [])
 
     def test_installer_provenance_accepts_sha1_and_sha256_object_ids(self):
         import re
