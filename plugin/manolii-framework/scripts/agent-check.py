@@ -252,7 +252,10 @@ def snapshot(root: Path) -> dict:
         if path.is_symlink():
             untracked[name] = sha(b"symlink\0" + os.fsencode(os.readlink(path)))
         elif path.is_file():
-            untracked[name] = sha(b"regular\0" + path.read_bytes())
+            # Git records only the executable bit; bind it like tracked inputs so
+            # a helper that loses +x cannot reuse a PASS it can no longer earn.
+            kind = b"executable\0" if path.stat().st_mode & 0o111 else b"regular\0"
+            untracked[name] = sha(kind + path.read_bytes())
     # Git records link text, not mutable target contents. Keep normal check
     # execution for linked candidates, but never reuse or save a cached PASS.
     names = set(untracked)
@@ -433,6 +436,68 @@ def missing_ready_paths(root: Path, item: dict) -> list[str]:
     return [p for p in item.get("ready_paths", []) if not inside(root, p).exists()]
 
 
+# Tool caches written while checks run; their churn says nothing about the
+# installed dependencies and must not force a reinstall on every invocation.
+READY_IDENTITY_SKIP = {".cache", ".vite", ".vitest", "__pycache__"}
+
+
+def ready_identity(root: Path, item: dict) -> str:
+    """Names, kinds, modes, sizes and mtimes under the declared ready paths.
+
+    Existence alone let a run reuse setup after a dependency was deleted or
+    edited, then reuse a cached PASS without running the affected checks.
+    """
+    digest = hashlib.sha256()
+
+    def add(relative: str, path: str, details: os.stat_result) -> None:
+        row: list[str | int]
+        if stat.S_ISLNK(details.st_mode):
+            row = [relative, "link", os.readlink(path)]
+        elif stat.S_ISDIR(details.st_mode):
+            row = [relative, "dir", stat.S_IMODE(details.st_mode)]
+        else:
+            row = [relative, "file", stat.S_IMODE(details.st_mode), details.st_size, details.st_mtime_ns]
+        digest.update(encoded(row) + b"\n")
+
+    for name in item.get("ready_paths", []):
+        path = inside(root, name)
+        try:
+            details = path.lstat()
+        except FileNotFoundError:
+            digest.update(encoded([name, None]) + b"\n")
+            continue
+        add(name, str(path), details)
+        if not stat.S_ISDIR(details.st_mode):
+            continue
+        for directory, dirnames, filenames in os.walk(path):
+            dirnames[:] = sorted(d for d in dirnames if d not in READY_IDENTITY_SKIP)
+            for entry in sorted(dirnames + filenames):
+                full = os.path.join(directory, entry)
+                add(Path(full).relative_to(root).as_posix(), full, os.lstat(full))
+    return digest.hexdigest()
+
+
+def dotenv_identity(root: Path, plan: dict, key: bytes) -> dict:
+    """Keyed digests of ignored .env* files where checks and setup run.
+
+    Frameworks read them during builds and tests, but Git ignores them, so the
+    candidate snapshot does not. Keyed so cache files never hold a bare hash.
+    """
+    directories = {"."} | {item.get("cwd", ".") for item in [*plan["checks"], *plan["environments"]]}
+    result = {}
+    for directory in sorted(directories):
+        for path in sorted(inside(root, directory).glob(".env*")):
+            name = path.relative_to(root).as_posix()
+            if path.is_symlink():
+                data = b"symlink\0" + os.fsencode(os.readlink(path))
+            elif path.is_file():
+                data = b"regular\0" + path.read_bytes()
+            else:
+                continue
+            result[name] = hmac.new(key, data, hashlib.sha256).hexdigest()
+    return result
+
+
 def write_json(path: Path, value: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(f".{os.getpid()}.tmp")
@@ -491,7 +556,8 @@ def main(argv=None) -> int:
                     print(f"AGENT-CHECK {environment['id']}: invalid environment receipt; frozen setup needs validation")
             if (isinstance(previous_environment, dict) and previous_environment.get("digest") == env_digest
                     and isinstance(previous_environment.get("result"), dict)
-                    and previous_environment["result"].get("status") == "passed" and ready):
+                    and previous_environment["result"].get("status") == "passed" and ready
+                    and previous_environment.get("ready") == ready_identity(root, environment)):
                 reused_environments.append((environment, env_receipt, env_digest))
                 continue
             if not args.provision:
@@ -547,9 +613,11 @@ def main(argv=None) -> int:
                 result.update(status="failed",
                               reason="provisioned environment invalidated by later provisioning or changed inputs; rerun with --provision")
             else:
-                write_json(env_receipt, {"digest": validated_digest, "result": result})
+                write_json(env_receipt, {"digest": validated_digest, "result": result,
+                                         "ready": ready_identity(root, environment)})
         identity = {"schema": SCHEMA, "source": sha(Path(__file__).read_bytes()),
                     "config": config, "plan": plan, "tools": tools, "snapshot": before,
+                    "dotenv": dotenv_identity(root, plan, key),
                     "execution_environment": environment_fingerprint(key, {
                         "default": execution_environment({}, inherited),
                         "checks": {item["id"]: execution_environment(item, inherited) for item in plan["checks"]},
@@ -590,6 +658,10 @@ def main(argv=None) -> int:
         write_json(state / "receipt.json", receipt)
         if outcome == "passed" and cache_reusable:
             write_json(cache, receipt)
+        elif outcome == "failed":
+            # A fresh failure outranks an earlier PASS for the same identity:
+            # something outside the identity changed, so never serve it again.
+            cache.unlink(missing_ok=True)
         for result in results:
             if result["status"] != "passed":
                 print("AGENT-CHECK-RESULT " + json.dumps(

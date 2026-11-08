@@ -17,7 +17,22 @@ python3 scripts/agent-check.py --provision --provider codex
 ```
 
 For a later bounded update, omit `--recipes` to preserve owner recipes. Use
-`--check` first to inspect drift. The installer records content hashes in
+`--check` first to inspect drift. The installer prints `RECIPE-UNCOVERED <path>`
+for any managed file no recipe check selects (a newer pack can manage new files);
+add it to the check that validates the agent-validation files, or the portable
+contract test fails.
+
+Recipe details that keep receipts honest:
+
+- `tool_requirements` maps a tool to a required version prefix, for example
+  `{"node": "v24"}`. A different version reports the toolchain unavailable
+  instead of passing on an unsupported runtime. Mirror the CI toolchain.
+- `ready_paths` are fingerprinted (names, modes, sizes, mtimes; tool caches such
+  as `.cache` and `__pycache__` excluded). A deleted or edited dependency
+  needs `--provision` again rather than reusing setup.
+- Patterns use `fnmatch`, where `*` also matches `/`: give a linter that only
+  accepts workflow YAML `.github/workflows/*.yml` and `*.yaml`, not
+  `.github/workflows/*`, if that directory holds other files. The installer records content hashes in
 `.ai/agent-validation-source.json`; review the source revision and resulting
 hashes in the adoption PR. It preserves unrelated instructions and settings.
 The same policy is rendered at the start of AGENTS, Claude instructions and an

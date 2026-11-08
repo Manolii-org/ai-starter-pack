@@ -2,6 +2,18 @@
 
 ## [2.0.0] — pending qualification
 
+### Fixed
+
+- `agent-check`: setup is reused only when its `ready_paths` are unchanged
+  (fingerprint of names, modes, sizes and mtimes, tool caches excluded), so a
+  deleted or edited dependency can no longer reuse setup and a cached PASS.
+- `agent-check`: an untracked file's executable bit, and ignored `.env*` files
+  where checks run (keyed digests, no values stored), are part of the candidate
+  identity; a fresh failure revokes the cached PASS for the same candidate.
+- `install-agent-validation`: provenance accepts SHA-256 Git object IDs, and the
+  installer names managed files no owner recipe check selects
+  (`RECIPE-UNCOVERED`) instead of leaving the portable test to fail later.
+
 ### Added
 
 - `scripts/agent-merge.py`: the merge path for agents that merge interactively

@@ -1223,6 +1223,95 @@ class AgentCheckTests(unittest.TestCase):
         self.run_check(expected=2)
 
 
+    def _dependency_environment(self):
+        setup = ("from pathlib import Path; p=Path('node_modules/tool'); p.mkdir(parents=True, exist_ok=True); "
+                 "(p/'bin.js').write_text('ok'); c=Path('node_modules/installs'); "
+                 "c.write_text(c.read_text()+'1' if c.exists() else '1')")
+        self.config["environments"] = [{"id": "dependencies", "ready_paths": ["node_modules"],
+                                        "commands": [[sys.executable, "-c", setup]]}]
+        self.config["checks"][0].update(environment="dependencies", commands=[[sys.executable, "-c",
+            "from pathlib import Path; assert Path('node_modules/tool/bin.js').read_text() == 'ok'"]])
+        self.save_config()
+
+    def test_deleted_dependency_is_not_reused_as_ready_setup(self):
+        self._dependency_environment()
+        self.change_source()
+        self.run_check("--provision")
+        shutil.rmtree(self.root / "node_modules/tool")
+        self.run_check(expected=1)
+        self.assertFalse(self.receipt()["cached"])
+        self.assertTrue(any(r["id"] == "dependencies" and r["status"] == "unavailable"
+                            for r in self.receipt()["results"]))
+        self.run_check("--provision")
+        self.assertEqual((self.root / "node_modules/installs").read_text(), "11")
+
+    def test_edited_dependency_is_not_reused_as_ready_setup(self):
+        self._dependency_environment()
+        self.change_source()
+        self.run_check("--provision")
+        (self.root / "node_modules/tool/bin.js").write_text("broken but same size")
+        self.run_check(expected=1)
+        self.assertFalse(self.receipt()["cached"])
+
+    def test_tool_cache_churn_keeps_ready_setup(self):
+        self._dependency_environment()
+        self.change_source()
+        self.run_check("--provision")
+        cache = self.root / "node_modules/.cache/lint"
+        cache.mkdir(parents=True)
+        (cache / "state").write_text("written by a check")
+        (self.root / "node_modules/tool/__pycache__").mkdir()
+        self.run_check("--provision")
+        self.assertTrue(self.receipt()["cached"])
+        self.assertEqual((self.root / "node_modules/installs").read_text(), "1")
+
+    def test_untracked_executable_bit_is_part_of_the_candidate(self):
+        helper = self.root / "src/helper.sh"
+        helper.write_text("#!/bin/sh\nexit 0\n")
+        helper.chmod(0o755)
+        self.config["checks"][0]["commands"] = [[str(helper)]]
+        self.save_config()
+        self.run_check()
+        helper.chmod(0o644)
+        # Without the mode in the snapshot this returned the cached PASS (exit 0).
+        result = self.run_check(expected=2)
+        self.assertIn("AGENT-CHECK test:", result.stdout)
+        self.assertNotIn("AGENT-CHECK-CACHED", result.stdout)
+
+    def test_ignored_dotenv_changes_invalidate_a_cached_pass_without_recording_values(self):
+        with open(self.root / ".gitignore", "a") as stream:
+            stream.write(".env.local\n")
+        self.git("add", ".gitignore")
+        self.git("commit", "-qm", "ignore dotenv")
+        self.git("update-ref", "refs/remotes/origin/main", "HEAD")
+        dotenv = self.root / ".env.local"
+        dotenv.write_text("MODE=good\n")
+        self.config["checks"][0]["commands"] = [[sys.executable, "-c",
+            "from pathlib import Path; assert Path('.env.local').read_text() == 'MODE=good\\n'"]]
+        self.save_config()
+        self.run_check()
+        self.run_check()
+        self.assertTrue(self.receipt()["cached"])
+        dotenv.write_text("MODE=bad\n")
+        self.run_check(expected=1)
+        self.assertFalse(self.receipt()["cached"])
+        state = self.root / ".ai/agent-checks"
+        stored = "".join(p.read_text() for p in state.rglob("*.json"))
+        self.assertNotIn("MODE=", stored)
+
+    def test_fresh_failure_revokes_the_cached_pass_for_the_same_candidate(self):
+        flag = self.root / "node_modules/flag"
+        flag.parent.mkdir()
+        flag.write_text("pass")
+        self.config["checks"][0]["commands"] = [[sys.executable, "-c",
+            "from pathlib import Path; assert Path('node_modules/flag').read_text() == 'pass'"]]
+        self.save_config()
+        self.run_check()
+        flag.write_text("fail")
+        self.run_check("--no-cache", expected=1)
+        self.run_check(expected=1)
+        self.assertFalse(self.receipt()["cached"])
+
 class SurfaceTests(unittest.TestCase):
     def test_replacement_recipe_cannot_unguard_the_existing_owner_integration(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1473,6 +1562,24 @@ class SurfaceTests(unittest.TestCase):
             for rel in ("AGENTS.md", ".claude/CLAUDE.md", ".cursor/rules/agent-validation.mdc"):
                 self.assertIn(new_policy.strip(), (root / rel).read_text(encoding="utf-8"))
             self.assertIn("Local résumé rules.", (root / "AGENTS.md").read_text(encoding="utf-8"))
+
+    def test_installer_names_managed_inputs_no_recipe_check_selects(self):
+        installer = load("install-agent-validation")
+        root = Path("/fixture")
+        managed = [*installer.FILES, "config/agent-checks.json"]
+        covered = {"checks": [{"id": "all", "paths": managed}]}
+        self.assertEqual(installer.uncovered_managed_inputs(root, covered, False), [])
+        partial = {"checks": [{"id": "some", "paths": [p for p in managed if not p.endswith("SKILL.md")]}]}
+        self.assertEqual(installer.uncovered_managed_inputs(root, partial, False),
+                         [p for p in managed if p.endswith("SKILL.md")])
+
+    def test_installer_provenance_accepts_sha1_and_sha256_object_ids(self):
+        import re
+        pattern = load("install-agent-validation").GIT_OBJECT_ID
+        self.assertTrue(re.fullmatch(pattern, "a" * 40))
+        self.assertTrue(re.fullmatch(pattern, "b" * 64))
+        for invalid in ("a" * 39, "a" * 50, "A" * 40, "g" * 64):
+            self.assertIsNone(re.fullmatch(pattern, invalid))
 
     def test_each_managed_input_selects_an_owning_check(self):
         installed = SCRIPTS.parent

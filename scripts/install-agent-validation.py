@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import fnmatch
 import hashlib
 import importlib.machinery
 import importlib.util
@@ -30,6 +31,8 @@ FILES = (
 )
 ALIASES = {".claude/skills": ".github/skills", ".cursor/skills": ".github/skills"}
 PROVENANCE = ".ai/agent-validation-source.json"
+# Git object IDs: 40 hex digits (SHA-1) or 64 (SHA-256 object format).
+GIT_OBJECT_ID = r"[0-9a-f]{40}|[0-9a-f]{64}"
 RECOVERY = ".ai/agent-checks/layout-recovery.json"
 DIRFD_ATOMIC = (os.open in os.supports_dir_fd and os.rename in os.supports_dir_fd
                 and hasattr(os, "O_NOFOLLOW") and hasattr(os, "O_DIRECTORY"))
@@ -475,7 +478,7 @@ def validate_provenance(value: dict):
         raise ValueError("malformed layout provenance")
     origin = record["source"]
     if (not isinstance(origin, dict) or set(origin) != {"commit", "subdir", "bundle_sha256"}
-            or not isinstance(origin["commit"], str) or not re.fullmatch(r"[0-9a-f]{40}", origin["commit"])
+            or not isinstance(origin["commit"], str) or not re.fullmatch(GIT_OBJECT_ID, origin["commit"])
             or origin["bundle_sha256"] != digest(encoded(value["files"]))):
         raise ValueError("malformed immutable source provenance")
     if origin["subdir"] != ".":
@@ -483,7 +486,7 @@ def validate_provenance(value: dict):
     owner = record["layout_file"]
     if (not isinstance(owner, dict) or set(owner) != {"path", "mode", "blob", "sha256"}
             or owner["mode"] not in ("100644", "100755")
-            or not isinstance(owner["blob"], str) or not re.fullmatch(r"[0-9a-f]{40}", owner["blob"])
+            or not isinstance(owner["blob"], str) or not re.fullmatch(GIT_OBJECT_ID, owner["blob"])
             or not isinstance(owner["sha256"], str) or not re.fullmatch(r"[0-9a-f]{64}", owner["sha256"])):
         raise ValueError("malformed layout-file provenance")
     relative_name(owner["path"])
@@ -683,6 +686,15 @@ def require_task_branch(root: Path, config: dict, owned: Path, replacing_recipe:
         raise ValueError("install on an isolated task branch")
 
 
+def uncovered_managed_inputs(root: Path, config: dict, explicit: bool) -> list[str]:
+    """Managed inputs (and the recipe) that select no check in the owner recipe."""
+    names = [destination(root, logical, explicit).relative_to(root).as_posix() for logical in FILES]
+    names.append("config/agent-checks.json")
+    patterns = [p for check in config.get("checks", []) if isinstance(check, dict)
+                for p in check.get("paths", []) if isinstance(p, str)]
+    return [n for n in names if not any(fnmatch.fnmatchcase(n, p) for p in patterns)]
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo-root", type=Path, required=True)
@@ -693,6 +705,11 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
     try:
         plan, config, owned = build_plan(args)
+        # New pack versions can manage new files. The recipe stays the owner's,
+        # so name any managed input that no check selects instead of editing it.
+        for name in uncovered_managed_inputs(plan.root, config, args.layout is not None):
+            print(f"RECIPE-UNCOVERED {name}: add it to the check that validates the agent-validation files",
+                  file=sys.stderr)
         stale = [p for p, data in plan.outputs.items()
                  if plan.watched[p] is None or plan.watched[p][-1] != data]
         if args.check or args.dry_run:
