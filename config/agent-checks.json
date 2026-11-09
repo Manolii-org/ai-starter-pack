@@ -19,7 +19,8 @@
         "config/agent-checks.json"
       ],
       "ready_paths": [
-        ".ai/agent-checks/type-venv/pyvenv.cfg"
+        ".ai/agent-checks/type-venv/pyvenv.cfg",
+        ".ai/agent-checks/type-venv"
       ],
       "tools": [
         "uv"
@@ -50,7 +51,8 @@
         "config/agent-checks.json"
       ],
       "ready_paths": [
-        ".ai/agent-checks/release-venv/pyvenv.cfg"
+        ".ai/agent-checks/release-venv/pyvenv.cfg",
+        ".ai/agent-checks/release-venv"
       ],
       "tools": [
         "uv"
@@ -89,7 +91,9 @@
       ],
       "ready_paths": [
         "node_modules/.package-lock.json",
-        ".ai/agent-checks/feature-controls-venv/pyvenv.cfg"
+        ".ai/agent-checks/feature-controls-venv/pyvenv.cfg",
+        ".ai/agent-checks/feature-controls-venv",
+        "node_modules"
       ],
       "tools": [
         "npm",
