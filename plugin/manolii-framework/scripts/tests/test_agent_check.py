@@ -1414,6 +1414,17 @@ class AgentCheckTests(unittest.TestCase):
         value.write_text("MODE=bad!")  # same names: only the contents changed
         self.assertNotEqual(first, runner.dotenv_identity(self.root, plan, b"k" * 32))
 
+    def test_link_inside_a_dotenv_directory_binds_its_target_contents(self):
+        runner = load("agent-check")
+        plan = {"checks": [], "environments": []}
+        shared = self.root / "shared.env"
+        shared.write_text("MODE=good")
+        (self.root / ".env.d").mkdir()
+        (self.root / ".env.d/app").symlink_to(shared)
+        first = runner.dotenv_identity(self.root, plan, b"k" * 32)
+        shared.write_text("MODE=bad!")
+        self.assertNotEqual(first, runner.dotenv_identity(self.root, plan, b"k" * 32))
+
     def test_unreadable_dotenv_replacement_is_bound(self):
         runner = load("agent-check")
         plan = {"checks": [], "environments": []}

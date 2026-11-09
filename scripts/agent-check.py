@@ -568,11 +568,24 @@ def unreadable_state(path: Path) -> bytes:
                                       details.st_ino, details.st_ctime_ns])
 
 
+def file_digest(path: Path) -> str:
+    """SHA-256 of a file read in blocks, or its visible state if unreadable."""
+    try:
+        digest = hashlib.sha256()
+        with open(path, "rb") as stream:
+            for block in iter(lambda: stream.read(1 << 20), b""):
+                digest.update(block)
+        return digest.hexdigest()
+    except OSError:
+        return unreadable_state(path).hex()
+
+
 def dotenv_bytes(path: Path) -> bytes:
     """Contents of a .env* file, or of every file under a .env* directory.
 
     Unreadable entries bind their visible state rather than blocking the run.
-    Links inside a directory bind their text and are not followed, so a link
+    A link inside a directory binds its text and, when it resolves to a file,
+    that file's contents; links to directories are not followed, so a link
     cycle cannot loop.
     """
     try:
@@ -593,17 +606,18 @@ def dotenv_bytes(path: Path) -> bytes:
                 relative = f"{prefix}{entry.name}"
                 if entry.is_symlink():
                     try:
-                        rows.append([relative, "link", os.readlink(entry)])
+                        row = [relative, "link", os.readlink(entry)]
                     except OSError:
                         rows.append([relative, "link", unreadable_state(entry).hex()])
+                        continue
+                    if entry.is_file():
+                        row.append(file_digest(entry))
+                    rows.append(row)
                 elif entry.is_dir():
                     rows.append([relative, "dir"])
                     stack.append((entry, relative + "/"))
                 elif entry.is_file():
-                    try:
-                        rows.append([relative, "file", hashlib.sha256(entry.read_bytes()).hexdigest()])
-                    except OSError:
-                        rows.append([relative, "file", unreadable_state(entry).hex()])
+                    rows.append([relative, "file", file_digest(entry)])
                 else:
                     rows.append([relative, "other"])
         return b"directory\0" + encoded(sorted(rows))
