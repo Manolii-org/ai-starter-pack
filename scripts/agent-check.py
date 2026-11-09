@@ -467,8 +467,13 @@ def ready_identity(root: Path, item: dict) -> str:
                 return
             try:
                 target = os.stat(path)
-                row = [relative, "link", link, stat.S_IFMT(target.st_mode), target.st_size,
-                       target.st_mtime_ns, target.st_ino, target.st_ctime_ns]
+                if stat.S_ISDIR(target.st_mode):
+                    # Same rule as a real directory: its contents are walked,
+                    # and its times move whenever an excluded cache appears.
+                    row = [relative, "link", link, "dir", stat.S_IMODE(target.st_mode), target.st_ino]
+                else:
+                    row = [relative, "link", link, stat.S_IFMT(target.st_mode), target.st_size,
+                           target.st_mtime_ns, target.st_ino, target.st_ctime_ns]
             except OSError:
                 row = [relative, "link", link, None]
         elif stat.S_ISDIR(details.st_mode):
@@ -534,29 +539,76 @@ def dotenv_identity(root: Path, plan: dict, key: bytes) -> dict:
     for directory in sorted(directories):
         for path in sorted(inside(root, directory).glob(".env*")):
             name = path.relative_to(root).as_posix()
-            # Unreadable files and .env* directories still bind their state,
-            # rather than blocking the run or silently dropping out.
-            try:
-                if path.is_symlink():
-                    # Bind the link text and what the link resolves to: the
-                    # framework reads the target's bytes, not the link.
+            if path.is_symlink():
+                # Bind the link text and what the link resolves to: the
+                # framework reads the target's bytes, not the link.
+                try:
                     data = b"symlink\0" + os.fsencode(os.readlink(path)) + b"\0"
-                    if path.is_file():
-                        data += b"file\0" + path.read_bytes()
-                    elif path.is_dir():
-                        data += b"directory\0" + encoded(sorted(entry.name for entry in path.iterdir()))
-                    else:
-                        data += b"dangling"
-                elif path.is_file():
-                    data = b"regular\0" + path.read_bytes()
-                elif path.is_dir():
-                    data = b"directory\0" + encoded(sorted(entry.name for entry in path.iterdir()))
+                except OSError:
+                    data = b"symlink\0" + unreadable_state(path)
                 else:
-                    data = b"other\0"
-            except OSError:
-                data = b"unreadable\0" + encoded(oct(path.lstat().st_mode))
+                    data += dotenv_bytes(path) if path.exists() else b"dangling"
+            else:
+                data = dotenv_bytes(path)
             result[name] = hmac.new(key, data, hashlib.sha256).hexdigest()
     return result
+
+
+def unreadable_state(path: Path) -> bytes:
+    """What can still be seen of an entry whose contents cannot be read.
+
+    A tool that rewrites or replaces a file cannot keep its inode and ctime,
+    so an unreadable file still changes identity when it changes.
+    """
+    try:
+        details = path.stat() if path.exists() else path.lstat()
+    except OSError:
+        return b"unreadable\0gone"
+    return b"unreadable\0" + encoded([details.st_mode, details.st_size, details.st_mtime_ns,
+                                      details.st_ino, details.st_ctime_ns])
+
+
+def dotenv_bytes(path: Path) -> bytes:
+    """Contents of a .env* file, or of every file under a .env* directory.
+
+    Unreadable entries bind their visible state rather than blocking the run.
+    Links inside a directory bind their text and are not followed, so a link
+    cycle cannot loop.
+    """
+    try:
+        if path.is_file():
+            return b"regular\0" + path.read_bytes()
+        if not path.is_dir():
+            return b"other\0"
+        rows = []
+        stack = [(path, "")]
+        while stack:
+            directory, prefix = stack.pop()
+            try:
+                entries = sorted(directory.iterdir())
+            except OSError:
+                rows.append([prefix, "dir", unreadable_state(directory).hex()])
+                continue
+            for entry in entries:
+                relative = f"{prefix}{entry.name}"
+                if entry.is_symlink():
+                    try:
+                        rows.append([relative, "link", os.readlink(entry)])
+                    except OSError:
+                        rows.append([relative, "link", unreadable_state(entry).hex()])
+                elif entry.is_dir():
+                    rows.append([relative, "dir"])
+                    stack.append((entry, relative + "/"))
+                elif entry.is_file():
+                    try:
+                        rows.append([relative, "file", hashlib.sha256(entry.read_bytes()).hexdigest()])
+                    except OSError:
+                        rows.append([relative, "file", unreadable_state(entry).hex()])
+                else:
+                    rows.append([relative, "other"])
+        return b"directory\0" + encoded(sorted(rows))
+    except OSError:
+        return unreadable_state(path)
 
 
 def write_json(path: Path, value: dict) -> None:

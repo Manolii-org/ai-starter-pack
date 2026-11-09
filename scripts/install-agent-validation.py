@@ -494,9 +494,14 @@ def validate_provenance(value: dict):
         raise ValueError("malformed alias provenance")
     for alias, entry in record["aliases"].items():
         raw = b"../.github/skills"
-        # Git's object format requires SHA-1 here; integrity also binds SHA-256.
-        oid = hashlib.sha1(b"blob " + str(len(raw)).encode() + b"\0" + raw,
-                           usedforsecurity=False).hexdigest()
+        # The blob id uses the repository's object format: 40 hex digits for
+        # SHA-1 repositories, 64 for SHA-256. Integrity also binds SHA-256.
+        blob = entry.get("blob") if isinstance(entry, dict) else None
+        header = b"blob " + str(len(raw)).encode() + b"\0" + raw
+        if isinstance(blob, str) and len(blob) == 64:
+            oid = hashlib.sha256(header).hexdigest()
+        else:
+            oid = hashlib.sha1(header, usedforsecurity=False).hexdigest()
         if entry != {"mode": "120000", "blob": oid, "target": raw.decode(), "sha256": digest(raw)}:
             raise ValueError(f"malformed alias provenance: {alias}")
     expected = {name: {"canonical": str(destination(Path("/"), name, True)).removeprefix("/"),

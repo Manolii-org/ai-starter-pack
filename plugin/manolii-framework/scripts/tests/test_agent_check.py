@@ -1404,6 +1404,40 @@ class AgentCheckTests(unittest.TestCase):
             identity = runner.dotenv_identity(self.root, plan, b"k" * 32)
         self.assertIn(".env.local", identity)
 
+    def test_dotenv_directory_contents_are_bound(self):
+        runner = load("agent-check")
+        plan = {"checks": [], "environments": []}
+        (self.root / ".env.d/nested").mkdir(parents=True)
+        value = self.root / ".env.d/nested/app"
+        value.write_text("MODE=good")
+        first = runner.dotenv_identity(self.root, plan, b"k" * 32)
+        value.write_text("MODE=bad!")  # same names: only the contents changed
+        self.assertNotEqual(first, runner.dotenv_identity(self.root, plan, b"k" * 32))
+
+    def test_unreadable_dotenv_replacement_is_bound(self):
+        runner = load("agent-check")
+        plan = {"checks": [], "environments": []}
+        secret = self.root / ".env.local"
+        secret.write_text("X=1")
+        with mock.patch.object(Path, "read_bytes", side_effect=PermissionError("denied")):
+            first = runner.dotenv_identity(self.root, plan, b"k" * 32)
+            replacement = self.root / ".env.local.new"
+            replacement.write_text("X=2")
+            os.replace(replacement, secret)
+            self.assertNotEqual(first, runner.dotenv_identity(self.root, plan, b"k" * 32))
+
+    def test_tool_cache_inside_a_symlinked_dependency_keeps_the_identity(self):
+        runner = load("agent-check")
+        package = self.root / "packages/shared"
+        package.mkdir(parents=True)
+        (package / "index.js").write_text("ok")
+        (self.root / "node_modules").mkdir()
+        (self.root / "node_modules/shared").symlink_to(package, target_is_directory=True)
+        item = {"ready_paths": ["node_modules"]}
+        first = runner.ready_identity(self.root, item)
+        (package / ".vite").mkdir()  # excluded tool cache; moves the target's mtime and ctime
+        self.assertEqual(first, runner.ready_identity(self.root, item))
+
     def test_ready_identity_tolerates_entries_removed_during_the_walk(self):
         runner = load("agent-check")
         (self.root / "node_modules/pkg").mkdir(parents=True)

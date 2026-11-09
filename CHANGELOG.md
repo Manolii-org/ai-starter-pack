@@ -12,6 +12,12 @@
 - `agent-check`: an untracked file's executable bit, and ignored `.env*` files
   where checks run (keyed digests, no values stored), are part of the candidate
   identity; a fresh failure revokes the cached PASS for the same candidate.
+- `agent-check`: a `.env*` directory binds the contents of every file under it
+  (not only entry names), an unreadable `.env*` entry binds its inode and times,
+  and a symlink to a dependency directory binds the directory like a real one, so
+  a tool cache created inside it no longer forces setup to run again.
+- `install-agent-validation`: a SHA-256 repository's alias blob IDs are accepted;
+  installing into one previously failed with `malformed alias provenance`.
 - `install-agent-validation`: provenance accepts SHA-256 Git object IDs, and the
   installer names managed files no owner recipe check selects
   (`RECIPE-UNCOVERED`) instead of leaving the portable test to fail later.
