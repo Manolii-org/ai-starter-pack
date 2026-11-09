@@ -33,11 +33,15 @@ Recipe details that keep receipts honest:
   `--provision` again, and a cached PASS is bound to that fingerprint too. List
   the dependency directory itself (`node_modules`, `.venv`), not only a sentinel
   file inside it: a sentinel proves setup ran but fingerprints one file.
-- What a cached PASS is bound to: tracked and untracked files (with modes),
-  ignored `.env*` where checks run (effective contents, keyed), the `ready_paths`
-  trees, tool versions and the execution environment. Other ignored files, such
-  as build caches, are not inputs; add them to `ready_paths` if a check's result
-  depends on them, or run with `--no-cache`.
+- What a cached PASS is bound to: tracked and untracked files (contents and the
+  executable bit; other permission bits are not bound), ignored `.env*` files in
+  the repository root and in each selected check's or environment's `cwd`
+  (effective contents, keyed; a dotenv elsewhere, such as `apps/web/.env` read
+  by a command run from the root, is not), the `ready_paths` trees, tool
+  versions and the execution environment. Other ignored files, such as build
+  caches, are not inputs. Run with `--no-cache` when a check depends on any of
+  these unbound inputs; `ready_paths` must exist right after provisioning, so
+  they suit what setup creates, not caches a check writes later.
 - Patterns use `fnmatch`, where `*` also matches `/`: give a linter that only
   accepts workflow YAML `.github/workflows/*.yml` and `*.yaml`, not
   `.github/workflows/*`, if that directory holds other files. The installer records content hashes in
