@@ -1265,6 +1265,41 @@ class AgentCheckTests(unittest.TestCase):
         self.assertTrue(self.receipt()["cached"])
         self.assertEqual((self.root / "node_modules/installs").read_text(), "1")
 
+    def test_dependency_replaced_with_same_size_and_mtime_is_not_reused(self):
+        self._dependency_environment()
+        self.change_source()
+        self.run_check("--provision")
+        target = self.root / "node_modules/tool/bin.js"
+        before = target.stat()
+        replacement = self.root / "node_modules/tool/bin.js.new"
+        replacement.write_text("ko")
+        os.utime(replacement, ns=(before.st_atime_ns, before.st_mtime_ns))
+        os.replace(replacement, target)
+        self.assertEqual((target.stat().st_size, target.stat().st_mtime_ns), (before.st_size, before.st_mtime_ns))
+        self.run_check(expected=1)
+        self.assertFalse(self.receipt()["cached"])
+
+    def test_symlinked_dependency_target_changes_are_not_reused(self):
+        runner = load("agent-check")
+        outside = self.root / "outside.js"
+        outside.write_text("ok")
+        (self.root / "node_modules").mkdir()
+        (self.root / "node_modules/linked.js").symlink_to(outside)
+        item = {"ready_paths": ["node_modules"]}
+        first = runner.ready_identity(self.root, item)
+        outside.write_text("ko")
+        self.assertNotEqual(first, runner.ready_identity(self.root, item))
+
+    def test_vite_config_bundling_directory_keeps_ready_setup(self):
+        self._dependency_environment()
+        self.change_source()
+        self.run_check("--provision")
+        (self.root / "node_modules/.vite-temp").mkdir()
+        (self.root / "node_modules/.vite-temp/vitest.config.mjs").write_text("bundled")
+        self.run_check("--provision")
+        self.assertTrue(self.receipt()["cached"])
+        self.assertEqual((self.root / "node_modules/installs").read_text(), "1")
+
     def test_untracked_executable_bit_is_part_of_the_candidate(self):
         helper = self.root / "src/helper.sh"
         helper.write_text("#!/bin/sh\nexit 0\n")
