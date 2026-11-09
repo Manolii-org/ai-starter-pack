@@ -28,9 +28,16 @@ Recipe details that keep receipts honest:
   `{"node": "v24"}`. A different version reports the toolchain unavailable
   instead of passing on an unsupported runtime. Mirror the CI toolchain.
 - `ready_paths` are fingerprinted (names, modes, sizes, mtimes, inodes and ctimes,
-  and the target state behind symlinks; tool caches such as `.cache`, `.vite-temp`
-  and `__pycache__` excluded). A deleted or edited dependency
-  needs `--provision` again rather than reusing setup.
+  walking through symlinked directories; tool caches such as `.cache`,
+  `.vite-temp` and `__pycache__` excluded). A deleted or edited dependency needs
+  `--provision` again, and a cached PASS is bound to that fingerprint too. List
+  the dependency directory itself (`node_modules`, `.venv`), not only a sentinel
+  file inside it: a sentinel proves setup ran but fingerprints one file.
+- What a cached PASS is bound to: tracked and untracked files (with modes),
+  ignored `.env*` where checks run (effective contents, keyed), the `ready_paths`
+  trees, tool versions and the execution environment. Other ignored files, such
+  as build caches, are not inputs; add them to `ready_paths` if a check's result
+  depends on them, or run with `--no-cache`.
 - Patterns use `fnmatch`, where `*` also matches `/`: give a linter that only
   accepts workflow YAML `.github/workflows/*.yml` and `*.yaml`, not
   `.github/workflows/*`, if that directory holds other files. The installer records content hashes in

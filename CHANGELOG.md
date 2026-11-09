@@ -6,7 +6,8 @@
 
 - `agent-check`: setup is reused only when its `ready_paths` are unchanged
   (fingerprint of names, modes, sizes, mtimes, inodes and ctimes plus symlink
-  target state; tool caches including `.vite-temp` excluded), so a
+  target state, walking symlinked directories; tool caches including
+  `.vite-temp` excluded), and a cached PASS is bound to the same fingerprints, so a
   deleted or edited dependency can no longer reuse setup and a cached PASS.
 - `agent-check`: an untracked file's executable bit, and ignored `.env*` files
   where checks run (keyed digests, no values stored), are part of the candidate

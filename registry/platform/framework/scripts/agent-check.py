@@ -480,6 +480,10 @@ def ready_identity(root: Path, item: dict) -> str:
                    details.st_ino, details.st_ctime_ns]
         digest.update(encoded(row) + b"\n")
 
+    # Symlinked directories (workspace packages, linked stores) are walked
+    # through their targets; each real directory is walked once, so a link
+    # cycle or a link back into the tree cannot loop or double count.
+    visited: set[str] = set()
     for name in item.get("ready_paths", []):
         path = inside(root, name)
         try:
@@ -488,17 +492,34 @@ def ready_identity(root: Path, item: dict) -> str:
             digest.update(encoded([name, None]) + b"\n")
             continue
         add(name, str(path), details)
-        if not stat.S_ISDIR(details.st_mode):
-            continue
-        for directory, dirnames, filenames in os.walk(path):
-            dirnames[:] = sorted(d for d in dirnames if d not in READY_IDENTITY_SKIP)
-            for entry in sorted(dirnames + filenames):
+        stack = [(str(path), name)] if os.path.isdir(path) else []
+        while stack:
+            directory, logical = stack.pop()
+            real = os.path.realpath(directory)
+            if real in visited:
+                digest.update(encoded([logical, "seen", real]) + b"\n")
+                continue
+            visited.add(real)
+            try:
+                entries = sorted(os.listdir(directory))
+            except (FileNotFoundError, NotADirectoryError):
+                continue  # removed while walking
+            children = []
+            for entry in entries:
                 full = os.path.join(directory, entry)
                 try:
-                    details = os.lstat(full)
+                    entry_details = os.lstat(full)
                 except FileNotFoundError:
                     continue  # removed while walking; it is no longer part of the setup
-                add(Path(full).relative_to(root).as_posix(), full, details)
+                relative = f"{logical}/{entry}"
+                if entry in READY_IDENTITY_SKIP and (stat.S_ISDIR(entry_details.st_mode)
+                                                     or stat.S_ISLNK(entry_details.st_mode)):
+                    continue
+                add(relative, full, entry_details)
+                if stat.S_ISDIR(entry_details.st_mode) or (stat.S_ISLNK(entry_details.st_mode)
+                                                           and os.path.isdir(full)):
+                    children.append((full, relative))
+            stack.extend(reversed(children))
     return digest.hexdigest()
 
 
@@ -517,7 +538,15 @@ def dotenv_identity(root: Path, plan: dict, key: bytes) -> dict:
             # rather than blocking the run or silently dropping out.
             try:
                 if path.is_symlink():
-                    data = b"symlink\0" + os.fsencode(os.readlink(path))
+                    # Bind the link text and what the link resolves to: the
+                    # framework reads the target's bytes, not the link.
+                    data = b"symlink\0" + os.fsencode(os.readlink(path)) + b"\0"
+                    if path.is_file():
+                        data += b"file\0" + path.read_bytes()
+                    elif path.is_dir():
+                        data += b"directory\0" + encoded(sorted(entry.name for entry in path.iterdir()))
+                    else:
+                        data += b"dangling"
                 elif path.is_file():
                     data = b"regular\0" + path.read_bytes()
                 elif path.is_dir():
@@ -650,6 +679,9 @@ def main(argv=None) -> int:
         identity = {"schema": SCHEMA, "source": sha(Path(__file__).read_bytes()),
                     "config": config, "plan": plan, "tools": tools, "snapshot": before,
                     "dotenv": dotenv_identity(root, plan, key),
+                    # A cached PASS is bound to the dependency trees it ran
+                    # against, so reprovisioned or edited dependencies rerun checks.
+                    "ready": {item["id"]: ready_identity(root, item) for item in plan["environments"]},
                     "execution_environment": environment_fingerprint(key, {
                         "default": execution_environment({}, inherited),
                         "checks": {item["id"]: execution_environment(item, inherited) for item in plan["checks"]},

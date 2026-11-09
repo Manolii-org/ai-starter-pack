@@ -1310,6 +1310,42 @@ class AgentCheckTests(unittest.TestCase):
         with mock.patch.object(runner.os, "readlink", side_effect=gone):
             runner.ready_identity(self.root, {"ready_paths": ["node_modules"]})
 
+    def test_symlinked_dependency_directory_contents_are_bound(self):
+        runner = load("agent-check")
+        package = self.root / "packages/shared"
+        package.mkdir(parents=True)
+        (package / "index.js").write_text("ok")
+        (self.root / "node_modules").mkdir()
+        (self.root / "node_modules/shared").symlink_to(package, target_is_directory=True)
+        (self.root / "node_modules/loop").symlink_to(self.root / "node_modules", target_is_directory=True)
+        item = {"ready_paths": ["node_modules"]}
+        first = runner.ready_identity(self.root, item)
+        # In place: the package directory's own stat stays the same, so only a
+        # walk through the link sees the change.
+        (package / "index.js").write_text("ko")
+        self.assertNotEqual(first, runner.ready_identity(self.root, item))
+
+    def test_symlinked_dotenv_binds_the_target_contents(self):
+        runner = load("agent-check")
+        plan = {"checks": [], "environments": []}
+        shared = self.root / "shared.env"
+        shared.write_text("MODE=good")
+        (self.root / ".env.local").symlink_to(shared)
+        first = runner.dotenv_identity(self.root, plan, b"k" * 32)
+        shared.write_text("MODE=bad")
+        self.assertNotEqual(first, runner.dotenv_identity(self.root, plan, b"k" * 32))
+
+    def test_reprovisioned_dependencies_never_reuse_a_cached_pass(self):
+        self._dependency_environment()
+        self.change_source()
+        self.run_check("--provision")
+        self.run_check("--provision")
+        self.assertTrue(self.receipt()["cached"])
+        shutil.rmtree(self.root / "node_modules/tool")
+        self.run_check("--provision")
+        self.assertFalse(self.receipt()["cached"])
+        self.assertIn("AGENT-CHECK test:", self.run_check("--provision", "--no-cache").stdout)
+
     def test_vite_config_bundling_directory_keeps_ready_setup(self):
         self._dependency_environment()
         self.change_source()
