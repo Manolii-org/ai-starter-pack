@@ -8,6 +8,7 @@ just like package.json; never run a fork's configuration with privileged env.
 from __future__ import annotations
 
 import argparse
+import errno
 import fnmatch
 import hashlib
 import hmac
@@ -457,13 +458,23 @@ def ready_identity(root: Path, item: dict) -> str:
         row: list[str | int | None]
         if stat.S_ISLNK(details.st_mode):
             try:
+                link = os.readlink(path)
+            except OSError as error:
+                if not isinstance(error, FileNotFoundError) and error.errno != errno.EINVAL:
+                    raise
+                # Removed or replaced by a non-link since lstat: record the change.
+                digest.update(encoded([relative, "vanished"]) + b"\n")
+                return
+            try:
                 target = os.stat(path)
-                row = [relative, "link", os.readlink(path), stat.S_IFMT(target.st_mode), target.st_size,
+                row = [relative, "link", link, stat.S_IFMT(target.st_mode), target.st_size,
                        target.st_mtime_ns, target.st_ino, target.st_ctime_ns]
             except OSError:
-                row = [relative, "link", os.readlink(path), None]
+                row = [relative, "link", link, None]
         elif stat.S_ISDIR(details.st_mode):
-            row = [relative, "dir", stat.S_IMODE(details.st_mode)]
+            # The inode binds a replaced directory; its ctime would also move
+            # whenever an excluded tool cache inside it is created.
+            row = [relative, "dir", stat.S_IMODE(details.st_mode), details.st_ino]
         else:
             row = [relative, "file", stat.S_IMODE(details.st_mode), details.st_size, details.st_mtime_ns,
                    details.st_ino, details.st_ctime_ns]
