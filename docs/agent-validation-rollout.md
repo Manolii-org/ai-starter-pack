@@ -27,8 +27,9 @@ Recipe details that keep receipts honest:
 - `tool_requirements` maps a tool to a required version prefix, for example
   `{"node": "v24"}`. A different version reports the toolchain unavailable
   instead of passing on an unsupported runtime. Mirror the CI toolchain.
-- `ready_paths` are fingerprinted (names, modes, sizes, mtimes; tool caches such
-  as `.cache` and `__pycache__` excluded). A deleted or edited dependency
+- `ready_paths` are fingerprinted (names, modes, sizes, mtimes, inodes and ctimes,
+  and the target state behind symlinks; tool caches such as `.cache`, `.vite-temp`
+  and `__pycache__` excluded). A deleted or edited dependency
   needs `--provision` again rather than reusing setup.
 - Patterns use `fnmatch`, where `*` also matches `/`: give a linter that only
   accepts workflow YAML `.github/workflows/*.yml` and `*.yaml`, not
