@@ -36,7 +36,11 @@ Recipe details that keep receipts honest:
 - What a cached PASS is bound to: tracked and untracked files (contents and the
   executable bit; other permission bits are not bound), ignored `.env*` files in
   the repository root and in each selected check's or environment's `cwd`
-  (effective contents, keyed; a dotenv elsewhere, such as `apps/web/.env` read
+  (effective contents, keyed, including every file under a `.env*` directory;
+  a link inside one binds its text and, for a file, the target's contents;
+  an unreadable one binds its inode and times, and a directory that cannot be
+  listed binds only its own state, so use `--no-cache` if a check reads a file
+  inside it; a dotenv elsewhere, such as `apps/web/.env` read
   by a command run from the root, is not), the `ready_paths` trees, tool
   versions and the execution environment. Other ignored files, such as build
   caches, are not inputs. Run with `--no-cache` when a check depends on any of

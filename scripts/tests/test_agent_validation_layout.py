@@ -370,6 +370,33 @@ def test_malformed_provenance_fails_closed(producers, consumer, field):
     assert snapshot(consumer) == before
 
 
+def test_sha256_repository_provenance_is_accepted_on_rerun(producers, tmp_path):
+    """A SHA-256 consumer records 64-hex alias blobs; validation must accept them."""
+    root = tmp_path / "consumer256"
+    for rel in ("config", ".claude", ".cursor", ".github/skills", ".ai"):
+        (root / rel).mkdir(parents=True, exist_ok=True)
+    (root / "config/agent-checks.json").write_text(json.dumps(
+        {"schema_version": 1, "base": "origin/main", "checks": []}) + "\n")
+    (root / LAYOUT_NAME).write_text(json.dumps(LAYOUT) + "\n")
+    (root / ".ai/.gitignore").write_text("agent-checks/\n")
+    (root / ".github/skills/owner.md").write_text("Other skill owner text.\n")
+    for name in (".claude", ".cursor"):
+        (root / name / "skills").symlink_to("../.github/skills", target_is_directory=True)
+    try:
+        git(root, "init", "-q", "--object-format=sha256", "-b", "codex/synthetic-layout")
+    except subprocess.CalledProcessError:
+        pytest.skip("git without SHA-256 repository support")
+    commit(root)
+    source = producers["source"][0]
+    result = invoke(source, root)
+    assert result.returncode == 0, result.stderr
+    receipt = json.loads((root / RECEIPT).read_text())
+    assert len(receipt["layout"]["aliases"][".claude/skills"]["blob"]) == 64
+    commit(root, "install")
+    result = invoke(source, root)
+    assert result.returncode == 0, result.stderr
+
+
 def test_conflicting_output_plan_refuses_before_writes(producers, consumer, monkeypatch):
     module = imported(producers["source"][0])
     original = module.load_module
