@@ -167,6 +167,12 @@ def validate_native_binding(manifest: dict, *, expected_release_id: str,
                 "controller_sha": expected_controller_sha, "release_id": expected_release_id,
                 "preparation_run_id": subject["preparation"]["run_id"],
                 "preparation_run_attempt": subject["preparation"]["run_attempt"]}
+    if manifest["schema_version"] == 2:
+        if subject["execution"]["workflow_sha"] != expected_controller_sha:
+            raise ManifestError("protected execution workflow differs from reviewed controller")
+        expected.update(execution_run_id=subject["execution"]["run_id"],
+                        execution_run_attempt=subject["execution"]["run_attempt"],
+                        execution_job=subject["execution"]["job"])
     if canonical_bytes(execution_context) != canonical_bytes(expected):
         raise ManifestError("native executor binding differs from prepared subject")
     if not isinstance(now, datetime) or now.utcoffset() is None:

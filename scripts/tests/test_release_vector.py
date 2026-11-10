@@ -19,7 +19,8 @@ def subject():
     for key in ('source_sha', 'qualification', 'artifacts'):
         value.pop(key)
     value.update(entity='example', config_sha256='8' * 64, decision_sequence=['release'],
-                 components=[], unchanged_components=[], qualifications=[])
+                 components=[], unchanged_components=[], qualifications=[],
+                 execution={'run_id': 10, 'run_attempt': 1, 'job': 'execute', 'workflow_sha': value['control_sha']})
     source = {'repo': 'example/api', 'sha': 'a' * 40, 'tree': 'b' * 40}
     for index, name in enumerate(('api', 'worker')):
         value['components'].append({'id': name, 'source': {**source, 'repo': 'example/' + name, 'sha': str(index + 1) * 40},
@@ -55,12 +56,16 @@ class ReleaseVectorTests(unittest.TestCase):
         context = {'repo': value['repo'], 'environment': value['environment'],
                    'controller_sha': value['control_sha'], 'release_id': record['release_id'],
                    'preparation_run_id': value['preparation']['run_id'],
-                   'preparation_run_attempt': value['preparation']['run_attempt']}
+                   'preparation_run_attempt': value['preparation']['run_attempt'],
+                   'execution_run_id': value['execution']['run_id'],
+                   'execution_run_attempt': value['execution']['run_attempt'],
+                   'execution_job': value['execution']['job']}
         args = {'expected_release_id': record['release_id'], 'expected_controller_sha': value['control_sha'],
                 'execution_context': context, 'now': datetime(2026, 11, 1, tzinfo=timezone.utc)}
         self.assertEqual(release.validate_native_binding(record, **args), record)
         for key, altered in [('release_id', '0' * 64), ('controller_sha', '0' * 40),
-                             ('preparation_run_attempt', 2), ('environment', 'different')]:
+                             ('preparation_run_attempt', 2), ('execution_run_attempt', 2),
+                             ('execution_job', 'other'), ('environment', 'different')]:
             with self.assertRaises(release.ManifestError):
                 release.validate_native_binding(record, **{**args, 'execution_context': {**context, key: altered}})
         with self.assertRaises(release.ManifestError):

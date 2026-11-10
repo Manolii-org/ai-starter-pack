@@ -35,7 +35,8 @@
         "components",
         "databases",
         "qualifications",
-        "unchanged_components"
+        "unchanged_components",
+        "execution"
       ],
       "properties": {
         "repo": {
@@ -676,6 +677,36 @@
                 "type": "string",
                 "pattern": "^[0-9a-f]{64}$"
               }
+            }
+          }
+        },
+        "execution": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "run_id",
+            "run_attempt",
+            "job",
+            "workflow_sha"
+          ],
+          "properties": {
+            "run_id": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "run_attempt": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "job": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200,
+              "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+            },
+            "workflow_sha": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{40}$"
             }
           }
         }

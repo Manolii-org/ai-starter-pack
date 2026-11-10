@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "release_id": "6595e3e1923bb64818bd6e0ed01aa5b682f342d6f7caa81382d353e374781760",
+  "release_id": "c08f688e3f091e90ef8d67c716bb244cf9d46747af419140253e14713cbac7bc",
   "subject": {
     "repo": "example/product",
     "environment": "production",
@@ -160,6 +160,12 @@
         "status": "success",
         "obligations": []
       }
-    ]
+    ],
+    "execution": {
+      "run_id": 10,
+      "run_attempt": 1,
+      "job": "execute",
+      "workflow_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    }
   }
 }
