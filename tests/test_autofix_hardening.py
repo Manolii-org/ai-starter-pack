@@ -180,7 +180,10 @@ def test_standalone_rechecks_the_head_before_any_queued_work() -> None:
     assert steps[0]["env"]["VALIDATED"] == "${{ needs.preflight.outputs.head_sha }}"
     agent = next(i for i, s in enumerate(steps) if str(s.get("uses", "")).startswith(ACTION))
     for step in steps[1:agent + 1]:
-        assert step.get("if") == GO, step.get("name") or step.get("uses")
+        cond = str(step.get("if") or "")
+        # The App mint adds a variable conjunct. The lock gate stays first,
+        # so a queued run still cannot checkout or dispatch on a stale head.
+        assert cond == GO or cond.startswith(GO + " && "), step.get("name") or step.get("uses")
     for step in steps[agent + 1:]:
         assert "steps.claude.outcome" in step["if"]
 

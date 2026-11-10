@@ -78,6 +78,11 @@ jobs:
         run: |
           set -euo pipefail
           BASE_SHA="${{ github.event.pull_request.base.sha }}"
+          # The stored base sha lags after main moves. The checkout is GitHub's
+          # merge commit, and its second parent is the base actually merged.
+          if MERGE_BASE=$(git rev-parse --verify -q HEAD^2); then
+            BASE_SHA="$MERGE_BASE"
+          fi
           [ -n "$BASE_SHA" ] || { echo "No pull_request base context — nothing to restore"; exit 0; }
           # A PR-owned .ai symlink would redirect the nested catalog deletion.
           if [ -L .ai ] || { [ -e .ai ] && [ ! -d .ai ]; }; then
@@ -410,6 +415,11 @@ jobs:
         run: |
           set -euo pipefail
           BASE_SHA="${{ github.event.pull_request.base.sha }}"
+          # The stored base sha lags after main moves. The checkout is GitHub's
+          # merge commit, and its second parent is the base actually merged.
+          if MERGE_BASE=$(git rev-parse --verify -q HEAD^2); then
+            BASE_SHA="$MERGE_BASE"
+          fi
           [ -n "$BASE_SHA" ] || { echo "No pull_request base context — nothing to restore"; exit 0; }
           # A PR-owned .ai symlink would redirect the nested catalog deletion.
           if [ -L .ai ] || { [ -e .ai ] && [ ! -d .ai ]; }; then
@@ -505,6 +515,11 @@ jobs:
         run: |
           set -euo pipefail
           BASE_SHA="${{ github.event.pull_request.base.sha }}"
+          # The stored base sha lags after main moves. The checkout is GitHub's
+          # merge commit, and its second parent is the base actually merged.
+          if MERGE_BASE=$(git rev-parse --verify -q HEAD^2); then
+            BASE_SHA="$MERGE_BASE"
+          fi
           [ -n "$BASE_SHA" ] || { echo "No pull_request base context — nothing to restore"; exit 0; }
           # A PR-owned .ai symlink would redirect the nested catalog deletion.
           if [ -L .ai ] || { [ -e .ai ] && [ ! -d .ai ]; }; then
@@ -594,6 +609,11 @@ jobs:
         run: |
           set -euo pipefail
           BASE_SHA="${{ github.event.pull_request.base.sha }}"
+          # The stored base sha lags after main moves. The checkout is GitHub's
+          # merge commit, and its second parent is the base actually merged.
+          if MERGE_BASE=$(git rev-parse --verify -q HEAD^2); then
+            BASE_SHA="$MERGE_BASE"
+          fi
           [ -n "$BASE_SHA" ] || { echo "No pull_request base context — nothing to restore"; exit 0; }
           # A PR-owned .ai symlink would redirect the nested catalog deletion.
           if [ -L .ai ] || { [ -e .ai ] && [ ! -d .ai ]; }; then

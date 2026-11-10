@@ -383,14 +383,29 @@ jobs:
           fi
           echo "go=true" >> "$GITHUB_OUTPUT"
 
+      # A configured but broken App fails this job. It must not silently spend
+      # MN_GH_AUTOMATION_TOKEN. An unset GH_AUTOMATION_APP_ID skips the mint
+      # and the checkout below falls through to the PAT, then GITHUB_TOKEN.
+      - name: Mint scoped autofix token
+        if: steps.lock.outputs.go == 'true' && vars.GH_AUTOMATION_APP_ID != ''
+        id: github-app
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          app-id: ${{ vars.GH_AUTOMATION_APP_ID }}
+          private-key: ${{ secrets.GH_AUTOMATION_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+          permission-pull-requests: write
+
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         if: steps.lock.outputs.go == 'true'
         with:
           persist-credentials: false
           fetch-depth: 0
-          # Elevated PAT when provisioned: GITHUB_TOKEN pushes don't fire
+          # Elevated credential when provisioned: GITHUB_TOKEN pushes don't fire
           # pull_request events, so autofix heads never get re-assessed.
-          token: ${{ secrets.MN_GH_AUTOMATION_TOKEN || secrets.GITHUB_TOKEN }}
+          token: ${{ steps.github-app.outputs.token || secrets.MN_GH_AUTOMATION_TOKEN || secrets.GITHUB_TOKEN }}
           # Pin to the SHA preflight validated — head_ref is a movable branch,
           # so checking it out could run autofix on a commit the loop-break and
           # budget gates never examined (review finding on #148).
@@ -500,10 +515,11 @@ jobs:
       - name: Warn when elevated push token is absent
         if: steps.lock.outputs.go == 'true'
         env:
+          APP_ID: ${{ vars.GH_AUTOMATION_APP_ID }}
           AUTOFIX_PUSH_TOKEN: ${{ secrets.MN_GH_AUTOMATION_TOKEN }}
         run: |
-          if [ -z "$AUTOFIX_PUSH_TOKEN" ]; then
-            echo "::warning::MN_GH_AUTOMATION_TOKEN not provisioned; autofix pushes fall back to GITHUB_TOKEN and will not trigger pull_request re-assessment"
+          if [ -z "$APP_ID" ] && [ -z "$AUTOFIX_PUSH_TOKEN" ]; then
+            echo "::warning::Neither GH_AUTOMATION_APP_ID nor MN_GH_AUTOMATION_TOKEN is provisioned; autofix pushes fall back to GITHUB_TOKEN and will not trigger pull_request re-assessment"
           fi
 
       - name: Resolve Anthropic credential
@@ -576,7 +592,7 @@ jobs:
           # rejects non-human actors unless listed here. Opted-in agent bots
           # are appended; preflight already refused every other bot.
           allowed_bots: ${{ needs.preflight.outputs.allowed_bots || 'github-actions' }}
-          github_token: ${{ secrets.MN_GH_AUTOMATION_TOKEN || secrets.GITHUB_TOKEN }}
+          github_token: ${{ steps.github-app.outputs.token || secrets.MN_GH_AUTOMATION_TOKEN || secrets.GITHUB_TOKEN }}
           # Repository variable AUTOFIX_MODEL, else the lean default per plane
           # (ADR-0002): tier-2-agentic-pro (MiniMax M3) through a proxy, claude-sonnet-5-5
           # direct. Without --model the CLI default (Opus) was used.

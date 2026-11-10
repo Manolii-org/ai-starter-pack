@@ -158,3 +158,8 @@ def test_four_selectors_share_one_policy_and_sast_is_unchanged():
     jobs = yaml.safe_load(WORKFLOW.read_text())["jobs"]
     assert len({jobs[job]["runs-on"] for job in JOBS}) == 1
     assert jobs["sast"]["runs-on"] == "ubuntu-latest"
+
+
+def test_restore_prefers_the_merge_commit_base_parent():
+    text = WORKFLOW.read_text(encoding="utf-8")
+    assert text.count("MERGE_BASE=$(git rev-parse --verify -q HEAD^2)") == 4
