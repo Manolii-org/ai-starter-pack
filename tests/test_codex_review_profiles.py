@@ -413,7 +413,13 @@ p.account_probe(Path(sys.argv[2]))
             deadline = time.monotonic() + 5
             while time.monotonic() < deadline:
                 status = Path(f"/proc/{child}/status")
-                if not status.exists() or "State:\tZ" in status.read_text():
+                # Linux can reap the writer during this read. ENOENT and ESRCH
+                # both prove it exited; other read errors must still fail.
+                try:
+                    stopped = "State:\tZ" in status.read_text()
+                except (FileNotFoundError, ProcessLookupError):
+                    stopped = True
+                if stopped:
                     break
                 time.sleep(0.02)
             else:

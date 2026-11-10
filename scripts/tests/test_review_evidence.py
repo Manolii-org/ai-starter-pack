@@ -41,7 +41,7 @@ COMMENT = with_provenance(COMMENT)
 # review and a minimal risk rating still need an explicit clean source verdict.
 RISK_BODY = (module.GENERATED_HEADER + module.PREFIX
     + "\n<!-- walkthrough_start -->\nReviewed implementation.\n<!-- walkthrough_end -->"
-    + "\n<!-- final_review_risk_start -->\n<!-- final_review_risk_label\nMinimal\n-->"
+    + "\n<!-- final_review_risk_start -->\n<!-- final_review_risk_label\n**Merge Risk:** **⚪ Minimal** · up to `aaaaa`\n-->"
     + '\n<!-- final_review_risk_coverage:{"sourceCommitId":"' + SHA
     + '","coveredCommitId":"' + SHA + '","kind":"reviewed"} -->\n\n'
     + "No actionable issue is established for this change. "
@@ -86,6 +86,43 @@ def test_explicit_clean_generated_risk_verdict_requires_authenticated_publicatio
 def test_risk_publication_never_replaces_clean_verdict_coverage_or_complete_shape(body):
     c = with_provenance(dict(COMMENT, body=body))
     assert not module.coderabbit_clean_summary([c], SHA, REPO, 201)
+
+
+RISK_TRAILER = (
+    "\n</dd>\n</dl>\n</details>\n<!-- pre_merge_checks_walkthrough_start -->\n"
+    "<details>\n<summary><strong>Pre-merge checks: 1 passed</strong></summary>\n"
+    "<dl>\n<dd>\nPassed: title check.\n</dd>\n</dl>\n</details>\n"
+    "<!-- pre_merge_checks_walkthrough_end -->\n<!-- autopilot:start -->\n"
+    '- [ ] <!-- {"checkboxId":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"} --> '
+    '<strong title="Keep fixing CodeRabbit findings and required CI, and resolving merge conflicts">'
+    'Autofix</strong> · Keep fixing CodeRabbit findings and required CI, and resolving merge conflicts\n'
+    "<!-- autopilot:end -->"
+)
+
+
+def test_generated_risk_trailer_remains_separate_from_clean_verdict():
+    assert module.clean_coderabbit_body(RISK_BODY + RISK_TRAILER, SHA)
+    without_label = RISK_BODY.replace(
+        "<!-- final_review_risk_label\n**Merge Risk:** **⚪ Minimal** · up to `aaaaa`\n-->", "")
+    assert module.clean_coderabbit_body(without_label, SHA)
+
+
+@pytest.mark.parametrize("body", [
+    RISK_BODY.replace("<!-- final_review_risk_label", "Unresolved defect.\n<!-- final_review_risk_label"),
+    RISK_BODY.replace("**⚪ Minimal**", "**🔴 High**"),
+    RISK_BODY.replace("**⚪ Minimal**", "**⚪ Minimal** Unresolved defect."),
+    RISK_BODY.replace("up to `aaaaa`", "up to `bbbbb`"),
+    RISK_BODY.replace("<!-- final_review_risk_label", "<!-- unknown_label"),
+    RISK_BODY + "\nUnresolved defect.",
+    RISK_BODY + RISK_TRAILER + "\nUnresolved defect.",
+    RISK_BODY + RISK_TRAILER.replace("<!-- pre_merge_checks_walkthrough_start -->", "Unresolved defect.\n<!-- pre_merge_checks_walkthrough_start -->"),
+    RISK_BODY + RISK_TRAILER.replace("<!-- autopilot:start -->", "Unresolved defect.\n<!-- autopilot:start -->"),
+    RISK_BODY + RISK_TRAILER.replace("<!-- pre_merge_checks_walkthrough_end -->", ""),
+    RISK_BODY + RISK_TRAILER.replace("Pre-merge checks:", "Source findings:"),
+    RISK_BODY + RISK_TRAILER.replace("<!-- autopilot:end -->", ""),
+])
+def test_findings_outside_the_verdict_and_unrecognized_trailers_fail_closed(body):
+    assert not module.clean_coderabbit_body(body, SHA)
 
 
 def test_risk_verdict_cannot_be_quoted_from_walkthrough_or_code():

@@ -345,6 +345,41 @@ def clean_coderabbit_body(body, head):
     if not (isinstance(value, dict) and value.get("kind") == "reviewed"
             and value.get("sourceCommitId") == head and value.get("coveredCommitId") == head):
         return False
+    # Only the observed generated minimal-risk label may precede the verdict.
+    # Do not ignore arbitrary findings on either side of the coverage record.
+    prelude = body[positions[2]:coverage[0].start()]
+    label = re.fullmatch(
+        r"<!-- final_review_risk_start -->\s*(?:<!-- final_review_risk_label\s+"
+        r"\*\*Merge Risk:\*\* \*\*⚪ Minimal\*\* · up to `([0-9a-f]{5,40})`\s+-->\s*)?",
+        prelude,
+    )
+    if label is None or (label[1] and not head.startswith(label[1])):
+        return False
+    risk_end = re.match(r"<!-- final_review_risk_end -->[ \t]*", body[positions[3]:])
+    tail = body[positions[3] + risk_end.end():].strip()
+    # The renderer closes the risk details, then may publish its separately
+    # framed pre-merge checks and fixed Autofix control. No unframed prose.
+    if tail.startswith("</dd>\n</dl>\n</details>"):
+        tail = tail[len("</dd>\n</dl>\n</details>"):].strip()
+    checks = re.match(
+        r"<!-- pre_merge_checks_walkthrough_start -->\s*"
+        r"<details>\s*<summary><strong>Pre-merge checks: [\s\S]*?"
+        r"</dd>\s*</dl>\s*</details>\s*<!-- pre_merge_checks_walkthrough_end -->",
+        tail,
+    )
+    if checks:
+        block = checks[0]
+        if block.count("<!-- pre_merge_checks_walkthrough_") != 2:
+            return False
+        tail = tail[checks.end():].strip()
+    if tail and re.fullmatch(
+        r'<!-- autopilot:start -->\s*- \[ \] <!-- \{"checkboxId":"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"\} --> '
+        r'<strong title="Keep fixing CodeRabbit findings and required CI, and resolving merge conflicts">'
+        r'Autofix</strong> · Keep fixing CodeRabbit findings and required CI, and resolving merge conflicts'
+        r'\s*<!-- autopilot:end -->',
+        tail,
+    ) is None:
+        return False
     # Match the entire generated verdict, never a quoted phrase, risk rating,
     # arbitrary prose, or a clean sentence followed by contradictory findings.
     verdict = " ".join(body[coverage[0].end():positions[3]].split())
