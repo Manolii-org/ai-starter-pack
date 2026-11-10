@@ -75,7 +75,8 @@ safe_prefix() {
     # 8-char cap, and the <1 floor then shrinks the prefix to one char —
     # clamp on digit count first (Devin Review BUG on #5852).
     if (( ${#req} > 2 )); then req=99; fi
-    req=$((10#$req))
+    # Leading zeros were removed above; validated/clamped digits are decimal.
+    req=$(( req ))
     # Hard cap at 8 — never expose more than 8 chars of any variable
     if (( req > 8 )); then req=8; fi
     if (( req < 1 )); then req=1; fi

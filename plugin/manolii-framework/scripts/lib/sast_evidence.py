@@ -19,9 +19,9 @@ import sys
 from pathlib import Path, PurePosixPath
 
 LIMIT = 32 * 1024 * 1024
-SCANNER_VERSIONS = {"semgrep": "1.182.1", "bandit": "1.9.4"}
+SCANNER_VERSIONS = {"semgrep": "1.185.0", "bandit": "1.9.4"}
 CONFIG = {
-    "semgrep": ["semgrep", "scan", "--config", "auto", "--json", "--disable-nosem", "--metrics=off", "--disable-version-check", "--verbose"],
+    "semgrep": ["semgrep", "scan", "--config", "auto", "--timeout", "30", "--timeout-threshold", "0", "--json", "--disable-nosem", "--metrics=off", "--disable-version-check", "--verbose"],
     "bandit": ["bandit", "-r", ".", "-f", "json", "--ignore-nosec", "--exclude", "./.venv,./node_modules"],
 }
 

@@ -47,9 +47,9 @@ def consumer(tmp_path, monkeypatch):
     return root, source
 
 
-def run(consumer, *flags):
+def run(consumer, *flags, entrypoint="scripts/ai-resolve.py"):
     root, source = consumer
-    return subprocess.run([sys.executable, str(REPO / "scripts/ai-resolve.py"),
+    return subprocess.run([sys.executable, "-B", str(REPO / entrypoint),
                            "--repo-root", str(root), "--registry", str(source),
                            "--native-guidance", *flags],
                           capture_output=True, text=True, timeout=30)
@@ -59,6 +59,77 @@ def files(root):
     # The existing resolver mutex is operational state, not an installed file.
     return {p.relative_to(root).as_posix(): p.read_bytes() for p in root.rglob("*")
             if p.is_file() and p.name != "capability-apply.lock"}
+
+
+def continuation_consumer(consumer):
+    root, source = consumer
+    with (root / "ai-manifest.yaml").open("a") as handle:
+        handle.write("feature_flags: {native_guidance_continuation: true}\n")
+    for leaf in ("SKILL.md", "evals/cases.json"):
+        path = source / "registry/platform/framework/skills/autonomy-follow-through" / leaf
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes((REPO / ".claude/skills/autonomy-follow-through" / leaf).read_bytes())
+    return root, source
+
+
+@pytest.mark.parametrize("entrypoint", [
+    "scripts/ai-resolve.py",
+    "plugin/manolii-framework/scripts/ai-resolve.py",
+    "registry/platform/framework/scripts/ai-resolve.py",
+])
+def test_continuation_installs_and_cannot_be_silently_removed(consumer, entrypoint):
+    root, source = continuation_consumer(consumer)
+    local = b"# Product authority\nPreserve deployment approval.\n"
+    (root / "AGENTS.md").write_bytes(local)
+    result = run(consumer, "--apply", entrypoint=entrypoint)
+    assert result.returncode == 0, result.stdout + result.stderr
+    path = ".claude/skills/autonomy-follow-through/SKILL.md"
+    assert (root / path).read_bytes() == (source / "registry/platform/framework/skills/autonomy-follow-through/SKILL.md").read_bytes()
+    assert (root / "AGENTS.md").read_bytes().endswith(local)
+    installed = files(root)
+    assert run(consumer, "--check", entrypoint=entrypoint).returncode == 0
+    assert run(consumer, "--apply", entrypoint=entrypoint).returncode == 0
+    assert files(root) == installed
+    manifest = root / "ai-manifest.yaml"
+    manifest.write_text(manifest.read_text().replace("native_guidance_continuation: true", "native_guidance_continuation: false"))
+    before = files(root)
+    assert run(consumer, "--apply", entrypoint=entrypoint).returncode == 1
+    assert files(root) == before
+
+
+def test_missing_continuation_source_refuses_the_whole_install(consumer):
+    root, source = continuation_consumer(consumer)
+    (source / "registry/platform/framework/skills/autonomy-follow-through/evals/cases.json").unlink()
+    before = files(root)
+    assert run(consumer, "--apply").returncode == 1
+    assert files(root) == before
+
+
+@pytest.mark.parametrize("value", ['"true"', "1", "null"])
+def test_continuation_selection_is_a_boolean_not_a_truthy_value(consumer, value):
+    root, _ = consumer
+    with (root / "ai-manifest.yaml").open("a") as handle:
+        handle.write("feature_flags: {native_guidance_continuation: " + value + "}\n")
+    before = files(root)
+    assert run(consumer, "--apply").returncode == 1
+    assert files(root) == before
+
+
+def test_mirror_continuation_refresh_keeps_framework_version_and_private_assets(consumer):
+    _, source = consumer
+    registry = source / "registry"
+    metadata = registry / "platform/framework/.claude-plugin/plugin.json"
+    metadata_before = metadata.read_bytes()
+    private = registry / "example/owned/data.txt"
+    private.parent.mkdir(parents=True)
+    private.write_bytes(b"Keep owning universe content\n")
+    builder = load_script("continuation_policy_builder", "scripts/build-registry.py")
+    assert builder.refresh_policy(registry, include_continuation=True) == 0
+    assert metadata.read_bytes() == metadata_before
+    assert private.read_bytes() == b"Keep owning universe content\n"
+    target = registry / "platform/framework/skills/autonomy-follow-through/SKILL.md"
+    assert target.read_bytes() == (REPO / ".claude/skills/autonomy-follow-through/SKILL.md").read_bytes()
+    assert builder.refresh_policy(registry, check=True, include_continuation=True) == 0
 
 
 @pytest.mark.parametrize("entrypoint", [
@@ -89,7 +160,7 @@ def test_native_entrypoints_ignore_unrelated_lib_package(consumer, entrypoint):
     if entrypoint.endswith("build-registry.py"):
         assert target.read_bytes() == (REPO / ".claude/skills/design-feature-adoption/SKILL.md").read_bytes()
     else:
-        assert json.loads((root / native.LOCK).read_text())["policy_version"] == "1.0.1"
+        assert json.loads((root / native.LOCK).read_text())["policy_version"] == "1.0.2"
 
 
 def test_preview_install_repeat_and_check_preserve_local_guidance(consumer):
@@ -120,12 +191,12 @@ def test_update_preserves_new_local_text(consumer):
         stream.write(b"\nNew local rule survives.\n")
     # A reviewed update changes only the managed source, never local tails.
     skill = source / "registry/platform/framework/skills/adaptable-development/SKILL.md"
-    skill.write_text(skill.read_text().replace("version: 1.0.1", "version: 1.0.2")
+    skill.write_text(skill.read_text().replace("version: 1.0.2", "version: 1.0.3")
                      .replace("Build the current approved feature", "Implement the current approved feature"))
     assert run(consumer, "--check").returncode == 1
     assert run(consumer, "--apply").returncode == 0
     assert (root / "AGENTS.md").read_bytes().endswith(b"New local rule survives.\n")
-    assert json.loads((root / native.LOCK).read_text())["policy_version"] == "1.0.2"
+    assert json.loads((root / native.LOCK).read_text())["policy_version"] == "1.0.3"
 
 
 @pytest.mark.parametrize("path", ["AGENTS.md", ".claude/skills/design-feature-adoption/SKILL.md"])

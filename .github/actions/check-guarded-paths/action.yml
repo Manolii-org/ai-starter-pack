@@ -28,12 +28,13 @@ runs:
     - name: Check guarded paths
       shell: bash
       env:
+        GUARD_ACTION_PATH: ${{ github.action_path }}
         BASE_REF: ${{ inputs.base_ref }}
         HEAD_REF: ${{ inputs.head_ref }}
         GUARDS_FILE: ${{ inputs.guards_file }}
         BYPASS_GUARDS: ${{ inputs.bypass_guards }}
       run: |
-        python3 "${{ github.action_path }}/check.py" \
+        python3 "${GUARD_ACTION_PATH}/check.py" \
           --base "$BASE_REF" --head "$HEAD_REF" \
           --guards-file "$GUARDS_FILE" \
           --bypass "$BYPASS_GUARDS"

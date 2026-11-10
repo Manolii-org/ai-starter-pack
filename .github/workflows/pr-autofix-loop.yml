@@ -164,6 +164,8 @@ jobs:
           TRUSTED_BOTS: ${{ vars.AUTOFIX_TRUSTED_AGENT_BOTS }}
           WR_NAME: ${{ github.event.workflow_run.name || '' }}
           WR_URL: ${{ github.event.workflow_run.html_url || '' }}
+          REPOSITORY: ${{ github.repository }}
+          REVIEW_STATE: ${{ github.event.review.state }}
         run: |
           set -euo pipefail
           echo "number=$PR_NUM" >> "$GITHUB_OUTPUT"
@@ -173,7 +175,7 @@ jobs:
           # Loop break: prior autofix commit still HEAD. Preflight has no
           # checkout — read the head commit message via the API instead of
           # `git log` (same assertion: subject starts with [autofix]).
-          PR_HEAD=$(timeout 20 gh api "repos/${{ github.repository }}/pulls/${PR_NUM}" \
+          PR_HEAD=$(timeout 20 gh api "repos/${REPOSITORY}/pulls/${PR_NUM}" \
             --jq '. as $pr | $pr.head | {sha: .sha, same_repo: (if .repo == null then "missing" elif (.repo.id == $pr.base.repo.id) then "true" else "false" end)}' \
             2>/dev/null || echo '{}')
           HEAD_SHA=$(echo "$PR_HEAD" | jq -r '.sha // empty')
@@ -198,7 +200,7 @@ jobs:
           fi
           LAST_MSG=''
           if [[ -n "$HEAD_SHA" ]]; then
-            LAST_MSG=$(timeout 20 gh api "repos/${{ github.repository }}/commits/${HEAD_SHA}" \
+            LAST_MSG=$(timeout 20 gh api "repos/${REPOSITORY}/commits/${HEAD_SHA}" \
               --jq '.commit.message | split("\n")[0]' 2>/dev/null || echo '')
           fi
           if [[ "$LAST_MSG" == \[autofix\]* ]]; then
@@ -223,7 +225,6 @@ jobs:
           fi
 
           if [[ "$EVENT_NAME" == "pull_request_review" ]]; then
-            REVIEW_STATE="${{ github.event.review.state }}"
             if [[ "$REVIEW_STATE" == "approved" ]] && [[ -z "$COMMENT_BODY" || "$COMMENT_BODY" == "null" ]]; then
               echo "skip=true" >> "$GITHUB_OUTPUT"
               exit 0
@@ -276,7 +277,7 @@ jobs:
             if [[ "$EVENT_NAME" == "workflow_run" && "$who" == *"[bot]" ]] && trusted_bot "$who"; then
               continue
             fi
-            PERM=$(timeout -k 5 30 gh api "repos/${{ github.repository }}/collaborators/${who}/permission" --jq '.permission' 2>/dev/null || echo unknown)
+            PERM=$(timeout -k 5 30 gh api "repos/${REPOSITORY}/collaborators/${who}/permission" --jq '.permission' 2>/dev/null || echo unknown)
             case "$PERM" in
               admin|write) ;;
               *)
@@ -290,7 +291,7 @@ jobs:
           # --repo required: this step runs with no checkout, so gh would
           # resolve the repo from cwd and fail. Failure must fail closed —
           # a label list we can't read might contain skip-ai-review.
-          LABELS=$(timeout 20 gh pr view "$PR_NUM" --repo "${{ github.repository }}" --json labels --jq '[.labels[].name]' 2>/dev/null || echo 'FAIL')
+          LABELS=$(timeout 20 gh pr view "$PR_NUM" --repo "${REPOSITORY}" --json labels --jq '[.labels[].name]' 2>/dev/null || echo 'FAIL')
           if [[ "$LABELS" == "FAIL" ]] || echo "$LABELS" | grep -q "skip-ai-review"; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
           else
@@ -304,17 +305,18 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUM: ${{ steps.pr.outputs.number }}
           MAX_FIXES: "1"
+          REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
           MAX_FIXES="${MAX_FIXES:-1}"
           # Count commits on this PR whose subject starts with [autofix]
-          COUNT=$(gh api "repos/${{ github.repository }}/pulls/${PR_NUM}/commits" --paginate \
+          COUNT=$(gh api "repos/${REPOSITORY}/pulls/${PR_NUM}/commits" --paginate \
             --jq '[.[].commit.message | split("\n")[0] | select(startswith("[autofix]"))] | length' 2>/dev/null || echo 0)
           echo "successful_fix_commits=$COUNT" >> "$GITHUB_OUTPUT"
           if [[ "$COUNT" -ge "$MAX_FIXES" ]]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
             echo "::notice::Per-PR autofix budget reached ($COUNT >= $MAX_FIXES successful [autofix] commits); skipping"
-            timeout -k 5 30 gh pr comment "$PR_NUM" --repo "${{ github.repository }}" --body "<!-- pack-autofix:budget-exhausted --> [autofix-budget] Skipping further Autofix — this PR already has ${COUNT} successful [autofix] commit(s) (cap ${MAX_FIXES}). Remove an autofix commit or raise max_successful_fixes if a further pass is intentional." || true
+            timeout -k 5 30 gh pr comment "$PR_NUM" --repo "${REPOSITORY}" --body "<!-- pack-autofix:budget-exhausted --> [autofix-budget] Skipping further Autofix — this PR already has ${COUNT} successful [autofix] commit(s) (cap ${MAX_FIXES}). Remove an autofix commit or raise max_successful_fixes if a further pass is intentional." || true
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi

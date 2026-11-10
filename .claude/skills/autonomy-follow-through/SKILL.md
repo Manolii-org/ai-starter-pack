@@ -1,6 +1,6 @@
 ---
 name: autonomy-follow-through
-version: 1.1.4
+version: 1.1.5
 description: "Shared termination + escalation loop for routine-native autonomy and /watch-pr. Stops on done/blocked_on_human/blocked_on_infra/superseded/gave_up; merges when safe."
 type: skill
 model: sonnet
@@ -39,6 +39,23 @@ Keep one real owner/accepted durable continuation, never claim background work f
 Pushes, migration renames, new SHAs and requests to report them are progress: reply, continue review/repair/merge/verification. Only explicit stop/handoff/implementation-publication limits narrow scope. Keep repair/merge/post-merge commitments separate; repair never clears parent checkpoint. Changed heads invalidate old checks/reviews; refresh within existing authority/budgets.
 
 Before yielding, retain repository/PR/full head, unfinished commitments, next action/blocker and verified wake/accepted durable handoff receipt. A SHA, local checkpoint or proposed owner is not handoff. Without continuation, report `blocked_on_infra`, retain unfinished work, complete unaffected tasks. Production approval holds only production.
+
+On supported native Codex clients, use Goal for runnable work and Queue for routine
+feedback to the exact owning thread. Pause Goal during external waits; repeated
+unchanged turns are not progress. Scheduled hosted delivery is a separate route:
+verify queuing, admission and tool effects on that actual host before relying on
+it. A successful command exit or completed turn alone does not verify an action.
+Retain exact thread/turn identity separately from a shared session-root identifier.
+Restore the original trusted cwd, permission profile and approval policy on resume,
+never broaden them from checkpoint claims. Preserve the objective and lifetime
+budgets; replacing a goal can reset usage, and explicit turns while it is paused
+may not count against its native usage. Native Goal/Queue does not install GitHub
+subscriptions, provide cross-host editor exclusion or satisfy review/merge gates.
+Use short checkpoint references and material-change-only notifications under the
+existing owner; do not add another watcher. Official references:
+[long-running work](https://learn.chatgpt.com/docs/long-running-work),
+[Queue and Steer](https://learn.chatgpt.com/docs/prompting#steering-and-queuing), and
+[App Server](https://developers.openai.com/codex/app-server).
 
 ## Examples
 

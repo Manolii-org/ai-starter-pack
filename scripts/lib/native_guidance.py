@@ -1,7 +1,8 @@
 """Native policy delivery for curated registry consumers (no settings merge).
 
 Uses the resolver's scope/pin validation, repository mutex, no-follow reads and
-atomic writer. Owns named blocks and three skills with eval fixtures, never whole local trees.
+atomic writer. Owns named blocks and selected policy skills with eval fixtures,
+never whole local trees.
 """
 from __future__ import annotations
 
@@ -15,6 +16,7 @@ import subprocess
 from time import monotonic
 
 NAMES = ("adaptable-development", "design-feature-adoption", "compatibility-improvement")
+CONTINUATION = "autonomy-follow-through"
 LOCK = ".ai/native-guidance-lock.json"
 BEGIN = b"<!-- ai-starter-pack:development-policy:begin -->"
 END = b"<!-- ai-starter-pack:development-policy:end -->"
@@ -278,8 +280,12 @@ def _resolve(args, root, resolver, manifest, registry, index):
         canonical = root / skill_root
         if canonical.resolve() != canonical or (root / ".claude/skills").resolve() != canonical:
             raise ValueError("custom skill root must be the explicit repository-local canonical target of .claude/skills")
+    continuation = flags.get("native_guidance_continuation", False)
+    if type(continuation) is not bool:
+        raise ValueError("native_guidance_continuation must be boolean")
+    names = NAMES + (CONTINUATION,) if continuation else NAMES
     sources, evals = {}, {}
-    for name in NAMES:
+    for name in names:
         for leaf, destination in (("SKILL.md", sources), ("evals/cases.json", evals)):
             rel = f"skills/{name}/{leaf}"
             registry_rel = f"{plugin_relative}/{rel}"

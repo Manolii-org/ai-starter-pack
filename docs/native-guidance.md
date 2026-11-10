@@ -1,7 +1,7 @@
 # Shared adaptable-development policy delivery
 
 The standing policy is authored once in
-`.claude/skills/adaptable-development/SKILL.md` (version `1.0.1`, 276 body words).
+`.claude/skills/adaptable-development/SKILL.md` (version `1.0.2`, 347 body words).
 Detailed procedures use the existing skills system:
 `design-feature-adoption` and `compatibility-improvement`. Root triggers select
 them before implementation; unrelated trivial tasks remain proportionate.
@@ -127,3 +127,33 @@ engineering/design/testing tags for stricter consumer manifest checks. Policy an
 procedure bodies are unchanged from `1.0.0`; existing reviewed installations may
 retain that recorded version until their normal update. Report installed version
 and source hash explicitly; do not claim byte parity across different revisions.
+
+
+Policy `1.0.2` adds essential owner continuation to the existing native loaders:
+actionable feedback and CI repair, independent exact-head review, protected merge,
+and requested post-merge verification retain one owner and original commitments.
+External waits retain an accepted wake and bounded recovery. Native queued input
+requires qualification on the actual host; scheduled delivery alone proves no
+execution. Permissions, budgets and human holds stay authoritative. Detailed
+Codex Goal/Queue guidance is in the existing autonomy-follow-through skill.
+
+Deliver this policy through the existing bounded native-guidance and private-mirror
+policy refresh; do not upgrade an entire framework/runtime merely to obtain it.
+For a separate policy-only manifest, pass its path to
+`ai-resolve.py --native-guidance --manifest <path>` consistently for preview,
+apply and check, and retain the source revision in the native lock.
+Keep existing full-framework manifests, runtime pins, provider settings and local
+release instructions. Report installed, loaded and behavior-verified independently.
+
+Enable `feature_flags.native_guidance_continuation: true` in the policy manifest
+to deliver the detailed continuation skill and its cases through the same checked
+writer. The default three-skill mode remains supported. Preview private-mirror
+refresh with `build-registry.py --policy-only --include-continuation
+--registry-root <mirror>/registry --check`; omit `--check` to apply. This changes
+only eight public policy assets, preserving the mirror's framework version and
+universe content. A previously managed continuation asset cannot be silently
+removed by disabling the option or running an older installer.
+
+The manifest flag selects consumer installation; mirror refresh selects assets
+independently with `--include-continuation`. Select both for the detailed-skill
+rollout.

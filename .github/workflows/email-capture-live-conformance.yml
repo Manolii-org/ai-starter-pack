@@ -55,12 +55,15 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Start pinned receiver
         shell: bash
+        env:
+          RECEIVER_API_PORT: ${{ matrix.api_port }}
+          RECEIVER_IMAGE: ${{ matrix.image }}
         run: |
           set -euo pipefail
           docker run --detach --name email-capture-receiver \
             --publish "${EMAIL_CAPTURE_SMTP_PORT}:${EMAIL_CAPTURE_SMTP_PORT}" \
-            --publish "${{ matrix.api_port }}:${{ matrix.api_port }}" \
-            "${{ matrix.image }}"
+            --publish "${RECEIVER_API_PORT}:${RECEIVER_API_PORT}" \
+            "${RECEIVER_IMAGE}"
       - name: Await receiver health
         shell: bash
         run: |

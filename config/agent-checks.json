@@ -342,6 +342,75 @@
         ]
       ],
       "timeout_seconds": 240
+    },
+    {
+      "id": "assessment-sast-failure-contract",
+      "paths": [
+        ".github/workflows/pr-assessment*.yml",
+        "tests/test_assessment_sast_failure.py",
+        "tests/test_pr_assessment_draft_skip.py",
+        "config/agent-checks.json",
+        "tests/test_broad_agents_complete_input.py",
+        "tests/test_hydrate_assessment.py",
+        "tests/test_pr_assessment_runner_policy.py",
+        "scripts/lib/sast_evidence.py",
+        "scripts/safe_env.sh",
+        "tests/test_sast_evidence.py",
+        "tests/test_safe_env.py",
+        ".github/actions/validate-database-migrations/action.yml",
+        ".github/workflows/e2e-playwright-reusable.yml",
+        ".github/workflows/email-capture-live-conformance.yml",
+        ".github/workflows/integration-admission-reusable.yml",
+        ".github/workflows/pr-autofix-loop*.yml",
+        ".github/workflows/setup-env-secret.yml",
+        ".github/workflows/static-review.yml",
+        "tests/test_autofix_hardening.py",
+        "tests/test_e2e_activation.py",
+        "tests/test_integration_admission_workflow.py",
+        "tests/test_shared_gates_yaml.py",
+        ".github/actions/check-guarded-paths/action.yml",
+        ".github/workflows/coverage-ratchet-reusable.yml",
+        ".github/workflows/migration-run-gate-reusable.yml",
+        ".github/workflows/tier-gate-summary-reusable.yml",
+        ".github/workflows/publish-litellm-product-release.yml",
+        "tests/test_tier_reusables.py",
+        "tests/test_coverage_ratchet_activation.py",
+        "tests/test_guard_check.py",
+        "tests/test_litellm_product_asset.py"
+      ],
+      "tools": [
+        "python"
+      ],
+      "commands": [
+        [
+          "python3",
+          "-m",
+          "pytest",
+          "-q",
+          "tests/test_assessment_sast_failure.py",
+          "tests/test_pr_assessment_draft_skip.py",
+          "tests/test_pr_assessment_runner_policy.py",
+          "tests/test_broad_agents_complete_input.py",
+          "tests/test_hydrate_assessment.py",
+          "tests/test_sast_evidence.py",
+          "tests/test_safe_env.py",
+          "tests/test_autofix_hardening.py",
+          "tests/test_e2e_activation.py",
+          "tests/test_integration_admission_workflow.py",
+          "tests/test_shared_gates_yaml.py",
+          "tests/test_tier_reusables.py",
+          "tests/test_coverage_ratchet_activation.py",
+          "tests/test_guard_check.py",
+          "tests/test_litellm_product_asset.py"
+        ]
+      ],
+      "ci_sources": [
+        {
+          "path": ".github/workflows/plugin-eval-gate.yml",
+          "contains": "python3 -m pytest tests/ -q"
+        }
+      ],
+      "timeout_seconds": 120
     }
   ]
 }
