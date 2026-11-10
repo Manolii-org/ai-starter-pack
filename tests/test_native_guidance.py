@@ -89,7 +89,7 @@ def test_native_entrypoints_ignore_unrelated_lib_package(consumer, entrypoint):
     if entrypoint.endswith("build-registry.py"):
         assert target.read_bytes() == (REPO / ".claude/skills/design-feature-adoption/SKILL.md").read_bytes()
     else:
-        assert json.loads((root / native.LOCK).read_text())["policy_version"] == "1.0.1"
+        assert json.loads((root / native.LOCK).read_text())["policy_version"] == "1.0.2"
 
 
 def test_preview_install_repeat_and_check_preserve_local_guidance(consumer):
@@ -120,12 +120,12 @@ def test_update_preserves_new_local_text(consumer):
         stream.write(b"\nNew local rule survives.\n")
     # A reviewed update changes only the managed source, never local tails.
     skill = source / "registry/platform/framework/skills/adaptable-development/SKILL.md"
-    skill.write_text(skill.read_text().replace("version: 1.0.1", "version: 1.0.2")
+    skill.write_text(skill.read_text().replace("version: 1.0.2", "version: 1.0.3")
                      .replace("Build the current approved feature", "Implement the current approved feature"))
     assert run(consumer, "--check").returncode == 1
     assert run(consumer, "--apply").returncode == 0
     assert (root / "AGENTS.md").read_bytes().endswith(b"New local rule survives.\n")
-    assert json.loads((root / native.LOCK).read_text())["policy_version"] == "1.0.2"
+    assert json.loads((root / native.LOCK).read_text())["policy_version"] == "1.0.3"
 
 
 @pytest.mark.parametrize("path", ["AGENTS.md", ".claude/skills/design-feature-adoption/SKILL.md"])

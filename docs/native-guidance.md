@@ -1,7 +1,7 @@
 # Shared adaptable-development policy delivery
 
 The standing policy is authored once in
-`.claude/skills/adaptable-development/SKILL.md` (version `1.0.1`, 276 body words).
+`.claude/skills/adaptable-development/SKILL.md` (version `1.0.2`, 340 body words).
 Detailed procedures use the existing skills system:
 `design-feature-adoption` and `compatibility-improvement`. Root triggers select
 them before implementation; unrelated trivial tasks remain proportionate.
@@ -127,3 +127,19 @@ engineering/design/testing tags for stricter consumer manifest checks. Policy an
 procedure bodies are unchanged from `1.0.0`; existing reviewed installations may
 retain that recorded version until their normal update. Report installed version
 and source hash explicitly; do not claim byte parity across different revisions.
+
+
+Policy `1.0.2` adds essential owner continuation to the existing native loaders:
+actionable feedback and CI repair, independent exact-head review, protected merge,
+and requested post-merge verification retain one owner and original commitments.
+External waits retain an accepted wake and bounded recovery. Native queued input
+requires qualification on the actual host; scheduled delivery alone proves no
+execution. Permissions, budgets and human holds stay authoritative. Detailed
+Codex Goal/Queue guidance is in the existing autonomy-follow-through skill.
+
+Deliver this policy through the existing bounded native-guidance and private-mirror
+policy refresh; do not upgrade an entire framework/runtime merely to obtain it.
+For a separate policy-only manifest, pass its path with `--manifest` consistently
+to preview, apply and check, and retain the source revision in the native lock.
+Keep existing full-framework manifests, runtime pins, provider settings and local
+release instructions. Report installed, loaded and behavior-verified independently.
