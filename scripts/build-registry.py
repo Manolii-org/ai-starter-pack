@@ -50,10 +50,10 @@ def _policy_resolver():
     return sys.modules[name]
 
 
-def refresh_policy(target: Path, check: bool = False) -> int:
+def refresh_policy(target: Path, check: bool = False, include_continuation: bool = False) -> int:
     """Generate only public policy assets, preserving a mirror's other content.
 
-    These three authored skills are scope-neutral and contain no Jinja. A
+    The selected authored skills are scope-neutral and contain no Jinja. A
     bounded refresh avoids unrelated platform upgrades in private registries.
     """
     resolver = _policy_resolver()
@@ -67,9 +67,10 @@ def refresh_policy(target: Path, check: bool = False) -> int:
         if resolver._read_source(target, "platform/framework/.claude-plugin/plugin.json") is None:
             raise ValueError("policy refresh requires an established framework registry")
         outputs, snapshots = {}, {}
-        # Validate and capture ALL six sources and destinations before any
+        # Validate and capture ALL selected sources and destinations before any
         # materialisation. A late conflict must leave earlier assets untouched.
-        for name in POLICY_SKILLS:
+        names = POLICY_SKILLS + ("autonomy-follow-through",) if include_continuation else POLICY_SKILLS
+        for name in names:
             for leaf in ("SKILL.md", "evals/cases.json"):
                 rel = f"platform/framework/skills/{name}/{leaf}"
                 source = resolver._read_source(REPO, f".claude/skills/{name}/{leaf}")
@@ -136,12 +137,17 @@ def main() -> None:
                     help="refresh only the three policy skills in an established registry")
     ap.add_argument("--registry-root", type=Path,
                     help="with --policy-only, an established private mirror's registry directory")
+    ap.add_argument("--include-continuation", action="store_true",
+                    help="with --policy-only, also refresh the owner-continuation skill and cases")
     args = ap.parse_args()
     if args.registry_root and not args.policy_only:
         ap.error("--registry-root requires --policy-only")
+    if args.include_continuation and not args.policy_only:
+        ap.error("--include-continuation requires --policy-only")
     if args.policy_only:
         try:
-            status = refresh_policy((args.registry_root or REGISTRY).absolute(), args.check)
+            status = refresh_policy((args.registry_root or REGISTRY).absolute(), args.check,
+                                    args.include_continuation)
         except (OSError, ValueError) as exc:
             ap.error(str(exc))
         sys.exit(status)

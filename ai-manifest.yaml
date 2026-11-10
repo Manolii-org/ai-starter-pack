@@ -21,6 +21,7 @@ requires:
   # - plugin: platform/om
   #   ref: "^0.1"
 
-feature_flags: {}
+feature_flags:
+  native_guidance_continuation: true
 
 surfaces: [claude-code, codex, cursor, devin]
