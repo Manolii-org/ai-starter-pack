@@ -49,7 +49,7 @@ def consumer(tmp_path, monkeypatch):
 
 def run(consumer, *flags, entrypoint="scripts/ai-resolve.py"):
     root, source = consumer
-    return subprocess.run([sys.executable, str(REPO / entrypoint),
+    return subprocess.run([sys.executable, "-B", str(REPO / entrypoint),
                            "--repo-root", str(root), "--registry", str(source),
                            "--native-guidance", *flags],
                           capture_output=True, text=True, timeout=30)
