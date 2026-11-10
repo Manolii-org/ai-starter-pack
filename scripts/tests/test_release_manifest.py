@@ -134,7 +134,7 @@ class ManifestTests(unittest.TestCase):
             root = Path(directory)
             for target in ["schemas", "plugin/manolii-framework/schemas", "registry/platform/framework/schemas"]:
                 (root / target).mkdir(parents=True)
-                for name in ["release-adoption.v1.schema.json", "release-manifest.v1.schema.json"]:
+                for name in ["release-adoption.v1.schema.json", "release-manifest.v1.schema.json", "release-manifest.v2.schema.json"]:
                     (root / target / name).write_text("fixture")
             comparisons = [command for command in recipe["commands"]
                            if len(command) == 3 and command[1] == "-c"
@@ -368,33 +368,30 @@ class AdmissionStateTests(unittest.TestCase):
         with self.assertRaises(state.StateConflict):
             state.reserve(reserved, child, now=ADMISSION_NOW)
 
-    def test_state_store_wire_uses_custom_ref_and_non_force_cas(self):
+    def test_state_store_uses_verified_parent_and_git_wire_publication(self):
         from unittest.mock import Mock
         store = state.GitHubStateStore("example/product", "production", "fixture-token")
-        store.request = Mock(side_effect=[{"object": {"sha": "a" * 40}},
-                                          {"sha": "b" * 40}, {"sha": "c" * 40},
-                                          {"sha": "d" * 40}, {"ref": "refs/release-state/production", "object": {"sha": "d" * 40}}])
+        store.request = Mock(return_value={"object": {"sha": "a" * 40}})
+        store._write_state = Mock(return_value="d" * 40)
         retained = {"schema_version": 1, "active": None, "continuations": {}}
         self.assertEqual(store.compare_and_swap("a" * 40, retained), "d" * 40)
-        commit_call = store.request.call_args_list[3]
-        self.assertEqual(commit_call.args[2]["parents"], ["a" * 40])
-        last = store.request.call_args_list[-1]
-        self.assertEqual(last.args, ("PATCH", "git/refs/release-state/production",
-                                    {"sha": "d" * 40, "force": False}))
-        store.request.reset_mock(side_effect=True)
-        store.request.side_effect = [{"object": {"sha": "e" * 40}}]
+        store.request.assert_called_once_with("GET", "git/ref/release-state/production", missing=True)
+        self.assertEqual(store._write_state.call_args.args[0], "a" * 40)
+        self.assertEqual(json.loads(store._write_state.call_args.args[1]), retained)
+        store._write_state.reset_mock()
+        store.request.return_value = {"object": {"sha": "e" * 40}}
         with self.assertRaises(state.StateConflict):
             store.compare_and_swap("a" * 40, retained)
-        self.assertEqual(store.request.call_count, 1)
+        store._write_state.assert_not_called()
 
-    def test_two_cas_children_cannot_both_commit(self):
+    def test_ambiguous_git_publication_does_not_grant_reservation(self):
         from unittest.mock import Mock
         store = state.GitHubStateStore("example/product", "production", "fixture-token")
-        store.request = Mock(side_effect=[{"object": {"sha": "a" * 40}},
-                                          {"sha": "b" * 40}, {"sha": "c" * 40},
-                                          {"sha": "d" * 40}, state.StateConflict("non-fast-forward")])
-        with self.assertRaises(state.StateConflict):
+        store.request = Mock(return_value={"object": {"sha": "a" * 40}})
+        store._write_state = Mock(side_effect=state.StateUnavailable("unknown write result"))
+        with self.assertRaises(state.StateUnavailable):
             store.compare_and_swap("a" * 40, {"schema_version": 1, "active": None, "continuations": {}})
+        self.assertEqual(store._write_state.call_count, 1)
 
     def test_denied_state_read_never_becomes_empty_legacy_state(self):
         from unittest.mock import Mock
@@ -437,17 +434,65 @@ class ApprovalCapabilityTests(unittest.TestCase):
                 self.assertIs(result["execution_authorized"], False)
                 self.assertEqual(opener.return_value.open.call_count, 1)
 
-    def test_state_commit_nonce_prevents_identical_concurrent_child_identity(self):
-        from unittest.mock import Mock
-        messages = []
+    def test_git_publication_binds_lease_and_keeps_token_out_of_argv(self):
+        from unittest.mock import patch
+        from types import SimpleNamespace
+        calls = []
+        def run(argv, **kwargs):
+            calls.append((argv, kwargs))
+            output = "a" * 40 if argv[3] in {"hash-object", "mktree", "commit-tree"} else ""
+            return SimpleNamespace(returncode=0, stdout=output, stderr="")
         store = state.GitHubStateStore("example/product", "production", "fixture-token")
-        for _ in range(2):
-            store.request = Mock(side_effect=[{"object": {"sha": "a" * 40}},
-                                              {"sha": "b" * 40}, {"sha": "c" * 40},
-                                              {"sha": "d" * 40}, {"ref": "refs/release-state/production", "object": {"sha": "d" * 40}}])
-            store.compare_and_swap("a" * 40, {"schema_version": 1, "active": None, "continuations": {}})
-            messages.append(store.request.call_args_list[3].args[2]["message"])
+        with patch.object(state.subprocess, "run", side_effect=run):
+            store._write_state("b" * 40, "{}")
+            store._write_state("b" * 40, "{}")
+        push = calls[-1]
+        self.assertIn("--force-with-lease=refs/release-state/production:" + "b" * 40, push[0])
+        self.assertIn("--atomic", push[0])
+        self.assertNotIn("fixture-token", " ".join(push[0]))
+        self.assertEqual(push[1]["env"]["GIT_CONFIG_KEY_2"], "credential.helper")
+        self.assertEqual(push[1]["env"]["GIT_CONFIG_VALUE_2"], "")
+        messages = [options['input'] for argv, options in calls if argv[3] == 'commit-tree']
         self.assertNotEqual(messages[0], messages[1])
+
+    def test_native_wire_conflict_requires_exact_ref_expected_old_and_different_live_oid(self):
+        from unittest.mock import patch
+        from types import SimpleNamespace
+        ref = 'refs/release-state/production'
+        expected, actual, proposed = 'b' * 40, 'c' * 40, 'a' * 40
+        message = f"[remote rejected] (cannot lock ref '{ref}': is at {actual} but expected {expected})"
+        cases = [(message, ref, state.StateConflict),
+                 ('[rejected] (stale info)', ref, state.StateConflict),
+                 (message.replace(ref, ref + '-other'), ref, state.StateUnavailable),
+                 (message.replace(actual, expected), ref, state.StateUnavailable),
+                 (message.replace('expected ' + expected, 'expected ' + actual), ref, state.StateUnavailable),
+                 (message.replace(actual, 'invalid'), ref, state.StateUnavailable),
+                 (message, ref + '-other', state.StateUnavailable),
+                 ('[remote rejected] (atomic transaction failed)', ref, state.StateUnavailable),
+                 ('[remote rejected] (permission denied)', ref, state.StateUnavailable),
+                 ('unexpected [rejected] (stale info)', ref, state.StateUnavailable)]
+        for status, reported_ref, error in cases:
+            def run(argv, **kwargs):
+                if argv[3] == 'push':
+                    return SimpleNamespace(returncode=1, stderr='unavailable',
+                        stdout=f'To https://github.com/example/product.git\n!\t{proposed}:{reported_ref}\t{status}\nDone\n')
+                return SimpleNamespace(returncode=0, stdout=proposed, stderr='')
+            with self.subTest(status=status, reported_ref=reported_ref), patch.object(state.subprocess, 'run', side_effect=run):
+                store = state.GitHubStateStore('example/product', 'production', 'fixture-token')
+                with self.assertRaises(error):
+                    store._write_state(expected, '{}')
+
+    def test_native_wire_timeout_still_requires_reconciliation(self):
+        from unittest.mock import patch
+        from types import SimpleNamespace
+        def run(argv, **kwargs):
+            if argv[3] == 'push':
+                raise subprocess.TimeoutExpired(argv, 30)
+            return SimpleNamespace(returncode=0, stdout='a' * 40, stderr='')
+        with patch.object(state.subprocess, 'run', side_effect=run):
+            store = state.GitHubStateStore('example/product', 'production', 'fixture-token')
+            with self.assertRaises(state.StateUnavailable):
+                store._write_state('b' * 40, '{}')
 
 
 
