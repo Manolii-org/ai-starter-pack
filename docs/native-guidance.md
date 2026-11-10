@@ -139,8 +139,9 @@ Codex Goal/Queue guidance is in the existing autonomy-follow-through skill.
 
 Deliver this policy through the existing bounded native-guidance and private-mirror
 policy refresh; do not upgrade an entire framework/runtime merely to obtain it.
-For a separate policy-only manifest, pass its path with `--manifest` consistently
-to preview, apply and check, and retain the source revision in the native lock.
+For a separate policy-only manifest, pass its path to
+`ai-resolve.py --native-guidance --manifest <path>` consistently for preview,
+apply and check, and retain the source revision in the native lock.
 Keep existing full-framework manifests, runtime pins, provider settings and local
 release instructions. Report installed, loaded and behavior-verified independently.
 
@@ -152,3 +153,7 @@ refresh with `build-registry.py --policy-only --include-continuation
 only eight public policy assets, preserving the mirror's framework version and
 universe content. A previously managed continuation asset cannot be silently
 removed by disabling the option or running an older installer.
+
+The manifest flag selects consumer installation; mirror refresh selects assets
+independently with `--include-continuation`. Select both for the detailed-skill
+rollout.
