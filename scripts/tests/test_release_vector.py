@@ -105,7 +105,10 @@ class ReleaseVectorTests(unittest.TestCase):
             lambda v: v['components'][0].update(config_sha256='0' * 64),
             lambda v: v['components'][0].update(features_sha256='0' * 64),
             lambda v: v['databases'][1].update(migration_sha256='0' * 64),
-            lambda v: v.update(control_sha='0' * 40), lambda v: v.update(policy_sha256='0' * 64)]
+            lambda v: v.update(control_sha='0' * 40), lambda v: v.update(policy_sha256='0' * 64),
+            lambda v: v.update(profile_version='changed-profile'),
+            lambda v: v['recovery'].update(allowed_actions=['hold', 'forward-fix']),
+            lambda v: v['recovery'].update(owner='another-owner')]
         for mutate in mutations:
             value = subject()
             mutate(value)

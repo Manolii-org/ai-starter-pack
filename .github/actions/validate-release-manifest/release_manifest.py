@@ -51,7 +51,7 @@ def load_json(path: Path) -> dict:
     return result
 
 
-def canonical_bytes(value: dict) -> bytes:
+def canonical_bytes(value: object) -> bytes:
     """v1 identity: sorted keys, compact JSON, literal Unicode, UTF-8, no NaN."""
     try:
         return json.dumps(value, sort_keys=True, separators=(",", ":"),
@@ -60,7 +60,7 @@ def canonical_bytes(value: dict) -> bytes:
         raise ManifestError("subject cannot be canonically encoded") from exc
 
 
-def digest(value: dict) -> str:
+def digest(value: object) -> str:
     return hashlib.sha256(canonical_bytes(value)).hexdigest()
 
 
@@ -142,8 +142,8 @@ def prepare(subject: dict, *, schema_version: int = 1) -> dict:
 def qualification_subject(subject: dict) -> dict:
     """Exact combined inputs; evidence does not recursively hash itself."""
     return {key: copy.deepcopy(subject[key]) for key in (
-        "entity", "environment", "control_sha", "capability_sha", "policy_sha256",
-        "config_sha256", "components", "databases", "unchanged_components")}
+        "repo", "entity", "environment", "control_sha", "capability_sha", "profile_version",
+        "policy_sha256", "config_sha256", "components", "databases", "unchanged_components", "recovery")}
 
 
 def validate_native_binding(manifest: dict, *, expected_release_id: str,
@@ -160,6 +160,8 @@ def validate_native_binding(manifest: dict, *, expected_release_id: str,
             or not isinstance(expected_controller_sha, str) or not re.fullmatch(r"[0-9a-f]{40}", expected_controller_sha)):
         raise ManifestError("native binding requires independent exact expected identities")
     validate(manifest, expected_release_id=expected_release_id)
+    if manifest["schema_version"] != 2:
+        raise ManifestError("native execution binding requires an explicit v2 execution subject")
     subject = manifest["subject"]
     if subject["control_sha"] != expected_controller_sha:
         raise ManifestError("controller differs from reviewed expected revision")
