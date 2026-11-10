@@ -440,42 +440,91 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Install report-producing scanners
+        # Same providers and rule selection; pins match the portable scanner contract.
+        run: python3 -m pip install --quiet 'semgrep==1.182.1' 'bandit==1.9.4'
+
       - name: Run Semgrep
-        uses: returntocorp/semgrep-action@713efdd345f3035192eaa63f56867b88e63e4e5d # v1
-        continue-on-error: true
-        with:
-          config: auto
-          output: /tmp/semgrep-results.json
-          json: true
+        id: semgrep
+        run: |
+          rm -f /tmp/semgrep-results.json /tmp/bandit-results.json
+          set +e
+          semgrep scan --config auto --json --error --output /tmp/semgrep-results.json .
+          status=$?
+          set -e
+          case "$status" in
+            0|1) printf 'exit_code=%s\n' "$status" >> "$GITHUB_OUTPUT" ;;
+            *) echo "::error::Semgrep tool execution failed ($status)."; exit "$status" ;;
+          esac
 
       - name: Run Bandit (Python)
+        id: bandit
         if: hashFiles('**/*.py') != ''
         run: |
-          pip install bandit -q
-          bandit -r . -f json -o /tmp/bandit-results.json --exclude ./.venv,./node_modules || true
+          set +e
+          bandit -r . -f json -o /tmp/bandit-results.json --exclude ./.venv,./node_modules
+          status=$?
+          set -e
+          case "$status" in
+            0|1) printf 'exit_code=%s\n' "$status" >> "$GITHUB_OUTPUT" ;;
+            *) echo "::error::Bandit tool execution failed ($status)."; exit "$status" ;;
+          esac
 
       - name: Merge SAST findings
+        env:
+          SEMGREP_EXIT: ${{ steps.semgrep.outputs.exit_code }}
+          BANDIT_EXIT: ${{ steps.bandit.outputs.exit_code }}
+          BANDIT_REQUIRED: ${{ hashFiles('**/*.py') != '' }}
         run: |
-          mkdir -p .ai
-          python3 -c "
+          python3 <<'PY'
           import json, os
+          from pathlib import Path
+
+          output = Path('.ai/sast-findings.json')
+          if output.parent.is_symlink() or output.is_symlink():
+              raise ValueError('SAST output must not be a symlink')
+          output.parent.mkdir(exist_ok=True)
+          output.unlink(missing_ok=True)
+
+          def report(path, exit_code, scanner):
+              if exit_code not in {'0', '1'}:
+                  raise ValueError(f'{scanner}: missing or unsuccessful native exit status')
+              data = json.loads(Path(path).read_text())
+              if (not isinstance(data, dict) or not isinstance(data.get('results'), list)
+                      or data.get('errors') != []):
+                  raise ValueError(f'{scanner}: incomplete or malformed report')
+              if exit_code == '1' and not data['results']:
+                  raise ValueError(f'{scanner}: nonzero exit without findings')
+              if scanner == 'semgrep':
+                  scanned = data.get('paths', {}).get('scanned')
+                  if data.get('version') != '1.182.1' or not isinstance(scanned, list) or not scanned:
+                      raise ValueError('semgrep: missing version or scanned-file evidence')
+              else:
+                  metrics = data.get('metrics')
+                  if not isinstance(metrics, dict) or not any(k != '_totals' for k in metrics):
+                      raise ValueError('bandit: missing scanned-file evidence')
+              return data['results']
+
+          def finding(rule, file, line, message, severity, scanner):
+              if (not all(isinstance(v, str) and v for v in [rule, file, message, severity])
+                      or type(line) is not int or line < 1):
+                  raise ValueError(f'{scanner}: malformed finding')
+              return {'finding_id': f'{scanner}-{rule}-{file}', 'rule': rule,
+                      'file': file, 'line': line, 'message': message, 'severity': severity.upper()}
+
           findings = []
-          for path in ['/tmp/semgrep-results.json', '/tmp/bandit-results.json']:
-              if os.path.exists(path):
-                  try:
-                      data = json.load(open(path))
-                      # Normalise to common schema
-                      if 'results' in data and data['results'] and 'check_id' in data['results'][0]:  # semgrep
-                          for r in data['results']:
-                              findings.append({'finding_id': f'semgrep-{r[\"check_id\"]}-{r[\"path\"]}', 'rule': r['check_id'], 'file': r['path'], 'line': r['start']['line'], 'message': r['extra']['message'], 'severity': r['extra']['severity'].upper()})
-                      elif 'results' in data:  # bandit
-                          for r in data.get('results', []):
-                              findings.append({'finding_id': f'bandit-{r[\"test_id\"]}-{r[\"filename\"]}', 'rule': r['test_id'], 'file': r['filename'], 'line': r['line_number'], 'message': r['issue_text'], 'severity': r['issue_severity'].upper()})
-                  except Exception as e:
-                      print(f'Warning: could not parse {path}: {e}')
-          json.dump(findings, open('.ai/sast-findings.json', 'w'), indent=2)
-          print(f'Merged {len(findings)} SAST findings')
-          "
+          for r in report('/tmp/semgrep-results.json', os.environ.get('SEMGREP_EXIT'), 'semgrep'):
+              findings.append(finding(r['check_id'], r['path'], r['start']['line'],
+                                      r['extra']['message'], r['extra']['severity'], 'semgrep'))
+          if os.environ.get('BANDIT_REQUIRED') == 'true':
+              for r in report('/tmp/bandit-results.json', os.environ.get('BANDIT_EXIT'), 'bandit'):
+                  findings.append(finding(r['test_id'], r['filename'], r['line_number'],
+                                          r['issue_text'], r['issue_severity'], 'bandit'))
+          elif os.environ.get('BANDIT_REQUIRED') != 'false':
+              raise ValueError('Bandit applicability must be explicit')
+          output.write_text(json.dumps(findings, indent=2))
+          print(f'Merged {len(findings)} SAST findings from completed scanners')
+          PY
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:

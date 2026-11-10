@@ -32,6 +32,18 @@ drafts.
 
 Required fast-tier names and secret-scan stay unconditional on drafts.
 
+SAST completion must be real before specialist or Judge work can use its
+findings. Both Assessment forms use pinned Semgrep and Bandit CLI reports;
+`--config auto` and the existing whole-repository scan scope remain. The old
+Semgrep action accepted only `config`/`publishToken`, so its `output`/`json`
+arguments did not establish a report. Missing, malformed, scanner-error or
+scope-less reports now fail the SAST job, preserving its existing name.
+Native exit 1 with valid findings remains a completed scan; other native errors
+fail. Bandit may be inapplicable only when the checkout has no Python files.
+Empty findings from a complete scan remain valid. This is failure propagation,
+not a measured saving or a pinned remote Semgrep rule snapshot. Roll out the
+workflow repair through owning reviewed pins; it grants no release authority.
+
 ## 2. Do not add unfiltered `pull_request` browser / local-stack jobs
 
 A `pull_request` workflow that installs Playwright browsers or runs
