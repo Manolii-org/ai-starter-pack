@@ -108,6 +108,11 @@ def test_runner_jobs_hydrate(job: str) -> None:
     names = [str(s.get("name", "")) for s in steps]
     assert "Probe assessment runtime" in names, f"{job} does not probe for the runtime"
     assert "Hydrate assessment runtime" in names, f"{job} does not hydrate"
+    for name in ("Probe assessment runtime", "Hydrate assessment runtime"):
+        step = next(s for s in steps if s.get("name") == name)
+        assert step["env"]["ASSESSMENT_EVENT"] == "${{ github.event_name }}"
+        if name == "Hydrate assessment runtime":
+            assert step["env"]["PACK_REF"] == "${{ inputs.pack_ref }}"
 
 
 def test_sast_job_is_not_hydrated() -> None:
@@ -129,7 +134,7 @@ def test_hydration_never_overwrites_caller_files() -> None:
     assert '"$FORCE" != "true" && -e "$f"' in body, (
         "hydration must skip files the caller already provides on non-PR triggers"
     )
-    assert '"${{ github.event_name }}" == "pull_request"' in body, (
+    assert '"${ASSESSMENT_EVENT}" == "pull_request"' in body, (
         "hydration must force-overwrite runtime files on pull_request triggers"
     )
 
@@ -141,8 +146,8 @@ def test_probe_forces_hydration_on_pull_request() -> None:
     body = next(
         s["run"] for s in steps if str(s.get("name", "")) == "Probe assessment runtime"
     )
-    assert '"${{ github.event_name }}" == "pull_request"' in body
-    assert body.index('"${{ github.event_name }}" == "pull_request"') < body.index(
+    assert '"${ASSESSMENT_EVENT}" == "pull_request"' in body
+    assert body.index('"${ASSESSMENT_EVENT}" == "pull_request"') < body.index(
         "elif [[ -n \"$missing\" ]]"
     )
 
@@ -212,7 +217,7 @@ def test_real_hydration_step_closes_dependencies_preserving_trusted_overrides(tm
     steps = _workflow()["jobs"][job]["steps"]
     body = next(s["run"] for s in steps if s.get("name") == "Hydrate assessment runtime")
     body = body.replace("${{ github.event_name }}", trigger).replace("${{ inputs.pack_ref }}", "offline-frozen-source")
-    env = {"PATH": os.defpath, "ASSESSMENT_RUNTIME_FILES": " ".join(listed)}
+    env = {"PATH": os.defpath, "ASSESSMENT_RUNTIME_FILES": " ".join(listed), "ASSESSMENT_EVENT": trigger, "PACK_REF": "offline-frozen-source"}
     subprocess.run(["bash", "-c", body], cwd=tmp_path, env=env, check=True,
                    capture_output=True, text=True, timeout=15)
     assert not scratch.exists()
@@ -243,6 +248,7 @@ def test_native_workflow_restores_sanitizer_with_trusted_runtime(job):
     workflow = yaml.safe_load((REPO_ROOT / ".github/workflows/pr-assessment.yml").read_text())
     step = next(s for s in workflow["jobs"][job]["steps"]
                 if s.get("name") == "Restore trusted runtime from PR base")
+    assert step["env"]["BASE_SHA"] == "${{ github.event.pull_request.base.sha }}"
     assert "for p in .claude scripts .ai/security CLAUDE.md AGENTS.md; do" in step["run"]
     assert 'git checkout "$BASE_SHA" -- "$p"' in step["run"]
     assert 'rm -rf "$p"' in step["run"]
@@ -282,7 +288,7 @@ def test_hydration_refuses_redirected_new_dependency_without_touching_outside(tm
         source.parent.mkdir(parents=True, exist_ok=True)
         source.write_text("replacement source bytes")
     result = subprocess.run(["bash", "-c", body], cwd=workspace,
-        env={"PATH": os.defpath, "ASSESSMENT_RUNTIME_FILES": ".ai/security/token-shapes.json scripts/lib/protected_review.py"},
+        env={"PATH": os.defpath, "ASSESSMENT_EVENT": "pull_request", "PACK_REF": "offline", "ASSESSMENT_RUNTIME_FILES": ".ai/security/token-shapes.json scripts/lib/protected_review.py"},
         capture_output=True, text=True, timeout=15)
     assert result.returncode == 1 and "::error::Assessment dependency" in result.stderr
     assert sentinel.read_text() == "retain outside target unchanged"
@@ -316,7 +322,7 @@ def test_native_nested_catalog_restore_refuses_unsafe_state_root(tmp_path, job, 
                 if s.get("name") == "Restore trusted runtime from PR base")
     body = body.replace("${{ github.event.pull_request.base.sha }}", "a" * 40)
     result = subprocess.run(["bash", "-c", body], cwd=workspace,
-        env={"PATH": str(tools) + os.pathsep + os.defpath}, capture_output=True,
+        env={"PATH": str(tools) + os.pathsep + os.defpath, "BASE_SHA": "a" * 40}, capture_output=True,
         text=True, timeout=15)
     assert result.returncode == 1 and "Assessment state root" in result.stderr
     assert sentinel.read_text() == "retain outside subtree"

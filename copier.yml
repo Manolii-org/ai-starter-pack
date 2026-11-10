@@ -265,6 +265,7 @@ _exclude:
   # also carries its own skipif guard, so an instance that already has a copy
   # skips rather than fails.
   - tests/test_hydrate_assessment.py
+  - tests/test_assessment_sast_failure.py
   # Template-repo-only test: asserts on the pack root's .devin-plugin/plugin.json
   # meta-plugin, which is not rendered; shipping it aborts the instance's pytest
   # at collection.

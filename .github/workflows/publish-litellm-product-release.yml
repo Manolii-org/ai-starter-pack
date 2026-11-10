@@ -42,7 +42,9 @@ jobs:
           echo "tag=litellm-product-v$version" >> "$GITHUB_OUTPUT"
 
       - name: Build deterministic asset
-        run: python3 scripts/build-litellm-product-asset.py --version '${{ steps.release.outputs.version }}'
+        env:
+          ASSET_VERSION: ${{ steps.release.outputs.version }}
+        run: python3 scripts/build-litellm-product-asset.py --version "$ASSET_VERSION"
 
       - name: Attest asset provenance
         uses: actions/attest-build-provenance@43d14bc2b83dec42d39ecae14e916627a18bb661 # v3

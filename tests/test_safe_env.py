@@ -158,6 +158,8 @@ export TOKEN=prefix_and_rest_of_token
 source {self.safe_env_script}
 safe_prefix TOKEN 001
 safe_prefix TOKEN 000
+safe_prefix TOKEN 00008
+safe_prefix TOKEN 00009
 safe_prefix TOKEN 18446744073709551615
 """
         output, _ = self.run_bash(script)
@@ -166,6 +168,8 @@ safe_prefix TOKEN 18446744073709551615
         self.assertEqual(lines[1], "p")
         # overflowing decimal clamps to the 8-char cap, not a 1-char wrap
         self.assertEqual(lines[2], "prefix_a")
+        self.assertEqual(lines[3], "prefix_a")
+        self.assertEqual(lines[4], "prefix_a")
 
     def test_safe_prefix_short_secret_length_only(self):
         """len<12: a prefix would expose too much of the value — length only."""

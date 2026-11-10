@@ -86,40 +86,10 @@
       "severity": "Low"
     },
     {
-      "fingerprint": "4092faca39207f25",
-      "ident": "template-injection",
-      "path": ".github/workflows/coverage-ratchet-reusable.yml",
-      "severity": "High"
-    },
-    {
-      "fingerprint": "9a2e1f00d6059bf2",
-      "ident": "template-injection",
-      "path": ".github/workflows/coverage-ratchet-reusable.yml",
-      "severity": "High"
-    },
-    {
-      "fingerprint": "ca110bce81cd9fc1",
-      "ident": "template-injection",
-      "path": ".github/workflows/coverage-ratchet-reusable.yml",
-      "severity": "High"
-    },
-    {
       "fingerprint": "6a99f272b8e55050",
       "ident": "self-repository",
       "path": ".github/workflows/e2e-playwright-reusable.yml",
       "severity": "Low"
-    },
-    {
-      "fingerprint": "12389add91c287f1",
-      "ident": "template-injection",
-      "path": ".github/workflows/e2e-playwright-reusable.yml",
-      "severity": "High"
-    },
-    {
-      "fingerprint": "eb8e7b3583fef98b",
-      "ident": "template-injection",
-      "path": ".github/workflows/e2e-playwright-reusable.yml",
-      "severity": "High"
     },
     {
       "fingerprint": "d45e6042ef02f11f",
@@ -132,30 +102,6 @@
       "ident": "artipacked",
       "path": ".github/workflows/email-capture-live-conformance.yml",
       "severity": "Medium"
-    },
-    {
-      "fingerprint": "3daa48375a7e35aa",
-      "ident": "template-injection",
-      "path": ".github/workflows/integration-admission-reusable.yml",
-      "severity": "High"
-    },
-    {
-      "fingerprint": "3daa48375a7e35aa",
-      "ident": "template-injection",
-      "path": ".github/workflows/integration-admission-reusable.yml",
-      "severity": "High"
-    },
-    {
-      "fingerprint": "331d439b84b3f7d5",
-      "ident": "template-injection",
-      "path": ".github/workflows/migration-run-gate-reusable.yml",
-      "severity": "High"
-    },
-    {
-      "fingerprint": "801d16a30734a9f3",
-      "ident": "template-injection",
-      "path": ".github/workflows/migration-run-gate-reusable.yml",
-      "severity": "High"
     },
     {
       "fingerprint": "4647c7a3e3a860fd",
@@ -188,68 +134,14 @@
       "severity": "Medium"
     },
     {
-      "fingerprint": "d6f78910f1db79b5",
-      "ident": "template-injection",
-      "path": ".github/workflows/pr-assessment-reusable.yml",
-      "severity": "High"
-    },
-    {
-      "fingerprint": "d6f78910f1db79b5",
-      "ident": "template-injection",
-      "path": ".github/workflows/pr-assessment-reusable.yml",
-      "severity": "High"
-    },
-    {
-      "fingerprint": "d6f78910f1db79b5",
-      "ident": "template-injection",
-      "path": ".github/workflows/pr-assessment-reusable.yml",
-      "severity": "High"
-    },
-    {
-      "fingerprint": "d6f78910f1db79b5",
-      "ident": "template-injection",
-      "path": ".github/workflows/pr-assessment-reusable.yml",
-      "severity": "High"
-    },
-    {
       "fingerprint": "ed44922c8b92f9ad",
       "ident": "excessive-permissions",
       "path": ".github/workflows/pr-assessment.yml",
       "severity": "High"
     },
     {
-      "fingerprint": "0589058457c2c450",
-      "ident": "template-injection",
-      "path": ".github/workflows/pr-assessment.yml",
-      "severity": "High"
-    },
-    {
-      "fingerprint": "2766d8120d61e13e",
-      "ident": "template-injection",
-      "path": ".github/workflows/pr-assessment.yml",
-      "severity": "High"
-    },
-    {
-      "fingerprint": "2766d8120d61e13e",
-      "ident": "template-injection",
-      "path": ".github/workflows/pr-assessment.yml",
-      "severity": "High"
-    },
-    {
-      "fingerprint": "de25c592c16b0c1b",
-      "ident": "template-injection",
-      "path": ".github/workflows/pr-assessment.yml",
-      "severity": "High"
-    },
-    {
       "fingerprint": "365b05175c9d4266",
       "ident": "bot-conditions",
-      "path": ".github/workflows/pr-autofix-loop-reusable.yml",
-      "severity": "High"
-    },
-    {
-      "fingerprint": "d3bd002550404ff6",
-      "ident": "template-injection",
       "path": ".github/workflows/pr-autofix-loop-reusable.yml",
       "severity": "High"
     },
@@ -290,22 +182,10 @@
       "severity": "High"
     },
     {
-      "fingerprint": "96a8e6b2bff59ba6",
-      "ident": "template-injection",
-      "path": ".github/workflows/pr-autofix-loop.yml",
-      "severity": "High"
-    },
-    {
       "fingerprint": "838acb6bcb1c979f",
       "ident": "artipacked",
       "path": ".github/workflows/publish-litellm-product-release.yml",
       "severity": "Medium"
-    },
-    {
-      "fingerprint": "1f0207428e35d07d",
-      "ident": "template-injection",
-      "path": ".github/workflows/publish-litellm-product-release.yml",
-      "severity": "Informational"
     },
     {
       "fingerprint": "c4be20f52b16c742",
@@ -348,24 +228,6 @@
       "ident": "overprovisioned-secrets",
       "path": ".github/workflows/setup-env-secret.yml",
       "severity": "Medium"
-    },
-    {
-      "fingerprint": "68d61cdf446b3540",
-      "ident": "template-injection",
-      "path": ".github/workflows/setup-env-secret.yml",
-      "severity": "High"
-    },
-    {
-      "fingerprint": "68d61cdf446b3540",
-      "ident": "template-injection",
-      "path": ".github/workflows/setup-env-secret.yml",
-      "severity": "High"
-    },
-    {
-      "fingerprint": "fda869c69eca0990",
-      "ident": "template-injection",
-      "path": ".github/workflows/setup-env-secret.yml",
-      "severity": "High"
     },
     {
       "fingerprint": "468736f81d203b62",
@@ -414,42 +276,6 @@
       "ident": "excessive-permissions",
       "path": ".github/workflows/static-review.yml",
       "severity": "Medium"
-    },
-    {
-      "fingerprint": "1e5f243ee06b2245",
-      "ident": "template-injection",
-      "path": ".github/workflows/static-review.yml",
-      "severity": "High"
-    },
-    {
-      "fingerprint": "6ae823c005779847",
-      "ident": "template-injection",
-      "path": ".github/workflows/static-review.yml",
-      "severity": "High"
-    },
-    {
-      "fingerprint": "912c59acba21d753",
-      "ident": "template-injection",
-      "path": ".github/workflows/static-review.yml",
-      "severity": "High"
-    },
-    {
-      "fingerprint": "91da4ed11aca4b21",
-      "ident": "template-injection",
-      "path": ".github/workflows/static-review.yml",
-      "severity": "High"
-    },
-    {
-      "fingerprint": "eab6884836533de3",
-      "ident": "template-injection",
-      "path": ".github/workflows/tier-gate-summary-reusable.yml",
-      "severity": "High"
-    },
-    {
-      "fingerprint": "f4d971fe3a9890f2",
-      "ident": "template-injection",
-      "path": ".github/workflows/tier-gate-summary-reusable.yml",
-      "severity": "High"
     },
     {
       "fingerprint": "37f563747a51914e",
