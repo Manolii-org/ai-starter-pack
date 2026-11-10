@@ -1,7 +1,7 @@
 # Shared adaptable-development policy delivery
 
 The standing policy is authored once in
-`.claude/skills/adaptable-development/SKILL.md` (version `1.0.2`, 340 body words).
+`.claude/skills/adaptable-development/SKILL.md` (version `1.0.2`, 347 body words).
 Detailed procedures use the existing skills system:
 `design-feature-adoption` and `compatibility-improvement`. Root triggers select
 them before implementation; unrelated trivial tasks remain proportionate.
@@ -143,3 +143,12 @@ For a separate policy-only manifest, pass its path with `--manifest` consistentl
 to preview, apply and check, and retain the source revision in the native lock.
 Keep existing full-framework manifests, runtime pins, provider settings and local
 release instructions. Report installed, loaded and behavior-verified independently.
+
+Enable `feature_flags.native_guidance_continuation: true` in the policy manifest
+to deliver the detailed continuation skill and its cases through the same checked
+writer. The default three-skill mode remains supported. Preview private-mirror
+refresh with `build-registry.py --policy-only --include-continuation
+--registry-root <mirror>/registry --check`; omit `--check` to apply. This changes
+only eight public policy assets, preserving the mirror's framework version and
+universe content. A previously managed continuation asset cannot be silently
+removed by disabling the option or running an older installer.
