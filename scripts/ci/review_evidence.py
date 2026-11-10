@@ -274,8 +274,8 @@ def coderabbit_summary_candidate(body):
                 and not normalized.startswith(REPLY_PREFIX)))
 
 
-def clean_coderabbit_body(body, head):
-    """Pure shape check, used for fetch planning only until provenance passes."""
+def _clean_recent_review_body(body, head):
+    """Recognize the original recent-review publication without relaxing it."""
     body = coderabbit_body(body)
     if not body.startswith(PREFIX):
         return False
@@ -306,6 +306,54 @@ def clean_coderabbit_body(body, head):
         return False
     return (isinstance(value, dict) and value.get("kind") == "reviewed"
             and value.get("sourceCommitId") == head and value.get("coveredCommitId") == head)
+
+
+def clean_coderabbit_body(body, head):
+    """Recognize an explicit clean verdict, pending complete edit provenance.
+
+    New publications can put the clean verdict in the generated risk section.
+    A risk label or full-head coverage alone never establishes a clean review.
+    Partial or non-clean legacy publications cannot fall through to this form.
+    """
+    if not isinstance(body, str) or not full_sha(head):
+        return False
+    if _clean_recent_review_body(body, head):
+        return True
+    if "recent_review_start" in body or "recent_review_end" in body:
+        return False
+    body = coderabbit_body(body)
+    if not body.startswith(PREFIX):
+        return False
+    body = re.sub(r"^(```|~~~)[^\n]*\n.*?^\1[ \t]*$", "", body, flags=re.MULTILINE | re.DOTALL)
+    positions = []
+    for marker in ("walkthrough_start", "walkthrough_end", "final_review_risk_start", "final_review_risk_end"):
+        matches = list(re.finditer(r"^<!-- " + marker + r" -->[ \t]*$", body, re.MULTILINE))
+        if len(matches) != 1:
+            return False
+        positions.append(matches[0].start())
+    if positions != sorted(positions):
+        return False
+    if re.search(r"review (?:in progress|skipped)|rate.?limit|limit reached", body[:positions[0]], re.IGNORECASE):
+        return False
+    coverage = list(re.finditer(r"^<!-- final_review_risk_coverage:(.*?) -->[ \t]*$", body, re.MULTILINE))
+    if len(coverage) != 1 or not positions[2] < coverage[0].start() < positions[3]:
+        return False
+    try:
+        value = json.loads(coverage[0][1], object_pairs_hook=unique_object)
+    except (json.JSONDecodeError, ValueError):
+        return False
+    if not (isinstance(value, dict) and value.get("kind") == "reviewed"
+            and value.get("sourceCommitId") == head and value.get("coveredCommitId") == head):
+        return False
+    # Match the entire generated verdict, never a quoted phrase, risk rating,
+    # arbitrary prose, or a clean sentence followed by contradictory findings.
+    verdict = " ".join(body[coverage[0].end():positions[3]].split())
+    return re.fullmatch(
+        r"No actionable (?:issue|finding|defect) is (?:established|identified|found)"
+        r" for this (?:change|diagnostic|pull request)\."
+        r"(?: Complete the required hosted review and checks before merging\.)?",
+        verdict,
+    ) is not None
 
 
 def main() -> int:

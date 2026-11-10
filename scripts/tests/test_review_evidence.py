@@ -37,6 +37,86 @@ def with_provenance(comment):
 
 COMMENT = with_provenance(COMMENT)
 
+# Public, synthetic rendering of the newer generated summary. A completed
+# review and a minimal risk rating still need an explicit clean source verdict.
+RISK_BODY = (module.GENERATED_HEADER + module.PREFIX
+    + "\n<!-- walkthrough_start -->\nReviewed implementation.\n<!-- walkthrough_end -->"
+    + "\n<!-- final_review_risk_start -->\n<!-- final_review_risk_label\nMinimal\n-->"
+    + '\n<!-- final_review_risk_coverage:{"sourceCommitId":"' + SHA
+    + '","coveredCommitId":"' + SHA + '","kind":"reviewed"} -->\n\n'
+    + "No actionable issue is established for this change. "
+    + "Complete the required hosted review and checks before merging.\n"
+    + "<!-- final_review_risk_end -->")
+
+
+@pytest.mark.parametrize("subject", ["change", "diagnostic", "pull request"])
+def test_explicit_clean_generated_risk_verdict_requires_authenticated_publication(subject):
+    c = with_provenance(dict(COMMENT, body=RISK_BODY.replace("this change", "this " + subject)))
+    assert module.clean_coderabbit_body(c["body"], SHA)
+    assert module.coderabbit_clean_summary([c], SHA, REPO, 201)
+    c.pop("review_provenance")
+    assert not module.coderabbit_clean_summary([c], SHA, REPO, 201)
+
+
+@pytest.mark.parametrize("body", [
+    RISK_BODY.replace('"kind":"reviewed"', '"kind":"skipped"'),
+    RISK_BODY.replace('"kind":"reviewed"', '"kind":"skipped","kind":"reviewed"'),
+    RISK_BODY.replace('"sourceCommitId":"' + SHA, '"sourceCommitId":"' + "b" * 40),
+    RISK_BODY.replace('"coveredCommitId":"' + SHA, '"coveredCommitId":"' + "b" * 40),
+    RISK_BODY.replace(SHA, SHA[:7]),
+    RISK_BODY.replace("No actionable issue is established for this change. ", ""),
+    RISK_BODY.replace("No actionable issue is established for this change.", "No material production risk is evident."),
+    RISK_BODY.replace("No actionable issue", "> No actionable issue"),
+    RISK_BODY.replace("No actionable issue", "The source says: No actionable issue"),
+    RISK_BODY.replace("Complete the required hosted review and checks before merging.", "HIGH: an unresolved defect remains."),
+    RISK_BODY.replace("No actionable issue", "Review in progress. No actionable issue"),
+    RISK_BODY.replace("<!-- walkthrough_start -->", "Review skipped.\n<!-- walkthrough_start -->"),
+    RISK_BODY.replace("<!-- walkthrough_start -->", "Rate limit exceeded.\n<!-- walkthrough_start -->"),
+    RISK_BODY.replace("<!-- final_review_risk_start -->", ""),
+    RISK_BODY.replace("<!-- final_review_risk_end -->", ""),
+    RISK_BODY.replace("<!-- walkthrough_end -->", ""),
+    RISK_BODY + "\n<!-- final_review_risk_end -->",
+    RISK_BODY + '\n<!-- final_review_risk_coverage:{"sourceCommitId":"' + SHA + '"} -->',
+    RISK_BODY.replace("<!-- walkthrough_start -->", "<!-- recent_review_start -->\nOne actionable comment.\n<!-- recent_review_end -->\n<!-- walkthrough_start -->"),
+    RISK_BODY.replace("<!-- walkthrough_start -->", "<!-- recent_review_start -->\n<!-- walkthrough_start -->"),
+    RISK_BODY.replace("<!-- walkthrough_start -->", "<!-- recent_review_end -->\n<!-- walkthrough_start -->"),
+    module.GENERATED_HEADER + RISK_BODY,
+    "\n" + RISK_BODY,
+])
+def test_risk_publication_never_replaces_clean_verdict_coverage_or_complete_shape(body):
+    c = with_provenance(dict(COMMENT, body=body))
+    assert not module.coderabbit_clean_summary([c], SHA, REPO, 201)
+
+
+def test_risk_verdict_cannot_be_quoted_from_walkthrough_or_code():
+    clean = "No actionable issue is established for this change."
+    body = RISK_BODY.replace("Reviewed implementation.", clean).replace(
+        clean + " Complete the required hosted review and checks before merging.", "Minimal risk.")
+    assert not module.clean_coderabbit_body(body, SHA)
+    fenced = RISK_BODY.replace(clean, "```\n" + clean + "\n```")
+    assert not module.clean_coderabbit_body(fenced, SHA)
+
+
+def test_new_risk_publication_fetches_actual_complete_edit_history(monkeypatch):
+    import json
+    c = with_provenance(dict(COMMENT, body=RISK_BODY))
+    raw = copy.deepcopy(c)
+    raw.pop("review_provenance")
+    calls = []
+    def gh(arguments, payload=None):
+        calls.append(arguments[0])
+        if arguments[0] == "graphql":
+            assert json.loads(payload)["variables"]["id"] == c["node_id"]
+            return json.dumps({"data": {"node": c["review_provenance"]}})
+        return json.dumps([raw])
+    monkeypatch.setattr(module, "gh_read", gh)
+    fetched = module.fetch_comments(REPO, 201, SHA)
+    assert calls == [f"repos/{REPO}/issues/201/comments?per_page=100", "graphql"]
+    assert module.coderabbit_clean_summary(fetched, SHA, REPO, 201)
+    fetched[0]["review_provenance"]["userContentEdits"]["nodes"][0]["editor"] = {
+        "login": "writer", "__typename": "User"}
+    assert not module.coderabbit_clean_summary(fetched, SHA, REPO, 201)
+
 
 def verdict(comments):
     # Semantic parser cases model fresh authenticated snapshots of each body.
@@ -199,6 +279,7 @@ def test_real_cli_preserves_exact_context(comments, expected):
     assert result.stdout.strip() == expected
 
 
+@pytest.mark.parametrize("body", [BODY, RISK_BODY])
 @pytest.mark.parametrize("change", [
     lambda c: c.pop("review_provenance"),
     lambda c: c["review_provenance"].update(id="IC_other"),
@@ -217,8 +298,8 @@ def test_real_cli_preserves_exact_context(comments, expected):
     # The latest editor is still the bot; an earlier human edit must veto.
     lambda c: c["review_provenance"]["userContentEdits"]["nodes"][0].update(editor={"login": "writer", "__typename": "User"}),
 ])
-def test_mutable_author_identity_is_not_edit_provenance(change):
-    c = copy.deepcopy(COMMENT)
+def test_mutable_author_identity_is_not_edit_provenance(change, body):
+    c = with_provenance(dict(COMMENT, body=body))
     change(c)
     assert not module.coderabbit_clean_summary([c], SHA, REPO, 201)
 

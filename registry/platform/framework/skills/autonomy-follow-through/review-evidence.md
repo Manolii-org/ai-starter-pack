@@ -26,6 +26,13 @@ review, and one unambiguous generated coverage record with `kind: reviewed` and
 both full commit IDs equal to the requested head. Generated markers must lie
 outside the walkthrough, which may quote contributor text. Pending, skipped,
 rate-limited, stale, partial, conflicting or copied evidence fails closed.
+Newer summaries may publish the explicit clean verdict inside the generated
+`final_review_risk` section instead of a `recent_review` section. This form
+requires unique, ordered walkthrough and risk boundaries, the same exact-head
+coverage record inside the risk section, and a recognized complete no-actionable
+issue verdict. A risk rating or absence of production risk cannot supply that
+verdict. Partial or non-clean legacy sections cannot fall through to this form.
+Both forms require the same complete authenticated edit history below.
 Fetch evidence from GitHub; never construct a passing input or post an approval
 under the implementing account. A reviewer acknowledgement is not source review.
 
