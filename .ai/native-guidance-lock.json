@@ -2,11 +2,19 @@
   "files": {
     ".claude/skills/adaptable-development/SKILL.md": {
       "kind": "file",
-      "sha256": "1e8332827e2e01cab987e0e5a0f584e05a88833bcaf9238ae889600470139fe0"
+      "sha256": "86f31e6b7915c0d7b72af5b7d1c6a219f89ceaaafebfe7dac4d6787b6d4b85d2"
     },
     ".claude/skills/adaptable-development/evals/cases.json": {
       "kind": "file",
       "sha256": "369be0ee4b6d9ee299ef120c938032d118768e751ec4165f9ddc51dc3d22e307"
+    },
+    ".claude/skills/autonomy-follow-through/SKILL.md": {
+      "kind": "file",
+      "sha256": "cdb24aaf9a66c0fe32e8806080c97ffea86c93324df12752ebc6a986b37770ce"
+    },
+    ".claude/skills/autonomy-follow-through/evals/cases.json": {
+      "kind": "file",
+      "sha256": "b502eb50ca1b37fed21203333f83686c194bd4f2e50516b7435ac178a811cbbd"
     },
     ".claude/skills/compatibility-improvement/SKILL.md": {
       "kind": "file",
@@ -30,7 +38,7 @@
     },
     "AGENTS.md": {
       "kind": "block",
-      "sha256": "c284c03cd120cc3f22e50d3f40f218c50c8c5ea70c8d9793d660ffeaceae0167"
+      "sha256": "d9c3e8200fe702ca1737485bad490d12b66c36aa2f72ac135f228d3ced6a3ca7"
     },
     "CLAUDE.md": {
       "kind": "block",
@@ -42,7 +50,7 @@
   "ref": "2.0.0",
   "resolved_version": "2.0.0",
   "schema": "native-guidance/v1",
-  "source_sha256": "1e8332827e2e01cab987e0e5a0f584e05a88833bcaf9238ae889600470139fe0",
+  "source_sha256": "86f31e6b7915c0d7b72af5b7d1c6a219f89ceaaafebfe7dac4d6787b6d4b85d2",
   "surfaces": [
     "claude-code",
     "codex",

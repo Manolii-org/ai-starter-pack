@@ -47,9 +47,9 @@ def consumer(tmp_path, monkeypatch):
     return root, source
 
 
-def run(consumer, *flags):
+def run(consumer, *flags, entrypoint="scripts/ai-resolve.py"):
     root, source = consumer
-    return subprocess.run([sys.executable, str(REPO / "scripts/ai-resolve.py"),
+    return subprocess.run([sys.executable, str(REPO / entrypoint),
                            "--repo-root", str(root), "--registry", str(source),
                            "--native-guidance", *flags],
                           capture_output=True, text=True, timeout=30)
@@ -72,23 +72,28 @@ def continuation_consumer(consumer):
     return root, source
 
 
-def test_continuation_installs_and_cannot_be_silently_removed(consumer):
+@pytest.mark.parametrize("entrypoint", [
+    "scripts/ai-resolve.py",
+    "plugin/manolii-framework/scripts/ai-resolve.py",
+    "registry/platform/framework/scripts/ai-resolve.py",
+])
+def test_continuation_installs_and_cannot_be_silently_removed(consumer, entrypoint):
     root, source = continuation_consumer(consumer)
     local = b"# Product authority\nPreserve deployment approval.\n"
     (root / "AGENTS.md").write_bytes(local)
-    result = run(consumer, "--apply")
+    result = run(consumer, "--apply", entrypoint=entrypoint)
     assert result.returncode == 0, result.stdout + result.stderr
     path = ".claude/skills/autonomy-follow-through/SKILL.md"
     assert (root / path).read_bytes() == (source / "registry/platform/framework/skills/autonomy-follow-through/SKILL.md").read_bytes()
     assert (root / "AGENTS.md").read_bytes().endswith(local)
     installed = files(root)
-    assert run(consumer, "--check").returncode == 0
-    assert run(consumer, "--apply").returncode == 0
+    assert run(consumer, "--check", entrypoint=entrypoint).returncode == 0
+    assert run(consumer, "--apply", entrypoint=entrypoint).returncode == 0
     assert files(root) == installed
     manifest = root / "ai-manifest.yaml"
     manifest.write_text(manifest.read_text().replace("native_guidance_continuation: true", "native_guidance_continuation: false"))
     before = files(root)
-    assert run(consumer, "--apply").returncode == 1
+    assert run(consumer, "--apply", entrypoint=entrypoint).returncode == 1
     assert files(root) == before
 
 

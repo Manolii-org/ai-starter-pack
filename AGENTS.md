@@ -46,7 +46,7 @@ This block is generated from `docs/agent-validation.md` by
 <!-- agent-validation:end -->
 
 <!-- ai-starter-pack:development-policy:begin -->
-<!-- Generated from platform/framework/skills/adaptable-development/SKILL.md; policy 1.0.2; sha256 1e8332827e2e01cab987e0e5a0f584e05a88833bcaf9238ae889600470139fe0. -->
+<!-- Generated from platform/framework/skills/adaptable-development/SKILL.md; policy 1.0.2; sha256 86f31e6b7915c0d7b72af5b7d1c6a219f89ceaaafebfe7dac4d6787b6d4b85d2. -->
 # Adaptable development and design fidelity
 
 Build the current approved feature so likely changes stay local. Scale preparation and verification to the impact of the work; keep trivial unrelated edits proportionate.
@@ -67,7 +67,7 @@ For existing-app refactoring, first read `.claude/skills/compatibility-improveme
 
 For material changes to shared boundaries, exercise one representative variation with proportionate existing tooling. Briefly record customisation locations, evidence, limitations and deferred work. Proceed through the authorised stage using the repository's current release rules.
 
-Own authorised delivery through actionable feedback, CI repair, independent current-head review, protected merge and requested post-merge checks. Keep one owner and original commitments. On qualified hosts, use native queued continuation; pause external waits, retain a checkpoint and accepted wake, and bound unchanged recovery. Preserve permissions, budgets and human holds. Verify actual actions and outcomes; notification delivery alone is insufficient. Report unavailable continuation as infrastructure.
+Own authorised delivery through actionable feedback, CI repair, independent current-head review, protected merge and requested post-merge checks. Keep one owner and original commitments. On qualified hosts, use native queued continuation; pause external waits, retain a checkpoint and accepted wake, and bound unchanged recovery. Preserve permissions, budgets and human holds. Verify actual actions and outcomes; notification delivery alone is insufficient. Report unavailable continuation as infrastructure. Use installed `autonomy-follow-through` for detailed host rules.
 <!-- ai-starter-pack:development-policy:end -->
 
 # AGENTS.md — Multi-Agent Routing
