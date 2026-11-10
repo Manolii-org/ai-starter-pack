@@ -452,7 +452,7 @@ class ApprovalCapabilityTests(unittest.TestCase):
         self.assertNotIn("fixture-token", " ".join(push[0]))
         self.assertEqual(push[1]["env"]["GIT_CONFIG_KEY_2"], "credential.helper")
         self.assertEqual(push[1]["env"]["GIT_CONFIG_VALUE_2"], "")
-        messages = [options['data'] for argv, options in calls if argv[3] == 'commit-tree']
+        messages = [options['input'] for argv, options in calls if argv[3] == 'commit-tree']
         self.assertNotEqual(messages[0], messages[1])
 
 
