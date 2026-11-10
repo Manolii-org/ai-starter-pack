@@ -113,7 +113,7 @@ Runtime reads require an initialized revision. `initialize_empty_for_adoption`
 is a distinct bootstrap after writer closure and verified legacy drain; it can
 only create an empty custom ref and cannot overwrite an existing ref. Never call
 it as a runtime read-error fallback. The store retains exact parent
-revisions and creates a unique child commit, then updates without force. Two
+revisions and creates a unique child commit, then pushes with an atomic Git receive-pack expected-old lease. Two
 concurrent children cannot both advance one revision, including identical
 proposals created in the same second. An unknown write result holds for readback;
 it is not permission to execute or blindly repeat the mutation.
@@ -227,6 +227,8 @@ must prove those real native controls and acquire the actual mutation lock/CAS
 before writes. Actor/time may remain unavailable; `github_approval.py` remains
 non-authorizing audit enrichment. Never fabricate an approval timestamp or accept
 an `approved` boolean from a downloaded record.
+
+GitHub REST `PATCH force:false` is not a compare-and-swap guarantee for custom refs. The writer therefore uses ephemeral Git objects and `git push --atomic --force-with-lease=<custom-ref>:<expected-old>`; the expected-old identity is enforced by receive-pack. It never falls back to REST writes. Git credentials remain in repository-scoped process environment headers, redirects and credential-helper fallback are disabled, and existing proxy/CA trust is preserved. A rejected or ambiguous push holds for verified readback, never a blind retry. The owning trusted runner needs Git. Actual provider transport must be qualified using this adapter before production admission.
 
 Version 2 records require explicitly adopted state schema v2. Its `admitted`
 identities survive completed releases/restarts and prevent replay after later

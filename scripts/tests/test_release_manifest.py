@@ -368,33 +368,30 @@ class AdmissionStateTests(unittest.TestCase):
         with self.assertRaises(state.StateConflict):
             state.reserve(reserved, child, now=ADMISSION_NOW)
 
-    def test_state_store_wire_uses_custom_ref_and_non_force_cas(self):
+    def test_state_store_uses_verified_parent_and_git_wire_publication(self):
         from unittest.mock import Mock
         store = state.GitHubStateStore("example/product", "production", "fixture-token")
-        store.request = Mock(side_effect=[{"object": {"sha": "a" * 40}},
-                                          {"sha": "b" * 40}, {"sha": "c" * 40},
-                                          {"sha": "d" * 40}, {"ref": "refs/release-state/production", "object": {"sha": "d" * 40}}])
+        store.request = Mock(return_value={"object": {"sha": "a" * 40}})
+        store._write_state = Mock(return_value="d" * 40)
         retained = {"schema_version": 1, "active": None, "continuations": {}}
         self.assertEqual(store.compare_and_swap("a" * 40, retained), "d" * 40)
-        commit_call = store.request.call_args_list[3]
-        self.assertEqual(commit_call.args[2]["parents"], ["a" * 40])
-        last = store.request.call_args_list[-1]
-        self.assertEqual(last.args, ("PATCH", "git/refs/release-state/production",
-                                    {"sha": "d" * 40, "force": False}))
-        store.request.reset_mock(side_effect=True)
-        store.request.side_effect = [{"object": {"sha": "e" * 40}}]
+        store.request.assert_called_once_with("GET", "git/ref/release-state/production", missing=True)
+        self.assertEqual(store._write_state.call_args.args[0], "a" * 40)
+        self.assertEqual(json.loads(store._write_state.call_args.args[1]), retained)
+        store._write_state.reset_mock()
+        store.request.return_value = {"object": {"sha": "e" * 40}}
         with self.assertRaises(state.StateConflict):
             store.compare_and_swap("a" * 40, retained)
-        self.assertEqual(store.request.call_count, 1)
+        store._write_state.assert_not_called()
 
-    def test_two_cas_children_cannot_both_commit(self):
+    def test_ambiguous_git_publication_does_not_grant_reservation(self):
         from unittest.mock import Mock
         store = state.GitHubStateStore("example/product", "production", "fixture-token")
-        store.request = Mock(side_effect=[{"object": {"sha": "a" * 40}},
-                                          {"sha": "b" * 40}, {"sha": "c" * 40},
-                                          {"sha": "d" * 40}, state.StateConflict("non-fast-forward")])
-        with self.assertRaises(state.StateConflict):
+        store.request = Mock(return_value={"object": {"sha": "a" * 40}})
+        store._write_state = Mock(side_effect=state.StateUnavailable("unknown write result"))
+        with self.assertRaises(state.StateUnavailable):
             store.compare_and_swap("a" * 40, {"schema_version": 1, "active": None, "continuations": {}})
+        self.assertEqual(store._write_state.call_count, 1)
 
     def test_denied_state_read_never_becomes_empty_legacy_state(self):
         from unittest.mock import Mock
@@ -437,16 +434,25 @@ class ApprovalCapabilityTests(unittest.TestCase):
                 self.assertIs(result["execution_authorized"], False)
                 self.assertEqual(opener.return_value.open.call_count, 1)
 
-    def test_state_commit_nonce_prevents_identical_concurrent_child_identity(self):
-        from unittest.mock import Mock
-        messages = []
+    def test_git_publication_binds_lease_and_keeps_token_out_of_argv(self):
+        from unittest.mock import patch
+        from types import SimpleNamespace
+        calls = []
+        def run(argv, **kwargs):
+            calls.append((argv, kwargs))
+            output = "a" * 40 if argv[3] in {"hash-object", "mktree", "commit-tree"} else ""
+            return SimpleNamespace(returncode=0, stdout=output, stderr="")
         store = state.GitHubStateStore("example/product", "production", "fixture-token")
-        for _ in range(2):
-            store.request = Mock(side_effect=[{"object": {"sha": "a" * 40}},
-                                              {"sha": "b" * 40}, {"sha": "c" * 40},
-                                              {"sha": "d" * 40}, {"ref": "refs/release-state/production", "object": {"sha": "d" * 40}}])
-            store.compare_and_swap("a" * 40, {"schema_version": 1, "active": None, "continuations": {}})
-            messages.append(store.request.call_args_list[3].args[2]["message"])
+        with patch.object(state.subprocess, "run", side_effect=run):
+            store._write_state("b" * 40, "{}")
+            store._write_state("b" * 40, "{}")
+        push = calls[-1]
+        self.assertIn("--force-with-lease=refs/release-state/production:" + "b" * 40, push[0])
+        self.assertIn("--atomic", push[0])
+        self.assertNotIn("fixture-token", " ".join(push[0]))
+        self.assertEqual(push[1]["env"]["GIT_CONFIG_KEY_2"], "credential.helper")
+        self.assertEqual(push[1]["env"]["GIT_CONFIG_VALUE_2"], "")
+        messages = [options['data'] for argv, options in calls if argv[3] == 'commit-tree']
         self.assertNotEqual(messages[0], messages[1])
 
 

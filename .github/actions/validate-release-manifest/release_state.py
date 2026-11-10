@@ -10,8 +10,11 @@ import copy
 from datetime import datetime, timezone
 import hashlib
 import json
+import os
 import re
 import secrets
+import subprocess
+import tempfile
 from urllib.error import HTTPError
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
@@ -42,7 +45,7 @@ def _sha(value):
 
 
 class GitHubStateStore:
-    """Git fast-forward-only updates compare the exact retained parent revision."""
+    """Verified REST reads and Git receive-pack expected-old lease writes."""
 
     def __init__(self, repo: str, environment: str, token: str):
         if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo):
@@ -142,26 +145,63 @@ class GitHubStateStore:
         content = json.dumps(state, sort_keys=True, separators=(",", ":"), allow_nan=False)
         if len(content.encode()) > MAX_STATE_BYTES:
             raise StateUnavailable("release state requires owner retention maintenance")
-        try:
-            blob = self.request("POST", "git/blobs", {"content": content, "encoding": "utf-8"})
-            tree = self.request("POST", "git/trees", {"tree": [{"path": "release-state.json",
-                                "mode": "100644", "type": "blob", "sha": _sha(blob["sha"])}]})
-            # Identical concurrent proposals must still have different child
-            # commits. Otherwise both same-SHA ref updates could report success.
-            commit = self.request("POST", "git/commits", {"message": "Record release admission state "
-                                  + secrets.token_hex(16), "tree": _sha(tree["sha"]),
-                                  "parents": [expected] if expected else []})
-            revision = _sha(commit["sha"])
-            if expected is None:
-                confirmation = self.request("POST", "git/refs", {"ref": "refs/" + self.ref, "sha": revision})
-            else:
-                # No force: two children of one parent diverge, so only one wins.
-                confirmation = self.request("PATCH", "git/refs/" + self.ref, {"sha": revision, "force": False})
-            if confirmation.get("ref") != "refs/" + self.ref or confirmation.get("object", {}).get("sha") != revision:
-                raise StateUnavailable("state reference write acknowledgement differs; reconcile before proceeding")
+        return self._write_state(expected, content)
+
+    def _write_state(self, expected: str | None, content: str) -> str:
+        """Publish through Git's atomic expected-old lease, including custom refs.
+
+        GitHub REST force:false is NOT a CAS guarantee on custom refs. Never
+        restore that route as fallback. Credentials live only in process env.
+        """
+        ref = "refs/" + self.ref
+        url = self._git_url()
+        environment = dict(os.environ)
+        for key in list(environment):
+            if key.startswith("GIT_") and key not in {"GIT_SSL_CAINFO", "GIT_SSL_CAPATH"}:
+                environment.pop(key)
+        environment.update({
+            "LC_ALL": "C",
+            "GIT_TERMINAL_PROMPT": "0", "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_CONFIG_COUNT": "3",
+            "GIT_CONFIG_KEY_0": "http." + url + ".extraheader",
+            "GIT_CONFIG_VALUE_0": "Authorization: Basic " + base64.b64encode(
+                ("x-access-token:" + self.token).encode()).decode(),
+            "GIT_CONFIG_KEY_1": "http.followRedirects", "GIT_CONFIG_VALUE_1": "false",
+            "GIT_CONFIG_KEY_2": "credential.helper", "GIT_CONFIG_VALUE_2": "",
+            "GIT_AUTHOR_NAME": "Release admission", "GIT_COMMITTER_NAME": "Release admission",
+            "GIT_AUTHOR_EMAIL": "release-admission@example.invalid",
+            "GIT_COMMITTER_EMAIL": "release-admission@example.invalid",
+        })
+        with tempfile.TemporaryDirectory(prefix="release-admission-") as directory:
+            def git(*args, data=None, writing=False):
+                try:
+                    result = subprocess.run(["git", "-C", directory, *args], input=data,
+                                            env=environment, capture_output=True, text=True, timeout=30)
+                except (OSError, subprocess.TimeoutExpired) as exc:
+                    raise StateUnavailable("Git state write/transport outcome unavailable; reconcile before proceeding") from exc
+                if result.returncode:
+                    if writing and "[rejected]" in result.stdout and "(stale info)" in result.stdout:
+                        raise StateConflict("Git expected-old lease refused a stale state revision")
+                    raise StateUnavailable("Git state transport refused or write outcome ambiguous; reconcile before proceeding")
+                return result.stdout.strip()
+
+            git("init", "--bare", "--quiet")
+            if expected is not None:
+                git("fetch", "--no-tags", "--depth=1", url, expected)
+            blob = _sha(git("hash-object", "-w", "--stdin", data=content))
+            tree = _sha(git("mktree", data="100644 blob " + blob + "\trelease-state.json\n"))
+            parents = ["-p", expected] if expected is not None else []
+            revision = _sha(git("commit-tree", tree, *parents,
+                                data="Record release admission state " + secrets.token_hex(16) + "\n"))
+            # --force-with-lease supplies an expected-old OID to receive-pack;
+            # unlike REST's force:false it is atomic on custom refs as well.
+            git("push", "--porcelain", "--atomic", "--force-with-lease=" + ref + ":" + (expected or ""),
+                url, revision + ":" + ref, writing=True)
             return revision
-        except (KeyError, TypeError) as exc:
-            raise StateUnavailable("release state write response is incomplete") from exc
+
+    def _git_url(self) -> str:
+        return "https://github.com/" + self.repo + ".git"
+
 
 
 def validate_state(state: dict) -> None:

@@ -215,7 +215,8 @@
         "registry/platform/framework/schemas/release-manifest.v2.schema.json"
       ],
       "tools": [
-        "uv"
+        "uv",
+        "git"
       ],
       "commands": [
         [

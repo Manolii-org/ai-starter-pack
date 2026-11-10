@@ -27,6 +27,14 @@ class GitFixture(state.GitHubStateStore):
                     "GIT_AUTHOR_DATE": "2020-01-01T00:00:00Z", "GIT_COMMITTER_DATE": "2020-01-01T00:00:00Z"}
         self.git("init", "--bare")
 
+    def _git_url(self):
+        return self.directory
+
+    def _write_state(self, expected, content):
+        if self.barrier:
+            self.barrier.wait(timeout=10)
+        return super()._write_state(expected, content)
+
     def git(self, *args, data=None, check=True):
         result = subprocess.run(["git", "-C", self.directory, *args], input=data,
                                 capture_output=True, text=True, env=self.env, timeout=10)
@@ -129,7 +137,9 @@ class GitAdmissionIntegrationTests(unittest.TestCase):
             def reserve():
                 try:
                     results.append(("won", store.compare_and_swap(parent, empty)))
-                except state.StateConflict:
+                except (state.StateConflict, state.StateUnavailable):
+                    # A receive-pack race can report an atomic-transaction
+                    # failure, which must hold for readback rather than retry.
                     results.append(("conflict", None))
 
             workers = [threading.Thread(target=reserve) for _ in range(2)]
@@ -161,6 +171,7 @@ class GitAdmissionIntegrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             fixture = GitFixture(directory)
             store = state.GitHubStateStore("example/product", "production", "fixture-token")
+            store._write_state = fixture._write_state
 
             def open_request(request, timeout):
                 path = request.full_url.removeprefix("https://api.github.com/repos/example/product/")
