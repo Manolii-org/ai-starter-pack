@@ -363,7 +363,16 @@
         "tests/test_autofix_hardening.py",
         "tests/test_e2e_activation.py",
         "tests/test_integration_admission_workflow.py",
-        "tests/test_shared_gates_yaml.py"
+        "tests/test_shared_gates_yaml.py",
+        ".github/actions/check-guarded-paths/action.yml",
+        ".github/workflows/coverage-ratchet-reusable.yml",
+        ".github/workflows/migration-run-gate-reusable.yml",
+        ".github/workflows/tier-gate-summary-reusable.yml",
+        ".github/workflows/publish-litellm-product-release.yml",
+        "tests/test_tier_reusables.py",
+        "tests/test_coverage_ratchet_activation.py",
+        "tests/test_guard_check.py",
+        "tests/test_litellm_product_asset.py"
       ],
       "tools": [
         "python"
@@ -384,7 +393,11 @@
           "tests/test_autofix_hardening.py",
           "tests/test_e2e_activation.py",
           "tests/test_integration_admission_workflow.py",
-          "tests/test_shared_gates_yaml.py"
+          "tests/test_shared_gates_yaml.py",
+          "tests/test_tier_reusables.py",
+          "tests/test_coverage_ratchet_activation.py",
+          "tests/test_guard_check.py",
+          "tests/test_litellm_product_asset.py"
         ]
       ],
       "ci_sources": [

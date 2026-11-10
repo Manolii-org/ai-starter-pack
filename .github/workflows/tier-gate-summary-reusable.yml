@@ -203,14 +203,20 @@ jobs:
         if: ${{ inputs.applies && inputs.setup_command != '' }}
         working-directory: ${{ inputs.working_directory }}
         shell: bash -euo pipefail {0}
-        run: ${{ inputs.setup_command }}
+        env:
+          SETUP_COMMAND: ${{ inputs.setup_command }}
+        # Command input is executable by contract; retain the native step shell/options.
+        run: eval "$SETUP_COMMAND"
 
       - name: Run gate
         id: run
         if: inputs.applies
         working-directory: ${{ inputs.working_directory }}
         shell: bash -euo pipefail {0}
-        run: ${{ inputs.command }}
+        env:
+          COMMAND: ${{ inputs.command }}
+        # Command input is executable by contract; retain the native step shell/options.
+        run: eval "$COMMAND"
 
       - name: Record result
         id: verdict

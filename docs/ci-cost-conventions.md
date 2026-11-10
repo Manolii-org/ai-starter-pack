@@ -37,7 +37,8 @@ findings. Both Assessment forms use pinned Semgrep and Bandit CLI reports;
 Semgrep 1.185.0 restores supported shell parsing, with a 30-second per-rule
 ceiling and no early file abandonment after a timeout. Timeouts remain failures.
 GitHub expressions enter shell steps through environment variables; reusable
-install/build commands still execute as Bash with errexit and pipefail.
+command callbacks execute through their existing native shell, retaining each
+step's errexit, nounset and pipefail settings.
 `--config auto` and the existing whole-repository scan scope remain. The old
 Semgrep action accepted only `config`/`publishToken`, so its `output`/`json`
 arguments did not establish a report. Missing, malformed, scanner-error or

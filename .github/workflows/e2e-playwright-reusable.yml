@@ -225,7 +225,7 @@ jobs:
         timeout-minutes: 20
         env:
           INSTALL_COMMAND: ${{ inputs.install_command }}
-        run: bash -e -o pipefail -c "$INSTALL_COMMAND"
+        run: eval "$INSTALL_COMMAND"
 
       - name: Build
         shell: bash
@@ -234,7 +234,7 @@ jobs:
         timeout-minutes: 20
         env:
           BUILD_COMMAND: ${{ inputs.build_command }}
-        run: bash -e -o pipefail -c "$BUILD_COMMAND"
+        run: eval "$BUILD_COMMAND"
 
       - name: Install Playwright browsers
         shell: bash

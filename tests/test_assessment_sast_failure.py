@@ -204,23 +204,97 @@ def test_changed_ref_reaches_git_as_data(tmp_path):
     assert calls == [['diff', f'origin/{ref}...HEAD'], ['diff', '--name-only', f'origin/{ref}...HEAD']]
 
 
-@pytest.mark.parametrize(('name', 'key'), [('Install dependencies', 'INSTALL_COMMAND'), ('Build', 'BUILD_COMMAND')])
-@pytest.mark.parametrize('fails', [False, True])
-def test_e2e_command_environment_preserves_multiline_code_and_pipefail(tmp_path, name, key, fails):
-    spec = yaml.load((ROOT / '.github/workflows/e2e-playwright-reusable.yml').read_text(), Loader=yaml.BaseLoader)
-    step = next(s for s in spec['jobs']['e2e']['steps'] if s.get('name') == name)
-    expected_input = 'install_command' if key == 'INSTALL_COMMAND' else 'build_command'
-    assert step['env'][key] == '${{ inputs.' + expected_input + ' }}'
+CALLBACKS = [
+    ('e2e-playwright-reusable.yml', 'Install dependencies', 'INSTALL_COMMAND', 'install_command', 'strict'),
+    ('e2e-playwright-reusable.yml', 'Build', 'BUILD_COMMAND', 'build_command', 'strict'),
+    ('coverage-ratchet-reusable.yml', 'Custom toolchain setup', 'SETUP_COMMAND', 'setup_command', 'strict'),
+    ('coverage-ratchet-reusable.yml', 'Install dependencies', 'INSTALL_COMMAND', 'install_command', 'strict'),
+    ('coverage-ratchet-reusable.yml', 'Run coverage suite', 'COVERAGE_COMMAND', 'coverage_command', 'strict'),
+    ('migration-run-gate-reusable.yml', 'Install dependencies', 'INSTALL_COMMAND', 'install_command', 'default'),
+    ('migration-run-gate-reusable.yml', 'Extra setup', 'SETUP_COMMAND', 'setup_command', 'default'),
+    ('tier-gate-summary-reusable.yml', 'Setup', 'SETUP_COMMAND', 'setup_command', 'nounset'),
+    ('tier-gate-summary-reusable.yml', 'Run gate', 'COMMAND', 'command', 'nounset'),
+]
+
+
+@pytest.mark.parametrize(('workflow', 'name', 'key', 'input_name', 'mode'), CALLBACKS)
+@pytest.mark.parametrize('outcome', ['success', 'pipeline', 'exit', 'unset'])
+def test_command_inputs_preserve_native_shell_strings_and_failure_modes(
+        tmp_path, workflow, name, key, input_name, mode, outcome):
+    spec = yaml.load((ROOT / '.github/workflows' / workflow).read_text(), Loader=yaml.BaseLoader)
+    step = next(s for job in spec['jobs'].values() for s in job.get('steps', []) if s.get('name') == name)
+    assert step['env'][key] == '${{ inputs.' + input_name + ' }}'
+    assert step.get('shell', 'default') == {
+        'strict': 'bash', 'default': 'default', 'nounset': 'bash -euo pipefail {0}'}[mode]
+    # Execute the whole shipped step under the same native shell options.
+    shell = ['bash', '-e'] + (['-u'] if mode == 'nounset' else [])
+    if mode != 'default':
+        shell += ['-o', 'pipefail']
     command = 'printf "%s" "$FIXTURE_DATA" > result\n'
-    command += 'false | true\nprintf unsafe > after\n' if fails else 'printf complete > after\n'
-    result = subprocess.run(['bash', '-e', '-o', 'pipefail', '-c', step['run']], cwd=tmp_path,
+    command += {'success': '', 'pipeline': 'false | true\n', 'exit': 'exit 7\n',
+                'unset': 'printf "%s" "$UNDEFINED_FIXTURE" > unset\n'}[outcome]
+    command += 'printf complete > after\n'
+    result = subprocess.run([*shell, '-c', step['run']], cwd=tmp_path,
                             env={'PATH': os.environ['PATH'], key: command,
                                  'FIXTURE_DATA': 'quoted $(touch injected) data'},
                             capture_output=True, text=True, timeout=10)
-    assert result.returncode == (1 if fails else 0)
+    expected = 7 if outcome == 'exit' else int(
+        (outcome == 'pipeline' and mode != 'default') or (outcome == 'unset' and mode == 'nounset'))
+    assert result.returncode == expected
     assert (tmp_path / 'result').read_text() == 'quoted $(touch injected) data'
     assert not (tmp_path / 'injected').exists()
-    assert (tmp_path / 'after').exists() is not fails
+    assert (tmp_path / 'after').exists() == (expected == 0)
+
+
+def test_all_tracked_executable_yaml_binds_expressions_outside_source():
+    tracked = subprocess.check_output(['git', 'ls-files', '-z', '--', '.github', 'templates'],
+                                     cwd=ROOT).decode().split('\0')
+    checked = []
+    def visit(value, relative):
+        if isinstance(value, dict):
+            if isinstance(value.get('run'), str):
+                checked.append((relative, value.get('name', value.get('id'))))
+                assert '${{' not in value['run'], (relative, value.get('name'), 'raw source interpolation')
+            for item in value.values():
+                visit(item, relative)
+        elif isinstance(value, list):
+            for item in value:
+                visit(item, relative)
+    for relative in tracked:
+        if relative.endswith(('.yml', '.yaml')) and '/.github/' in '/' + relative:
+            visit(yaml.load((ROOT / relative).read_text(), Loader=yaml.BaseLoader), relative)
+    assert len(checked) > 100  # Collection cannot pass vacuously.
+
+
+@pytest.mark.parametrize(('relative', 'name', 'key', 'expression', 'argument'), [
+    ('.github/actions/check-guarded-paths/action.yml', 'Check guarded paths', 'GUARD_ACTION_PATH',
+     'github.action_path', 'check.py'),
+    ('.github/workflows/publish-litellm-product-release.yml', 'Build deterministic asset', 'ASSET_VERSION',
+     'steps.release.outputs.version', 'version'),
+])
+def test_action_path_and_publisher_version_reach_python_as_literal_arguments(
+        tmp_path, relative, name, key, expression, argument):
+    document = yaml.load((ROOT / relative).read_text(), Loader=yaml.BaseLoader)
+    steps = document['runs']['steps'] if 'runs' in document else [
+        step for job in document['jobs'].values() for step in job.get('steps', [])]
+    step = next(s for s in steps if s.get('name') == name)
+    assert step['env'][key] == '${{ ' + expression + ' }}'
+    python = tmp_path / 'python3'
+    python.write_text('#!/bin/sh\nprintf "%s\\n" "$@" > args\n')
+    python.chmod(0o755)
+    value = 'literal $(touch injected) value'
+    env = {'PATH': str(tmp_path) + os.pathsep + os.environ['PATH'], key: value,
+           'BASE_REF': 'base', 'HEAD_REF': 'head', 'GUARDS_FILE': 'guards', 'BYPASS_GUARDS': ''}
+    result = subprocess.run(['bash', '-e', '-o', 'pipefail', '-c', step['run']], cwd=tmp_path,
+                            env=env, capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stderr
+    assert not (tmp_path / 'injected').exists()
+    arguments = (tmp_path / 'args').read_text().splitlines()
+    if argument == 'check.py':
+        assert arguments == [value + '/check.py', '--base', 'base', '--head', 'head',
+                             '--guards-file', 'guards', '--bypass', '']
+    else:
+        assert arguments == ['scripts/build-litellm-product-asset.py', '--version', value]
 
 
 def test_runner_policy_alone_selects_its_owning_recipe():
