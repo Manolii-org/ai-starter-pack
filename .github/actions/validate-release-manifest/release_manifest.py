@@ -78,7 +78,8 @@ def _instant(value: str) -> datetime:
     return result
 
 
-def validate(manifest: dict, *, expected_release_id: str | None = None) -> dict:
+def validate(manifest: dict, *, expected_release_id: str | None = None,
+             trusted_source_policy: dict | None = None) -> dict:
     version = manifest.get("schema_version") if isinstance(manifest, dict) else None
     if type(version) is not int or version not in (1, 2):
         raise ManifestError("unsupported release manifest version")
@@ -94,8 +95,10 @@ def validate(manifest: dict, *, expected_release_id: str | None = None) -> dict:
     if expected_release_id is not None and identity != expected_release_id:
         raise ManifestError("release subject differs from trusted expected identity")
     if version == 2:
-        _validate_vector(subject)
+        _validate_vector(subject, trusted_source_policy=trusted_source_policy)
         return manifest
+    if trusted_source_policy is not None:
+        raise ManifestError("trusted source allowance requires an explicit v2 reader profile")
     qualification = subject["qualification"]
     if qualification["source_sha"] != subject["source_sha"]:
         raise ManifestError("qualification source differs from candidate")
@@ -134,9 +137,10 @@ def validate(manifest: dict, *, expected_release_id: str | None = None) -> dict:
     return manifest
 
 
-def prepare(subject: dict, *, schema_version: int = 1) -> dict:
+def prepare(subject: dict, *, schema_version: int = 1,
+            trusted_source_policy: dict | None = None) -> dict:
     result = {"schema_version": schema_version, "release_id": digest(subject), "subject": copy.deepcopy(subject)}
-    return validate(result)
+    return validate(result, trusted_source_policy=trusted_source_policy)
 
 
 def qualification_subject(subject: dict) -> dict:
@@ -148,7 +152,7 @@ def qualification_subject(subject: dict) -> dict:
 
 def validate_native_binding(manifest: dict, *, expected_release_id: str,
                             expected_controller_sha: str, execution_context: dict,
-                            now: datetime) -> dict:
+                            now: datetime, trusted_source_policy: dict | None = None) -> dict:
     """Revalidate immutable inputs INSIDE a separately qualified native job.
 
     Context must be supplied by the reviewed owner adapter from the native
@@ -159,7 +163,8 @@ def validate_native_binding(manifest: dict, *, expected_release_id: str,
     if (not isinstance(expected_release_id, str) or not re.fullmatch(r"[0-9a-f]{64}", expected_release_id)
             or not isinstance(expected_controller_sha, str) or not re.fullmatch(r"[0-9a-f]{40}", expected_controller_sha)):
         raise ManifestError("native binding requires independent exact expected identities")
-    validate(manifest, expected_release_id=expected_release_id)
+    validate(manifest, expected_release_id=expected_release_id,
+             trusted_source_policy=trusted_source_policy)
     if manifest["schema_version"] != 2:
         raise ManifestError("native execution binding requires an explicit v2 execution subject")
     subject = manifest["subject"]
@@ -175,6 +180,11 @@ def validate_native_binding(manifest: dict, *, expected_release_id: str,
         expected.update(execution_run_id=subject["execution"]["run_id"],
                         execution_run_attempt=subject["execution"]["run_attempt"],
                         execution_job=subject["execution"]["job"])
+    if trusted_source_policy is not None:
+        expected.update(policy_sha256=digest(trusted_source_policy),
+                        profile_version=trusted_source_policy["profile_version"],
+                        capability_sha=trusted_source_policy["capability_sha"],
+                        entity=trusted_source_policy["entity"])
     if canonical_bytes(execution_context) != canonical_bytes(expected):
         raise ManifestError("native executor binding differs from prepared subject")
     if not isinstance(now, datetime) or now.utcoffset() is None:
@@ -184,7 +194,30 @@ def validate_native_binding(manifest: dict, *, expected_release_id: str,
     return manifest
 
 
-def _validate_vector(subject: dict) -> None:
+def _code_source_allowance(subject: dict, policy: dict | None) -> set[tuple[str, str, str]]:
+    """Compile exact code sources from separately reviewed owner policy, never candidate JSON.
+
+    This validates metadata only. It grants no native approval, target, data or
+    credential authority and does not establish Git/artifact provenance.
+    """
+    if policy is None:
+        return set()
+    if not isinstance(policy, dict) or type(policy.get("schema_version")) is not int:
+        raise ManifestError("trusted source policy does not match schema")
+    schema = json.loads(SCHEMA.with_name("release-source-policy.v1.schema.json").read_text())
+    validator = jsonschema.Draft202012Validator(schema)
+    if next(validator.iter_errors(policy), None) is not None:
+        raise ManifestError("trusted source policy does not match schema")
+    if digest(policy) != subject["policy_sha256"]:
+        raise ManifestError("trusted source policy differs from selected policy identity")
+    if any(policy[key] != subject[key] for key in (
+            "repo", "entity", "control_sha", "capability_sha", "profile_version")):
+        raise ManifestError("trusted source policy differs from owning release profile")
+    return {(source["repo"], source["sha"], source["tree"])
+            for source in policy["allowed_code_sources"]}
+
+
+def _validate_vector(subject: dict, *, trusted_source_policy: dict | None = None) -> None:
     components = subject["components"]
     databases = subject["databases"]
     ids = [item["id"] for item in components]
@@ -196,11 +229,14 @@ def _validate_vector(subject: dict) -> None:
             raise ManifestError("duplicate release vector identity")
     if set(ids) & set(unchanged):
         raise ManifestError("selected component also declared unchanged")
-    # Same organization is a conservative portable floor. The trusted owner
-    # adapter must enforce its compiled entity/target allowlist as well.
+    # Exact external code inputs do not expand the entity's data/target boundary.
+    allowed_code = _code_source_allowance(subject, trusted_source_policy)
     owner = subject["repo"].split("/")[0].casefold()
-    sources = [item["source"] for item in components + databases + subject["unchanged_components"]]
-    if any(source["repo"].split("/")[0].casefold() != owner for source in sources):
+    if any(item["source"]["repo"].split("/")[0].casefold() != owner for item in databases):
+        raise ManifestError("database source crosses owning organization")
+    sources = [item["source"] for item in components + subject["unchanged_components"]]
+    if any(source["repo"].split("/")[0].casefold() != owner
+           and (source["repo"], source["sha"], source["tree"]) not in allowed_code for source in sources):
         raise ManifestError("release source crosses owning organization")
     if {db for item in components for db in item["databases"]} != set(db_ids):
         raise ManifestError("component database dependencies differ from declared graphs")
