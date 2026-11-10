@@ -218,7 +218,7 @@ Adapters still enforce their compiled owner/target allowlists and native graph
 ordering/compatibility; same-organization source checks are only a portable floor.
 
 `validate_native_binding` rechecks the independently retained subject digest,
-reviewed controller, preparation run/attempt, native executor environment and
+reviewed controller, preparation run/attempt, protected execution run/job/attempt, native executor environment and
 fixed execution deadline. Call it inside a separately qualified protected job,
 using the reviewed adapter's native context and preparation dependency. It is not
 an approval oracle: candidate JSON, a successful return or a copied context cannot

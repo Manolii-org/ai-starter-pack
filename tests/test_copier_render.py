@@ -360,6 +360,15 @@ def test_release_capability_distribution_boundary(default_render, branded_render
         )
         assert result.returncode == 0, result.stdout + result.stderr
         assert "authority=none" in result.stdout
+        vector_fixture = ROOT / "scripts/tests/fixtures/release-manifest.v2.json"
+        vector_id = json.loads(vector_fixture.read_text())["release_id"]
+        vector_result = subprocess.run(
+            [sys.executable, str(validator), "--manifest", str(vector_fixture),
+             "--expected-release-id", vector_id, "--dry-run"],
+            cwd=rendered, capture_output=True, text=True, timeout=30,
+        )
+        assert vector_result.returncode == 0, vector_result.stdout + vector_result.stderr
+        assert "authority=none" in vector_result.stdout
 
 
 def test_security_audit_tests_run_in_rendered_consumers(default_render, branded_render):
