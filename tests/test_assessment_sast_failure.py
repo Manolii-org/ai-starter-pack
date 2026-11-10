@@ -55,6 +55,32 @@ def test_incomplete_report_never_becomes_successful_zero_findings(tmp_path, work
 
 
 @pytest.mark.parametrize('workflow', WORKFLOWS)
+@pytest.mark.parametrize(('scanner', 'bad'), [
+    ('semgrep', 'skipped-rules'), ('semgrep', 'invalid-scanned-file'),
+    ('bandit', 'missing-totals'), ('bandit', 'invalid-file-metrics'),
+    ('bandit', 'inconsistent-total'), ('bandit', 'invalid-total'),
+])
+def test_partial_completion_never_becomes_successful_zero_findings(tmp_path, workflow, scanner, bad):
+    data = dict(zip(['semgrep', 'bandit'], reports(tmp_path)))[scanner]
+    if bad == 'skipped-rules':
+        data['skipped_rules'] = [{'id': 'synthetic.partial'}]
+    elif bad == 'invalid-scanned-file':
+        data['paths']['scanned'] = [None]
+    elif bad == 'missing-totals':
+        del data['metrics']['_totals']
+    elif bad == 'invalid-file-metrics':
+        data['metrics']['fixture.py'] = None
+    elif bad == 'inconsistent-total':
+        data['metrics']['_totals']['loc'] = 2
+    else:
+        data['metrics']['_totals']['loc'] = True
+    (tmp_path / (scanner + '-results.json')).write_text(json.dumps(data))
+    result = run_step(workflow, 'Merge SAST findings', tmp_path)
+    assert result.returncode != 0
+    assert not (tmp_path / '.ai/sast-findings.json').exists()
+
+
+@pytest.mark.parametrize('workflow', WORKFLOWS)
 def test_complete_clean_reports_remain_valid(tmp_path, workflow):
     reports(tmp_path)
     result = run_step(workflow, 'Merge SAST findings', tmp_path)
