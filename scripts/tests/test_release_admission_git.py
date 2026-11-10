@@ -43,22 +43,13 @@ class GitFixture(state.GitHubStateStore):
         return result
 
     def request(self, method, path, payload=None, *, missing=False):
+        if method != "GET":
+            raise AssertionError("REST mutation is not a CAS transport, including in tests")
         if path == "git/ref/" + self.ref:
             result = self.git("rev-parse", "--verify", "refs/" + self.ref, check=False)
             if result.returncode and missing:
                 return None
             return {"object": {"sha": result.stdout.strip()}}
-        if method == "POST" and path == "git/blobs":
-            return {"sha": self.git("hash-object", "-w", "--stdin", data=payload["content"]).stdout.strip()}
-        if method == "POST" and path == "git/trees":
-            entry = payload["tree"][0]
-            text = f'{entry["mode"]} {entry["type"]} {entry["sha"]}\t{entry["path"]}\n'
-            return {"sha": self.git("mktree", data=text).stdout.strip()}
-        if method == "POST" and path == "git/commits":
-            args = ["commit-tree", payload["tree"]]
-            for parent in payload["parents"]:
-                args += ["-p", parent]
-            return {"sha": self.git(*args, data=payload["message"]).stdout.strip()}
         if method == "GET" and path.startswith("git/commits/"):
             return {"tree": {"sha": self.git("show", "-s", "--format=%T", path.split("/")[-1]).stdout.strip()}}
         if method == "GET" and path.startswith("git/trees/"):
@@ -69,26 +60,24 @@ class GitFixture(state.GitHubStateStore):
         if method == "GET" and path.startswith("git/blobs/"):
             raw = self.git("cat-file", "blob", path.split("/")[-1]).stdout.encode()
             return {"encoding": "base64", "size": len(raw), "content": base64.b64encode(raw).decode()}
-        if method in {"PATCH", "POST"} and path in {"git/refs", "git/refs/" + self.ref}:
-            if self.barrier:
-                self.barrier.wait(timeout=10)
-            ref = "refs/" + self.ref
-            current = self.git("rev-parse", "--verify", ref, check=False)
-            old = current.stdout.strip() if current.returncode == 0 else "0" * 40
-            if method == "POST" and old != "0" * 40:
-                raise state.StateConflict("already exists")
-            if method == "PATCH":
-                assert payload["force"] is False
-                if self.git("merge-base", "--is-ancestor", old, payload["sha"], check=False).returncode:
-                    raise state.StateConflict("not a fast-forward")
-            result = self.git("update-ref", ref, payload["sha"], old, check=False)
-            if result.returncode:
-                raise state.StateConflict("another child won")
-            return {"ref": ref, "object": {"sha": payload["sha"]}}
         raise AssertionError((method, path))
 
 
 class GitAdmissionIntegrationTests(unittest.TestCase):
+    def test_regression_to_rest_mutation_cannot_pass_real_git_fixture(self):
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as directory:
+            store = GitFixture(directory)
+            first = store.initialize_empty_for_adoption()
+            _, original = store.read()
+            def unsafe_rest_writer(expected, content):
+                return store.request("PATCH", "git/refs/" + store.ref,
+                                     {"sha": "0" * 40, "force": False})
+            with patch.object(store, "_write_state", side_effect=unsafe_rest_writer):
+                with self.assertRaisesRegex(AssertionError, "REST mutation"):
+                    store.compare_and_swap(first, original)
+            self.assertEqual(store.read(), (first, original))
+
     def test_v2_replay_tombstones_survive_real_git_roundtrip(self):
         from datetime import datetime, timezone
         from test_release_vector import prepare
