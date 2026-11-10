@@ -2,7 +2,7 @@
   "files": {
     ".claude/skills/adaptable-development/SKILL.md": {
       "kind": "file",
-      "sha256": "e065684e4ad947ac3b6b8fdac475b4ba2ad80bdb37e40d8ea376b0c6d66b7371"
+      "sha256": "1e8332827e2e01cab987e0e5a0f584e05a88833bcaf9238ae889600470139fe0"
     },
     ".claude/skills/adaptable-development/evals/cases.json": {
       "kind": "file",
@@ -30,7 +30,7 @@
     },
     "AGENTS.md": {
       "kind": "block",
-      "sha256": "f85e6ca5fe19c99e50676e54cd62339c0951d32f6edc1ca6e0b54b8a55a0da82"
+      "sha256": "c284c03cd120cc3f22e50d3f40f218c50c8c5ea70c8d9793d660ffeaceae0167"
     },
     "CLAUDE.md": {
       "kind": "block",
@@ -38,11 +38,11 @@
     }
   },
   "plugin": "platform/framework",
-  "policy_version": "1.0.1",
+  "policy_version": "1.0.2",
   "ref": "2.0.0",
   "resolved_version": "2.0.0",
   "schema": "native-guidance/v1",
-  "source_sha256": "e065684e4ad947ac3b6b8fdac475b4ba2ad80bdb37e40d8ea376b0c6d66b7371",
+  "source_sha256": "1e8332827e2e01cab987e0e5a0f584e05a88833bcaf9238ae889600470139fe0",
   "surfaces": [
     "claude-code",
     "codex",

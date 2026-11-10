@@ -1,6 +1,6 @@
 ---
 name: adaptable-development
-version: 1.0.1
+version: 1.0.2
 scope: platform
 author: AI Starter Pack contributors
 license: Apache-2.0
@@ -31,3 +31,5 @@ For design handoffs, new features and substantial redesigns, first read `.claude
 For existing-app refactoring, first read `.claude/skills/compatibility-improvement/SKILL.md`: establish the current baseline, map affected consumers, make small reversible changes and prove preservation of relevant journeys, outputs and in-flight work.
 
 For material changes to shared boundaries, exercise one representative variation with proportionate existing tooling. Briefly record customisation locations, evidence, limitations and deferred work. Proceed through the authorised stage using the repository's current release rules.
+
+Own authorised delivery through actionable feedback, CI repair, independent current-head review, protected merge and requested post-merge checks. Keep one owner and original commitments. On qualified hosts, use native queued continuation; pause external waits, retain a checkpoint and accepted wake, and bound unchanged recovery. Preserve permissions, budgets and human holds. Verify actual actions and outcomes; notification delivery alone is insufficient. Report unavailable continuation as infrastructure.
