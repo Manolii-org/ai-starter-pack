@@ -44,7 +44,7 @@ def report(scanner, findings=False):
     if scanner == 'semgrep':
         row = dict(check_id='rule.example', path='app.py', start={'line': 1},
                    extra={'message': 'Review input validation', 'severity': 'WARNING'})
-        return {'version': '1.182.1', 'results': [row, copy.deepcopy(row)] if findings else [],
+        return {'version': '1.185.0', 'results': [row, copy.deepcopy(row)] if findings else [],
                 'errors': [], 'paths': {'scanned': ['app.py', 'scripts/lib/sast_evidence.py']}, 'skipped_rules': []}
     row = dict(test_id='B101', filename='./app.py', line_number=1,
                issue_text='Review assertion', issue_severity='LOW')
@@ -60,7 +60,7 @@ def report(scanner, findings=False):
                                                          (-15, True, False), (None, True, False)])
 def test_observed_execution_and_findings_exits(scanner, exit_code, has_findings, complete):
     module = load()
-    state, rows = module.normalize(scanner, module.encoded(report(scanner, has_findings)), exit_code, '1.182.1')
+    state, rows = module.normalize(scanner, module.encoded(report(scanner, has_findings)), exit_code, '1.185.0')
     expected = complete[scanner] if isinstance(complete, dict) else complete
     assert (state['status'] == 'complete') is expected
     assert len(rows) == (2 if has_findings else 0)
@@ -77,7 +77,7 @@ def test_observed_execution_and_findings_exits(scanner, exit_code, has_findings,
 def test_partial_parseable_and_malformed_reports_are_not_clean(scanner, bad):
     module = load()
     data = report(scanner, True)
-    version = '1.182.1'
+    version = '1.185.0'
     if bad == 'missing-results':
         del data['results']
     elif bad == 'missing-errors':
@@ -329,7 +329,7 @@ def test_bandit_partial_metrics_never_count_as_completion(metrics):
     module = load()
     data = report('bandit')
     data['metrics'] = metrics
-    state, rows = module.normalize('bandit', module.encoded(data), 0, '1.182.1')
+    state, rows = module.normalize('bandit', module.encoded(data), 0, '1.185.0')
     assert state['status'] == 'incomplete' and rows == []
 
 
@@ -338,7 +338,7 @@ def test_bandit_empty_file_with_observed_zero_loc_is_still_executed():
     module = load()
     data = report('bandit')
     data['metrics'] = {'_totals': {'loc': 0}, 'empty.py': {'loc': 0}}
-    state, rows = module.normalize('bandit', module.encoded(data), 0, '1.182.1')
+    state, rows = module.normalize('bandit', module.encoded(data), 0, '1.185.0')
     assert state['status'] == 'complete' and state['scanned_paths'] == ['empty.py'] and rows == []
 
 
@@ -350,7 +350,7 @@ def test_semgrep_warning_level_partial_parse_is_incomplete_without_omitting_find
     data = report('semgrep', True)
     data['errors'] = [{'code': 3, 'level': 'warn', 'type': ['PartialParsing', []],
                        'message': 'Partial analysis', 'path': 'app.py'}]
-    state, rows = module.normalize('semgrep', module.encoded(data), 0, '1.182.1')
+    state, rows = module.normalize('semgrep', module.encoded(data), 0, '1.185.0')
     assert state['status'] == 'incomplete' and state['reason'] == 'scanner_reported_errors'
     assert len(rows) == 2
 
@@ -649,7 +649,7 @@ def test_semgrep_missing_completion_fields_or_stale_version_retains_findings(fie
         del data[field]
     else:
         data[field] = value
-    state, findings = module.normalize("semgrep", module.encoded(data), 0, "1.182.1")
+    state, findings = module.normalize("semgrep", module.encoded(data), 0, "1.185.0")
     assert state["status"] == "incomplete" and len(findings) == 2
 
 
@@ -743,3 +743,15 @@ def test_malformed_evidence_roots_keep_consumer_cli_static(source, tmp_path, mon
     assert module.main() == 1
     assert capsys.readouterr().err == "SAST evidence unavailable or incomplete\n"
     assert len(calls) == 4 and not (root / ".ai/sast-findings.json").exists()
+
+
+def test_legacy_report_shape_still_normalizes_with_its_observed_version():
+    module = load()
+    data = report('semgrep', True)
+    data['version'] = '1.182.1'
+    state, rows = module.normalize('semgrep', module.encoded(data), 0, '1.182.1')
+    assert state['status'] == 'complete'
+    assert len(rows) == 2 and rows[0]['finding_id'] == rows[1]['finding_id']
+    assert set(rows[0]) == {'finding_id', 'rule', 'file', 'line', 'message', 'severity'}
+    # Format compatibility does not make an old tool pin current qualification.
+    assert module.SCANNER_VERSIONS['semgrep'] == '1.185.0'

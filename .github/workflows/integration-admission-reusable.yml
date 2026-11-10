@@ -82,9 +82,10 @@ jobs:
           CONFIG_PATH: ${{ inputs.config_path }}
           EVIDENCE_BUNDLE_JSON: ${{ inputs.evidence_bundle_json }}
           SHADOW: ${{ inputs.shadow }}
+          HEAD_SHA: ${{ inputs.head_sha }}
         shell: bash -euo pipefail {0}
         run: |
-          if [[ ! "$BASE_SHA" =~ ^[0-9a-fA-F]{40}$ ]] || [[ ! "${{ inputs.head_sha }}" =~ ^[0-9a-fA-F]{40}$ ]]; then
+          if [[ ! "$BASE_SHA" =~ ^[0-9a-fA-F]{40}$ ]] || [[ ! "${HEAD_SHA}" =~ ^[0-9a-fA-F]{40}$ ]]; then
             echo "::error::base_sha and head_sha must be full 40-character Git object IDs."
             exit 1
           fi
@@ -111,7 +112,7 @@ jobs:
                   raise SystemExit(f"evidence[{index}] must be an object")
               (out / f"{index:04d}.json").write_text(json.dumps(item, sort_keys=True))
           '
-          git diff --name-only -z "$BASE_SHA" "${{ inputs.head_sha }}" |
+          git diff --name-only -z "$BASE_SHA" "${HEAD_SHA}" |
             python3 -c 'import json,sys,pathlib; pathlib.Path(".integration-admission/changed.json").write_text(json.dumps([p.decode("utf-8", "surrogateescape") for p in sys.stdin.buffer.read().split(b"\0") if p]))'
 
       - name: Plan admission

@@ -202,8 +202,11 @@ jobs:
     steps:
       - name: Validate timeout contract
         shell: bash
+        env:
+          JOB_TIMEOUT_MINUTES: ${{ inputs.job_timeout_minutes }}
+          TEST_TIMEOUT_MINUTES: ${{ inputs.timeout_minutes }}
         run: |
-          if [ "${{ inputs.job_timeout_minutes }}" -lt $(( ${{ inputs.timeout_minutes }} + 60 )) ]; then
+          if [ "${JOB_TIMEOUT_MINUTES}" -lt $(( ${TEST_TIMEOUT_MINUTES} + 60 )) ]; then
             echo "::error::job_timeout_minutes must be >= timeout_minutes + 60 (install, browsers, build, upload headroom)"
             exit 1
           fi
@@ -220,14 +223,18 @@ jobs:
         shell: bash
         working-directory: ${{ inputs.workdir }}
         timeout-minutes: 20
-        run: ${{ inputs.install_command }}
+        env:
+          INSTALL_COMMAND: ${{ inputs.install_command }}
+        run: bash -e -o pipefail -c "$INSTALL_COMMAND"
 
       - name: Build
         shell: bash
         if: ${{ inputs.build_command != '' }}
         working-directory: ${{ inputs.workdir }}
         timeout-minutes: 20
-        run: ${{ inputs.build_command }}
+        env:
+          BUILD_COMMAND: ${{ inputs.build_command }}
+        run: bash -e -o pipefail -c "$BUILD_COMMAND"
 
       - name: Install Playwright browsers
         shell: bash

@@ -25,6 +25,7 @@ runs:
         MIGRATION_PATH: ${{ inputs.path }}
         MIGRATION_JOURNAL: ${{ inputs.journal }}
         MIGRATION_BASELINE: ${{ inputs.baseline }}
+        MIGRATION_ACTION_PATH: ${{ github.action_path }}
       run: |
         set -euo pipefail
         args=(--adapter "$MIGRATION_ADAPTER" --path "$MIGRATION_PATH")
@@ -34,4 +35,4 @@ runs:
         if [ -n "$MIGRATION_BASELINE" ]; then
           args+=(--baseline "$MIGRATION_BASELINE")
         fi
-        python3 "${{ github.action_path }}/validate.py" "${args[@]}"
+        python3 "${MIGRATION_ACTION_PATH}/validate.py" "${args[@]}"

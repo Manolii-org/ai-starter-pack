@@ -22,7 +22,7 @@ def run_step(workflow, name, tmp_path, **environment):
 
 
 def reports(tmp_path):
-    semgrep = {'version': '1.182.1', 'results': [], 'errors': [], 'paths': {'scanned': ['fixture.py']}}
+    semgrep = {'version': '1.185.0', 'results': [], 'errors': [], 'paths': {'scanned': ['fixture.py']}}
     bandit = {'results': [], 'errors': [], 'metrics': {'_totals': {'loc': 1}, 'fixture.py': {'loc': 1}}}
     (tmp_path / 'semgrep-results.json').write_text(json.dumps(semgrep))
     (tmp_path / 'bandit-results.json').write_text(json.dumps(bandit))
@@ -83,7 +83,7 @@ def test_partial_completion_never_becomes_successful_zero_findings(tmp_path, wor
 @pytest.mark.parametrize('workflow', WORKFLOWS)
 @pytest.mark.parametrize(('code', 'error_type'), [(2, 'Timeout'), (3, ['PartialParsing', []])])
 def test_native_warning_shapes_remain_incomplete_despite_findings_exit(tmp_path, workflow, code, error_type):
-    # Semgrep 1.182.1 can emit native exit 1 and findings alongside these
+    # The observed Semgrep 1.182.1 run emitted exit 1 and findings alongside these
     # completion warnings. A success banner or level=warn is not full coverage.
     semgrep, _ = reports(tmp_path)
     semgrep['results'] = [{'check_id': 'fixture.rule', 'path': 'fixture.py', 'start': {'line': 1},
@@ -173,10 +173,60 @@ def test_scanner_contract_and_portable_commands_stay_in_sync():
     steps = [[s for s in spec['jobs']['sast']['steps'] if 'run' in s] for spec in specs]
     assert steps[0] == steps[1]
     install = next(s['run'] for s in steps[0] if s['name'] == 'Install report-producing scanners')
-    assert 'semgrep==1.182.1' in install and 'bandit==1.9.4' in install
+    assert 'semgrep==1.185.0' in install and 'bandit==1.9.4' in install
     contract = (ROOT / 'scripts/lib/sast_evidence.py').read_text()
-    assert '"semgrep": "1.182.1", "bandit": "1.9.4"' in contract
+    assert '"semgrep": "1.185.0", "bandit": "1.9.4"' in contract
     assert '--config auto --json --error --output' in next(s['run'] for s in steps[0] if s['name'] == 'Run Semgrep')
+    assert '--timeout 30 --timeout-threshold 0' in next(s['run'] for s in steps[0] if s['name'] == 'Run Semgrep')
     for spec in specs:
         assert "needs.classify.result == 'success'" in spec['jobs']['sast']['if']
         assert 'continue-on-error' not in next(s for s in spec['jobs']['sast']['steps'] if s.get('name') == 'Run Semgrep')
+
+
+def test_changed_ref_reaches_git_as_data(tmp_path):
+    spec = yaml.load((ROOT / '.github/workflows/pr-assessment.yml').read_text(), Loader=yaml.BaseLoader)
+    step = next(s for s in spec['jobs']['classify']['steps'] if s.get('name') == 'Get PR diff')
+    assert step['env']['PR_BASE_REF'] == '${{ github.base_ref }}'
+    git = tmp_path / 'git'
+    git.write_text('#!/usr/bin/env python3\nimport json,sys\n'
+                   "with open('args.jsonl','a') as f: f.write(json.dumps(sys.argv[1:])+'\\n')\n"
+                   "print('fixture.py')\n")
+    git.chmod(0o755)
+    ref = 'feature/$(touch injected)'
+    result = subprocess.run(['bash', '-e', '-o', 'pipefail', '-c',
+                             step['run'].replace('/tmp/pr.diff', str(tmp_path / 'pr.diff'))],
+                            cwd=tmp_path, env={'PATH': str(tmp_path) + os.pathsep + os.environ['PATH'],
+                            'PR_BASE_REF': ref, 'GITHUB_OUTPUT': str(tmp_path / 'outputs')},
+                            capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stderr
+    assert not (tmp_path / 'injected').exists()
+    calls = [json.loads(line) for line in (tmp_path / 'args.jsonl').read_text().splitlines()]
+    assert calls == [['diff', f'origin/{ref}...HEAD'], ['diff', '--name-only', f'origin/{ref}...HEAD']]
+
+
+@pytest.mark.parametrize(('name', 'key'), [('Install dependencies', 'INSTALL_COMMAND'), ('Build', 'BUILD_COMMAND')])
+@pytest.mark.parametrize('fails', [False, True])
+def test_e2e_command_environment_preserves_multiline_code_and_pipefail(tmp_path, name, key, fails):
+    spec = yaml.load((ROOT / '.github/workflows/e2e-playwright-reusable.yml').read_text(), Loader=yaml.BaseLoader)
+    step = next(s for s in spec['jobs']['e2e']['steps'] if s.get('name') == name)
+    expected_input = 'install_command' if key == 'INSTALL_COMMAND' else 'build_command'
+    assert step['env'][key] == '${{ inputs.' + expected_input + ' }}'
+    command = 'printf "%s" "$FIXTURE_DATA" > result\n'
+    command += 'false | true\nprintf unsafe > after\n' if fails else 'printf complete > after\n'
+    result = subprocess.run(['bash', '-e', '-o', 'pipefail', '-c', step['run']], cwd=tmp_path,
+                            env={'PATH': os.environ['PATH'], key: command,
+                                 'FIXTURE_DATA': 'quoted $(touch injected) data'},
+                            capture_output=True, text=True, timeout=10)
+    assert result.returncode == (1 if fails else 0)
+    assert (tmp_path / 'result').read_text() == 'quoted $(touch injected) data'
+    assert not (tmp_path / 'injected').exists()
+    assert (tmp_path / 'after').exists() is not fails
+
+
+def test_runner_policy_alone_selects_its_owning_recipe():
+    import runpy
+    matches = runpy.run_path(str(ROOT / 'scripts/agent-check.py'))['matches']
+    config = json.loads((ROOT / 'config/agent-checks.json').read_text())
+    check = next(c for c in config['checks'] if c['id'] == 'assessment-sast-failure-contract')
+    assert matches(['tests/test_pr_assessment_runner_policy.py'], check['paths'])
+    assert 'tests/test_pr_assessment_runner_policy.py' in check['commands'][0]

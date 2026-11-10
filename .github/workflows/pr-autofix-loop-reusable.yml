@@ -221,6 +221,8 @@ jobs:
           TRUSTED_BOTS: ${{ inputs.trusted_agent_bots }}
           WR_NAME: ${{ github.event.workflow_run.name || '' }}
           WR_URL: ${{ github.event.workflow_run.html_url || '' }}
+          REVIEW_STATE: ${{ github.event.review.state }}
+          REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
           echo "number=$PR_NUM" >> "$GITHUB_OUTPUT"
@@ -251,7 +253,6 @@ jobs:
           fi
 
           if [[ "$EVENT_NAME" == "pull_request_review" ]]; then
-            REVIEW_STATE="${{ github.event.review.state }}"
             if [[ "$REVIEW_STATE" == "approved" ]] && [[ -z "$COMMENT_BODY" || "$COMMENT_BODY" == "null" ]]; then
               echo "skip=true" >> "$GITHUB_OUTPUT"
               exit 0
@@ -304,7 +305,7 @@ jobs:
             if [[ "$EVENT_NAME" == "workflow_run" && "$who" == *"[bot]" ]] && trusted_bot "$who"; then
               continue
             fi
-            PERM=$(timeout -k 5 30 gh api "repos/${{ github.repository }}/collaborators/${who}/permission" --jq '.permission' 2>/dev/null || echo unknown)
+            PERM=$(timeout -k 5 30 gh api "repos/${REPOSITORY}/collaborators/${who}/permission" --jq '.permission' 2>/dev/null || echo unknown)
             case "$PERM" in
               admin|write) ;;
               *)
@@ -317,7 +318,7 @@ jobs:
 
           # Fail closed on opt-out labels: a failed lookup must not silently
           # bypass a PR's skip-ai-review label.
-          if ! LABELS=$(timeout -k 5 30 gh pr view "$PR_NUM" --repo "${{ github.repository }}" --json labels --jq '[.labels[].name]' 2>/dev/null); then
+          if ! LABELS=$(timeout -k 5 30 gh pr view "$PR_NUM" --repo "${REPOSITORY}" --json labels --jq '[.labels[].name]' 2>/dev/null); then
             echo "skip=true" >> "$GITHUB_OUTPUT"
             echo "label lookup failed — opt-out labels unverifiable; skipping"
             exit 0
@@ -336,6 +337,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUM: ${{ steps.pr.outputs.number }}
           MAX_FIXES: ${{ inputs.max_successful_fixes }}
+          REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
           MAX_FIXES="${MAX_FIXES:-1}"
@@ -343,7 +345,7 @@ jobs:
           # --paginate runs the jq per page, so awk sums across pages. Fail
           # closed: a timed-out/failed enumeration must not read as 0, which
           # would let an exhausted budget dispatch another agent pass.
-          if ! COUNT=$(timeout -k 5 30 gh api "repos/${{ github.repository }}/pulls/${PR_NUM}/commits" --paginate \
+          if ! COUNT=$(timeout -k 5 30 gh api "repos/${REPOSITORY}/pulls/${PR_NUM}/commits" --paginate \
             --jq '[.[].commit.message | split("\n")[0] | select(startswith("[autofix]"))] | length' 2>/dev/null \
             | awk '{s+=$1} END {print s+0}'); then
             echo "skip=true" >> "$GITHUB_OUTPUT"
@@ -354,7 +356,7 @@ jobs:
           if [[ "$COUNT" -ge "$MAX_FIXES" ]]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
             echo "::notice::Per-PR autofix budget reached ($COUNT >= $MAX_FIXES successful [autofix] commits); skipping"
-            timeout -k 5 30 gh pr comment "$PR_NUM" --repo "${{ github.repository }}" --body "<!-- pack-autofix:budget-exhausted --> [autofix-budget] Skipping further Autofix — this PR already has ${COUNT} successful [autofix] commit(s) (cap ${MAX_FIXES}). Remove an autofix commit or raise max_successful_fixes if a further pass is intentional." || true
+            timeout -k 5 30 gh pr comment "$PR_NUM" --repo "${REPOSITORY}" --body "<!-- pack-autofix:budget-exhausted --> [autofix-budget] Skipping further Autofix — this PR already has ${COUNT} successful [autofix] commit(s) (cap ${MAX_FIXES}). Remove an autofix commit or raise max_successful_fixes if a further pass is intentional." || true
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi

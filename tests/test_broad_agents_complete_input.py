@@ -434,7 +434,7 @@ def test_actual_sast_normalizer_preserves_duplicate_bandit_ids(runner, deep_repo
     rows = [{'test_id': 'B101', 'filename': './flow.py', 'line_number': n,
              'issue_text': 'Review flow', 'issue_severity': 'LOW'} for n in (1, 2)]
     (tmp_path / 'semgrep-results.json').write_text(json.dumps({
-        'version': '1.182.1', 'results': [], 'errors': [], 'paths': {'scanned': ['flow.py']}}))
+        'version': '1.185.0', 'results': [], 'errors': [], 'paths': {'scanned': ['flow.py']}}))
     (tmp_path / 'bandit-results.json').write_text(json.dumps({
         'results': rows, 'errors': [], 'metrics': {'flow.py': {'loc': 2}, '_totals': {'loc': 2}}}))
     result = subprocess.run(['bash', '-e', '-o', 'pipefail', '-c', shell], cwd=tmp_path,

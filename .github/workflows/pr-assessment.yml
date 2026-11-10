@@ -75,9 +75,10 @@ jobs:
       # environment. Restore them from the PR base; paths the PR adds are
       # dropped, never run.
       - name: Restore trusted runtime from PR base
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           set -euo pipefail
-          BASE_SHA="${{ github.event.pull_request.base.sha }}"
           [ -n "$BASE_SHA" ] || { echo "No pull_request base context — nothing to restore"; exit 0; }
           # A PR-owned .ai symlink would redirect the nested catalog deletion.
           if [ -L .ai ] || { [ -e .ai ] && [ ! -d .ai ]; }; then
@@ -110,10 +111,12 @@ jobs:
 
       - name: Get PR diff
         id: diff
+        env:
+          PR_BASE_REF: ${{ github.base_ref }}
         run: |
-          git diff origin/${{ github.base_ref }}...HEAD > /tmp/pr.diff
+          git diff "origin/${PR_BASE_REF}...HEAD" > /tmp/pr.diff
           echo "lines=$(wc -l < /tmp/pr.diff)" >> $GITHUB_OUTPUT
-          echo "files=$(git diff --name-only origin/${{ github.base_ref }}...HEAD | wc -l)" >> $GITHUB_OUTPUT
+          echo "files=$(git diff --name-only "origin/${PR_BASE_REF}...HEAD" | wc -l)" >> $GITHUB_OUTPUT
 
       - name: Run pr-classifier
         id: classify
@@ -339,14 +342,14 @@ jobs:
 
       - name: Install report-producing scanners
         # Same providers and rule selection; pins match the portable scanner contract.
-        run: python3 -m pip install --quiet 'semgrep==1.182.1' 'bandit==1.9.4'
+        run: python3 -m pip install --quiet 'semgrep==1.185.0' 'bandit==1.9.4'
 
       - name: Run Semgrep
         id: semgrep
         run: |
           rm -f /tmp/semgrep-results.json /tmp/bandit-results.json
           set +e
-          semgrep scan --config auto --json --error --output /tmp/semgrep-results.json .
+          semgrep scan --config auto --json --error --output /tmp/semgrep-results.json --timeout 30 --timeout-threshold 0 .
           status=$?
           set -e
           case "$status" in
@@ -394,7 +397,7 @@ jobs:
                   raise ValueError(f'{scanner}: nonzero exit without findings')
               if scanner == 'semgrep':
                   scanned = data.get('paths', {}).get('scanned')
-                  if (data.get('version') != '1.182.1' or not isinstance(scanned, list) or not scanned
+                  if (data.get('version') != '1.185.0' or not isinstance(scanned, list) or not scanned
                           or not all(isinstance(p, str) and p.strip() for p in scanned)
                           or data.get('skipped_rules', []) != []):
                       raise ValueError('semgrep: incomplete rules, version or scanned-file evidence')
@@ -462,9 +465,10 @@ jobs:
           persist-credentials: false
 
       - name: Restore trusted runtime from PR base
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           set -euo pipefail
-          BASE_SHA="${{ github.event.pull_request.base.sha }}"
           [ -n "$BASE_SHA" ] || { echo "No pull_request base context — nothing to restore"; exit 0; }
           # A PR-owned .ai symlink would redirect the nested catalog deletion.
           if [ -L .ai ] || { [ -e .ai ] && [ ! -d .ai ]; }; then
@@ -521,9 +525,10 @@ jobs:
           SKILLS: ${{ needs.classify.outputs.invoke_skills }}
           PR_TITLE: ${{ github.event.pull_request.title }}
           PR_BODY: ${{ github.event.pull_request.body }}
+          PR_BASE_REF: ${{ github.base_ref }}
         run: |
           rm -rf .ai/candidates && mkdir -p .ai/candidates
-          git diff origin/${{ github.base_ref }}...HEAD > /tmp/pr.diff
+          git diff "origin/${PR_BASE_REF}...HEAD" > /tmp/pr.diff
           python3 scripts/run-specialists.py \
             --skills "$SKILLS" \
             --diff /tmp/pr.diff \
@@ -557,9 +562,10 @@ jobs:
           persist-credentials: false
 
       - name: Restore trusted runtime from PR base
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           set -euo pipefail
-          BASE_SHA="${{ github.event.pull_request.base.sha }}"
           [ -n "$BASE_SHA" ] || { echo "No pull_request base context — nothing to restore"; exit 0; }
           # A PR-owned .ai symlink would redirect the nested catalog deletion.
           if [ -L .ai ] || { [ -e .ai ] && [ ! -d .ai ]; }; then
@@ -611,9 +617,10 @@ jobs:
           CLIENT_AI_POLICY: ${{ vars.CLIENT_AI_POLICY }}
           ANTHROPIC_DIRECT_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           AGENTS: ${{ needs.classify.outputs.invoke_agents }}
+          PR_BASE_REF: ${{ github.base_ref }}
         run: |
           rm -rf .ai/candidates && mkdir -p .ai/candidates
-          git diff origin/${{ github.base_ref }}...HEAD > /tmp/pr.diff
+          git diff "origin/${PR_BASE_REF}...HEAD" > /tmp/pr.diff
           python3 scripts/run-broad-agents.py \
             --agents "$AGENTS" \
             --diff /tmp/pr.diff \
@@ -646,9 +653,10 @@ jobs:
           fetch-depth: 0
 
       - name: Restore trusted runtime from PR base
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           set -euo pipefail
-          BASE_SHA="${{ github.event.pull_request.base.sha }}"
           [ -n "$BASE_SHA" ] || { echo "No pull_request base context — nothing to restore"; exit 0; }
           # A PR-owned .ai symlink would redirect the nested catalog deletion.
           if [ -L .ai ] || { [ -e .ai ] && [ ! -d .ai ]; }; then
@@ -731,10 +739,11 @@ jobs:
           # Base SHA feeds the dedup digest — a base update changes the diff
           # being judged, so it must produce a fresh verdict, not suppress one.
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           mkdir -p .ai/judge-log
           python3 scripts/run-judge.py \
             --candidates-dir .ai/candidates/ \
             --pr-number "$PR_NUMBER" \
             --repo "$REPO" \
-            --sha "${{ github.event.pull_request.head.sha }}"
+            --sha "${PR_HEAD_SHA}"
