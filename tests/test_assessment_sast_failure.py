@@ -81,6 +81,25 @@ def test_partial_completion_never_becomes_successful_zero_findings(tmp_path, wor
 
 
 @pytest.mark.parametrize('workflow', WORKFLOWS)
+@pytest.mark.parametrize(('code', 'error_type'), [(2, 'Timeout'), (3, ['PartialParsing', []])])
+def test_native_warning_shapes_remain_incomplete_despite_findings_exit(tmp_path, workflow, code, error_type):
+    # Semgrep 1.182.1 can emit native exit 1 and findings alongside these
+    # completion warnings. A success banner or level=warn is not full coverage.
+    semgrep, _ = reports(tmp_path)
+    semgrep['results'] = [{'check_id': 'fixture.rule', 'path': 'fixture.py', 'start': {'line': 1},
+                           'extra': {'message': 'Synthetic finding', 'severity': 'WARNING'}}]
+    semgrep['errors'] = [{'code': code, 'level': 'warn', 'type': error_type,
+                          'path': 'fixture.py', 'message': 'Synthetic incomplete scan'}]
+    (tmp_path / 'semgrep-results.json').write_text(json.dumps(semgrep))
+    (tmp_path / '.ai').mkdir()
+    (tmp_path / '.ai/sast-findings.json').write_text('[]')
+    result = run_step(workflow, 'Merge SAST findings', tmp_path, SEMGREP_EXIT='1')
+    assert result.returncode != 0
+    assert 'semgrep: incomplete or malformed report' in result.stderr
+    assert not (tmp_path / '.ai/sast-findings.json').exists()
+
+
+@pytest.mark.parametrize('workflow', WORKFLOWS)
 def test_complete_clean_reports_remain_valid(tmp_path, workflow):
     reports(tmp_path)
     result = run_step(workflow, 'Merge SAST findings', tmp_path)
