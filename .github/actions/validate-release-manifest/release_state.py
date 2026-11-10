@@ -116,14 +116,17 @@ class GitHubStateStore:
             raise StateUnavailable("runtime admission requires an initialized retained revision")
         return self._compare_and_swap(expected, state)
 
-    def initialize_empty_for_adoption(self) -> str:
+    def initialize_empty_for_adoption(self, *, schema_version: int = 1) -> str:
         """Explicit bootstrap after qualified source adoption and legacy drain.
 
         Creates only an empty custom ref; an existing/concealed ref cannot be
         overwritten because the provider must accept a CREATE, never an update.
         This operation grants no stage or production execution authority.
         """
-        return self._compare_and_swap(None, {"schema_version": 1, "active": None, "continuations": {}})
+        state = {"schema_version": schema_version, "active": None, "continuations": {}}
+        if schema_version == 2:
+            state["admitted"] = []
+        return self._compare_and_swap(None, state)
 
     def _compare_and_swap(self, expected: str | None, state: dict) -> str:
         validate_state(state)
@@ -162,10 +165,22 @@ class GitHubStateStore:
 
 
 def validate_state(state: dict) -> None:
-    if (not isinstance(state, dict) or set(state) != {"schema_version", "active", "continuations"}
-            or type(state["schema_version"]) is not int or state["schema_version"] != 1
+    if not isinstance(state, dict):
+        raise StateUnavailable("invalid release state envelope")
+    version = state.get("schema_version")
+    keys = {"schema_version", "active", "continuations"} | ({"admitted"} if version == 2 else set())
+    if (set(state) != keys
+            or type(version) is not int or version not in (1, 2)
             or not isinstance(state["continuations"], dict)):
         raise StateUnavailable("invalid release state envelope")
+    if version == 2:
+        admitted = state["admitted"]
+        if (not isinstance(admitted, list) or any(not isinstance(i, str) or not re.fullmatch(r"[0-9a-f]{64}", i) for i in admitted)
+                or len(admitted) != len(set(admitted))):
+            raise StateUnavailable("invalid admitted release identities")
+        if state["active"] is not None and (not isinstance(state["active"], dict)
+                                           or state["active"].get("release_id") not in admitted):
+            raise StateUnavailable("active release lacks admission history")
     for parent, child in state["continuations"].items():
         if not isinstance(parent, str) or not isinstance(child, str) \
                 or not re.fullmatch(r"[0-9a-f]{64}", parent) or not re.fullmatch(r"[0-9a-f]{64}", child):
@@ -188,6 +203,11 @@ def reserve(state: dict, manifest: dict, *, now: datetime | None = None) -> dict
     validate(manifest)
     active = state["active"]
     subject = manifest["subject"]
+    if manifest["schema_version"] == 2 and state["schema_version"] != 2:
+        raise StateUnavailable("v2 release requires explicitly adopted replay-safe state reader")
+    if ((active and active["release_id"] == manifest["release_id"])
+            or manifest["release_id"] in state.get("admitted", [])):
+        raise StateConflict("release identity has already been admitted; reconcile retained state")
     admission_time = datetime.now(timezone.utc) if now is None else now
     if not isinstance(admission_time, datetime) or admission_time.utcoffset() is None:
         raise StateUnavailable("admission clock must be a timezone-aware instant")
@@ -203,6 +223,8 @@ def reserve(state: dict, manifest: dict, *, now: datetime | None = None) -> dict
         raise StateConflict("an active or unresolved release must complete before new admission")
     result = copy.deepcopy(state)
     result["active"] = {"release_id": manifest["release_id"], "phase": "selected"}
+    if result["schema_version"] == 2:
+        result["admitted"].append(manifest["release_id"])
     if subject["kind"] == "activation-only":
         result["continuations"][parent] = manifest["release_id"]
     validate_state(result)

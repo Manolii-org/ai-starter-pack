@@ -134,7 +134,7 @@ class ManifestTests(unittest.TestCase):
             root = Path(directory)
             for target in ["schemas", "plugin/manolii-framework/schemas", "registry/platform/framework/schemas"]:
                 (root / target).mkdir(parents=True)
-                for name in ["release-adoption.v1.schema.json", "release-manifest.v1.schema.json"]:
+                for name in ["release-adoption.v1.schema.json", "release-manifest.v1.schema.json", "release-manifest.v2.schema.json"]:
                     (root / target / name).write_text("fixture")
             comparisons = [command for command in recipe["commands"]
                            if len(command) == 3 and command[1] == "-c"

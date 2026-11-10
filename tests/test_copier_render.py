@@ -333,6 +333,7 @@ def test_release_capability_distribution_boundary(default_render, branded_render
     paths = (
         "docs/coordinated-releases.md",
         "schemas/release-manifest.v1.schema.json",
+        "schemas/release-manifest.v2.schema.json",
         "schemas/release-adoption.v1.schema.json",
         ".github/actions/validate-release-manifest/action.yml",
         ".github/actions/validate-release-manifest/release_manifest.py",

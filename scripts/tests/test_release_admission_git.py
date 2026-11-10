@@ -81,6 +81,23 @@ class GitFixture(state.GitHubStateStore):
 
 
 class GitAdmissionIntegrationTests(unittest.TestCase):
+    def test_v2_replay_tombstones_survive_real_git_roundtrip(self):
+        from datetime import datetime, timezone
+        from test_release_vector import prepare
+        with tempfile.TemporaryDirectory() as directory:
+            store = GitFixture(directory)
+            revision = store.initialize_empty_for_adoption(schema_version=2)
+            _, initial = store.read()
+            record = prepare()
+            reserved = state.reserve(initial, record, now=datetime(2026, 11, 1, tzinfo=timezone.utc))
+            selected = store.compare_and_swap(revision, reserved)
+            reserved['active']['phase'] = 'success'
+            store.compare_and_swap(selected, reserved)
+            _, restarted = store.read()
+            self.assertEqual(restarted['admitted'], [record['release_id']])
+            with self.assertRaises(state.StateConflict):
+                state.reserve(restarted, record, now=datetime(2026, 11, 1, tzinfo=timezone.utc))
+
     def test_real_git_roundtrip_and_stale_parent_rejection(self):
         with tempfile.TemporaryDirectory() as directory:
             store = GitFixture(directory)

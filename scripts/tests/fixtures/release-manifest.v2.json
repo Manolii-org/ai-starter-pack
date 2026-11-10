@@ -1,0 +1,165 @@
+{
+  "schema_version": 2,
+  "release_id": "6595e3e1923bb64818bd6e0ed01aa5b682f342d6f7caa81382d353e374781760",
+  "subject": {
+    "repo": "example/product",
+    "environment": "production",
+    "kind": "release",
+    "control_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "capability_sha": "cccccccccccccccccccccccccccccccccccccccc",
+    "profile_version": "1",
+    "policy_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "decision_sequence": [
+      "release"
+    ],
+    "preparation": {
+      "run_id": 10,
+      "run_attempt": 1,
+      "job": "prepare"
+    },
+    "databases": [
+      {
+        "id": "db-api",
+        "adapter": "alembic",
+        "source": {
+          "repo": "example/api",
+          "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "writer": "trusted-api",
+        "baseline": [
+          "old-api"
+        ],
+        "pending": [
+          "new-api"
+        ],
+        "expected_after": [
+          "old-api",
+          "new-api"
+        ],
+        "migration_sha256": "6666666666666666666666666666666666666666666666666666666666666666",
+        "backup_required": true,
+        "fixture_version": "synthetic-v1",
+        "compatible_components": [
+          "api"
+        ]
+      },
+      {
+        "id": "db-worker",
+        "adapter": "journal",
+        "source": {
+          "repo": "example/worker",
+          "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "writer": "trusted-worker",
+        "baseline": [
+          "old-worker"
+        ],
+        "pending": [
+          "new-worker"
+        ],
+        "expected_after": [
+          "old-worker",
+          "new-worker"
+        ],
+        "migration_sha256": "7777777777777777777777777777777777777777777777777777777777777777",
+        "backup_required": true,
+        "fixture_version": "synthetic-v1",
+        "compatible_components": [
+          "worker"
+        ]
+      }
+    ],
+    "timing": {
+      "selected_at": "2026-11-01T00:00:00Z",
+      "approval_deadline": "2026-11-01T01:00:00Z",
+      "execute_before": "2026-11-01T02:00:00Z",
+      "intermediate_seconds": 3600
+    },
+    "recovery": {
+      "owner": "release-owner",
+      "data_authority": "data-owner",
+      "allowed_actions": [
+        "hold",
+        "code-rollback"
+      ],
+      "automatic_data_loss_threshold": 0
+    },
+    "continuation": null,
+    "entity": "example",
+    "config_sha256": "8888888888888888888888888888888888888888888888888888888888888888",
+    "components": [
+      {
+        "id": "api",
+        "source": {
+          "repo": "example/api",
+          "sha": "1111111111111111111111111111111111111111",
+          "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "promotion_sha": null,
+        "target": "api",
+        "provider": "fixture",
+        "artifact_id": "api-candidate",
+        "artifact_sha256": "3333333333333333333333333333333333333333333333333333333333333333",
+        "config_sha256": "4444444444444444444444444444444444444444444444444444444444444444",
+        "before_artifact_id": "api-previous",
+        "recovery_artifact_id": "api-previous",
+        "before_config_sha256": "4444444444444444444444444444444444444444444444444444444444444444",
+        "before_features_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "recovery_artifact_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+        "feature_states": [],
+        "databases": [
+          "db-api"
+        ],
+        "features_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "depends_on": []
+      },
+      {
+        "id": "worker",
+        "source": {
+          "repo": "example/worker",
+          "sha": "2222222222222222222222222222222222222222",
+          "tree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "promotion_sha": null,
+        "target": "worker",
+        "provider": "fixture",
+        "artifact_id": "worker-candidate",
+        "artifact_sha256": "4444444444444444444444444444444444444444444444444444444444444444",
+        "config_sha256": "4444444444444444444444444444444444444444444444444444444444444444",
+        "before_artifact_id": "worker-previous",
+        "recovery_artifact_id": "worker-previous",
+        "before_config_sha256": "4444444444444444444444444444444444444444444444444444444444444444",
+        "before_features_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "recovery_artifact_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+        "feature_states": [],
+        "databases": [
+          "db-worker"
+        ],
+        "features_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "depends_on": [
+          "api"
+        ]
+      }
+    ],
+    "unchanged_components": [],
+    "qualifications": [
+      {
+        "repo": "example/control",
+        "workflow": "qualification.yml",
+        "provider": "github",
+        "run_id": 10,
+        "run_attempt": 1,
+        "evidence_sha256": "9999999999999999999999999999999999999999999999999999999999999999",
+        "tested_subject_sha256": "fdd3e769e2aba84b37e8db06ed09c9338c49817a8924d17db26dce0b5e4e4491",
+        "completed_at": "2026-10-31T23:00:00Z",
+        "retain_until": "2026-11-02T00:00:00Z",
+        "first_attempt": "success",
+        "retry_count": 0,
+        "status": "success",
+        "obligations": []
+      }
+    ]
+  }
+}
