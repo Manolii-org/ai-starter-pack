@@ -340,7 +340,9 @@
         ".github/workflows/pr-assessment*.yml",
         "tests/test_assessment_sast_failure.py",
         "tests/test_pr_assessment_draft_skip.py",
-        "config/agent-checks.json"
+        "config/agent-checks.json",
+        "tests/test_broad_agents_complete_input.py",
+        "tests/test_hydrate_assessment.py"
       ],
       "tools": [
         "python"
@@ -353,7 +355,9 @@
           "-q",
           "tests/test_assessment_sast_failure.py",
           "tests/test_pr_assessment_draft_skip.py",
-          "tests/test_pr_assessment_runner_policy.py"
+          "tests/test_pr_assessment_runner_policy.py",
+          "tests/test_broad_agents_complete_input.py",
+          "tests/test_hydrate_assessment.py"
         ]
       ],
       "ci_sources": [

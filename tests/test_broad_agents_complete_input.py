@@ -421,34 +421,28 @@ def test_deep_input_retains_multiplicity_full_diff_old_new_and_untrusted_bytes(r
     assert packet['provenance'] == 'caller-bound; producer authenticity not established'
 
 
-def test_actual_sast_normalizer_preserves_duplicate_bandit_ids(runner, deep_repo, monkeypatch):
-    """Execute the published direct workflow's actual normalizer, no tools."""
-    import builtins
+def test_actual_sast_normalizer_preserves_duplicate_bandit_ids(runner, deep_repo, tmp_path):
+    """Execute the published normalizer with complete offline scanner reports."""
     import copy
+    import os
+    import subprocess
     import yaml
 
     document = yaml.safe_load((ROOT / '.github/workflows/pr-assessment.yml').read_text())
     step = next(s for s in document['jobs']['sast']['steps'] if s.get('name') == 'Merge SAST findings')
-    shell = step['run']
-    # Extract only the existing double-quoted Python literal; no shell launch.
-    code = shell.split('python3 -c "', 1)[1].rsplit('"', 1)[0].replace('\\"', '"')
-    code = __import__('textwrap').dedent(code)
+    shell = step['run'].replace('/tmp/', str(tmp_path) + '/')
     rows = [{'test_id': 'B101', 'filename': './flow.py', 'line_number': n,
              'issue_text': 'Review flow', 'issue_severity': 'LOW'} for n in (1, 2)]
-    output = io.StringIO()
-    def fake_open(path, mode='r', *a, **k):
-        if path == '.ai/sast-findings.json' and mode == 'w':
-            return output
-        else:
-            assert path == '/tmp/bandit-results.json'
-            return io.StringIO(json.dumps({'results': rows}))
-    real_open = builtins.open
-    monkeypatch.setattr(builtins, 'open', fake_open)
-    monkeypatch.setattr(__import__('os').path, 'exists', lambda p: p == '/tmp/bandit-results.json')
-    exec(compile(code, '<published-sast-normalizer>', 'exec'), {})
-    monkeypatch.setattr(builtins, 'open', real_open)
+    (tmp_path / 'semgrep-results.json').write_text(json.dumps({
+        'version': '1.182.1', 'results': [], 'errors': [], 'paths': {'scanned': ['flow.py']}}))
+    (tmp_path / 'bandit-results.json').write_text(json.dumps({
+        'results': rows, 'errors': [], 'metrics': {'flow.py': {'loc': 2}, '_totals': {'loc': 2}}}))
+    result = subprocess.run(['bash', '-e', '-o', 'pipefail', '-c', shell], cwd=tmp_path,
+                            env={**os.environ, 'SEMGREP_EXIT': '0', 'BANDIT_EXIT': '1',
+                                 'BANDIT_REQUIRED': 'true'}, capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stderr
     args = copy.deepcopy(deep_repo[2])
-    args['sast'] = output.getvalue().encode()
+    args['sast'] = (tmp_path / '.ai/sast-findings.json').read_bytes()
     args['sast_binding']['sast_sha256'] = __import__('hashlib').sha256(args['sast']).hexdigest()
     packet = runner.build_security_deep_dive_input(deep_repo[0], **args)
     assert len(packet['entries']) == 2
