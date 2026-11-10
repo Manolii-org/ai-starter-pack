@@ -51,7 +51,7 @@ def load_json(path: Path) -> dict:
     return result
 
 
-def canonical_bytes(value: dict) -> bytes:
+def canonical_bytes(value: object) -> bytes:
     """v1 identity: sorted keys, compact JSON, literal Unicode, UTF-8, no NaN."""
     try:
         return json.dumps(value, sort_keys=True, separators=(",", ":"),
@@ -60,7 +60,7 @@ def canonical_bytes(value: dict) -> bytes:
         raise ManifestError("subject cannot be canonically encoded") from exc
 
 
-def digest(value: dict) -> str:
+def digest(value: object) -> str:
     return hashlib.sha256(canonical_bytes(value)).hexdigest()
 
 
@@ -79,17 +79,23 @@ def _instant(value: str) -> datetime:
 
 
 def validate(manifest: dict, *, expected_release_id: str | None = None) -> dict:
-    schema = json.loads(SCHEMA.read_text())
+    version = manifest.get("schema_version") if isinstance(manifest, dict) else None
+    if type(version) is not int or version not in (1, 2):
+        raise ManifestError("unsupported release manifest version")
+    schema = json.loads(SCHEMA.with_name(f"release-manifest.v{version}.schema.json").read_text())
     validator = jsonschema.Draft202012Validator(schema, format_checker=jsonschema.FormatChecker())
     if next(validator.iter_errors(manifest), None) is not None:
         # Schema error messages may contain arbitrary caller values or secrets.
-        raise ManifestError("release manifest does not match schema v1")
+        raise ManifestError("release manifest does not match schema")
     subject = manifest["subject"]
     identity = digest(subject)
     if identity != manifest["release_id"]:
         raise ManifestError("release subject digest differs from release_id")
     if expected_release_id is not None and identity != expected_release_id:
         raise ManifestError("release subject differs from trusted expected identity")
+    if version == 2:
+        _validate_vector(subject)
+        return manifest
     qualification = subject["qualification"]
     if qualification["source_sha"] != subject["source_sha"]:
         raise ManifestError("qualification source differs from candidate")
@@ -128,9 +134,113 @@ def validate(manifest: dict, *, expected_release_id: str | None = None) -> dict:
     return manifest
 
 
-def prepare(subject: dict) -> dict:
-    result = {"schema_version": 1, "release_id": digest(subject), "subject": copy.deepcopy(subject)}
+def prepare(subject: dict, *, schema_version: int = 1) -> dict:
+    result = {"schema_version": schema_version, "release_id": digest(subject), "subject": copy.deepcopy(subject)}
     return validate(result)
+
+
+def qualification_subject(subject: dict) -> dict:
+    """Exact combined inputs; evidence does not recursively hash itself."""
+    return {key: copy.deepcopy(subject[key]) for key in (
+        "repo", "entity", "environment", "control_sha", "capability_sha", "profile_version",
+        "policy_sha256", "config_sha256", "components", "databases", "unchanged_components", "recovery")}
+
+
+def validate_native_binding(manifest: dict, *, expected_release_id: str,
+                            expected_controller_sha: str, execution_context: dict,
+                            now: datetime) -> dict:
+    """Revalidate immutable inputs INSIDE a separately qualified native job.
+
+    Context must be supplied by the reviewed owner adapter from the native
+    executor/preparation dependency, never candidate JSON. This function cannot
+    observe protection settings, credential gating or human review and grants
+    no authority. Approval history and its optional timestamp are not inputs.
+    """
+    if (not isinstance(expected_release_id, str) or not re.fullmatch(r"[0-9a-f]{64}", expected_release_id)
+            or not isinstance(expected_controller_sha, str) or not re.fullmatch(r"[0-9a-f]{40}", expected_controller_sha)):
+        raise ManifestError("native binding requires independent exact expected identities")
+    validate(manifest, expected_release_id=expected_release_id)
+    if manifest["schema_version"] != 2:
+        raise ManifestError("native execution binding requires an explicit v2 execution subject")
+    subject = manifest["subject"]
+    if subject["control_sha"] != expected_controller_sha:
+        raise ManifestError("controller differs from reviewed expected revision")
+    expected = {"repo": subject["repo"], "environment": subject["environment"],
+                "controller_sha": expected_controller_sha, "release_id": expected_release_id,
+                "preparation_run_id": subject["preparation"]["run_id"],
+                "preparation_run_attempt": subject["preparation"]["run_attempt"]}
+    if manifest["schema_version"] == 2:
+        if subject["execution"]["workflow_sha"] != expected_controller_sha:
+            raise ManifestError("protected execution workflow differs from reviewed controller")
+        expected.update(execution_run_id=subject["execution"]["run_id"],
+                        execution_run_attempt=subject["execution"]["run_attempt"],
+                        execution_job=subject["execution"]["job"])
+    if canonical_bytes(execution_context) != canonical_bytes(expected):
+        raise ManifestError("native executor binding differs from prepared subject")
+    if not isinstance(now, datetime) or now.utcoffset() is None:
+        raise ManifestError("execution clock must be a timezone-aware instant")
+    if not _instant(subject["timing"]["selected_at"]) <= now < _instant(subject["timing"]["execute_before"]):
+        raise ManifestError("execution is outside fixed release window")
+    return manifest
+
+
+def _validate_vector(subject: dict) -> None:
+    components = subject["components"]
+    databases = subject["databases"]
+    ids = [item["id"] for item in components]
+    db_ids = [item["id"] for item in databases]
+    unchanged = [item["id"] for item in subject["unchanged_components"]]
+    targets = [item["target"] for item in components]
+    for values in (ids, db_ids, unchanged, targets):
+        if len(values) != len(set(values)):
+            raise ManifestError("duplicate release vector identity")
+    if set(ids) & set(unchanged):
+        raise ManifestError("selected component also declared unchanged")
+    # Same organization is a conservative portable floor. The trusted owner
+    # adapter must enforce its compiled entity/target allowlist as well.
+    owner = subject["repo"].split("/")[0].casefold()
+    sources = [item["source"] for item in components + databases + subject["unchanged_components"]]
+    if any(source["repo"].split("/")[0].casefold() != owner for source in sources):
+        raise ManifestError("release source crosses owning organization")
+    if {db for item in components for db in item["databases"]} != set(db_ids):
+        raise ManifestError("component database dependencies differ from declared graphs")
+    visited = set(unchanged)
+    for component in components:
+        if (component["recovery_artifact_id"] is None) != (component["recovery_artifact_sha256"] is None):
+            raise ManifestError("recovery artifact identity and digest must be paired")
+        features = component["feature_states"]
+        if component["features_sha256"] != digest(features):
+            raise ManifestError("feature state differs from component feature identity")
+        feature_ids = [feature["id"] for feature in features]
+        if len(feature_ids) != len(set(feature_ids)):
+            raise ManifestError("duplicate component feature identity")
+        if any(feature["readiness"] == "development" and feature["default_enabled"] for feature in features):
+            raise ManifestError("development feature cannot default enabled")
+        if not set(component["depends_on"]) <= visited:
+            raise ManifestError("component order contains unknown or forward dependency")
+        visited.add(component["id"])
+    for db in databases:
+        baseline, pending, after = (set(db[key]) for key in ("baseline", "pending", "expected_after"))
+        if baseline & pending or after != baseline | pending:
+            raise ManifestError("independent migration ledger sets disagree")
+        consumers = {c["id"] for c in components if db["id"] in c["databases"]}
+        if not consumers <= set(db["compatible_components"]) <= set(ids + unchanged):
+            raise ManifestError("migration compatibility omits consumer or names unknown component")
+    timing = subject["timing"]
+    if not (_instant(timing["selected_at"]) < _instant(timing["approval_deadline"])
+            < _instant(timing["execute_before"])):
+        raise ManifestError("release deadlines are not strictly ordered")
+    tested = digest(qualification_subject(subject))
+    for evidence in subject["qualifications"]:
+        if evidence["tested_subject_sha256"] != tested:
+            raise ManifestError("qualification differs from selected combined runtime")
+        if not (_instant(evidence["completed_at"]) <= _instant(timing["selected_at"])
+                < _instant(timing["execute_before"]) <= _instant(evidence["retain_until"])):
+            raise ManifestError("qualification is unavailable for release window")
+        if evidence["first_attempt"] == "failure" and evidence["retry_count"] == 0:
+            raise ManifestError("recovered qualification lacks retry outcome")
+    if subject["kind"] == "activation-only" and any(db["pending"] for db in databases):
+        raise ManifestError("activation-only cannot contain pending SQL")
 
 
 def activation_only(parent: dict, *, schema_evidence: dict, current: dict,
@@ -144,6 +254,8 @@ def activation_only(parent: dict, *, schema_evidence: dict, current: dict,
     producing this proposal neither reserves it nor authorizes activation.
     """
     validate(parent)
+    if parent["schema_version"] != 1:
+        raise ManifestError("v2 continuation requires fresh combined-runtime qualification")
     if not admission_revision or admitted_continuation is not None:
         raise ManifestError("continuation admission revision absent or predecessor already claimed")
     if digest(schema_evidence) != expected_evidence_sha256:

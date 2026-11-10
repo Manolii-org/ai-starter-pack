@@ -27,6 +27,14 @@ class GitFixture(state.GitHubStateStore):
                     "GIT_AUTHOR_DATE": "2020-01-01T00:00:00Z", "GIT_COMMITTER_DATE": "2020-01-01T00:00:00Z"}
         self.git("init", "--bare")
 
+    def _git_url(self):
+        return self.directory
+
+    def _write_state(self, expected, content):
+        if self.barrier:
+            self.barrier.wait(timeout=10)
+        return super()._write_state(expected, content)
+
     def git(self, *args, data=None, check=True):
         result = subprocess.run(["git", "-C", self.directory, *args], input=data,
                                 capture_output=True, text=True, env=self.env, timeout=10)
@@ -35,22 +43,13 @@ class GitFixture(state.GitHubStateStore):
         return result
 
     def request(self, method, path, payload=None, *, missing=False):
+        if method != "GET":
+            raise AssertionError("REST mutation is not a CAS transport, including in tests")
         if path == "git/ref/" + self.ref:
             result = self.git("rev-parse", "--verify", "refs/" + self.ref, check=False)
             if result.returncode and missing:
                 return None
             return {"object": {"sha": result.stdout.strip()}}
-        if method == "POST" and path == "git/blobs":
-            return {"sha": self.git("hash-object", "-w", "--stdin", data=payload["content"]).stdout.strip()}
-        if method == "POST" and path == "git/trees":
-            entry = payload["tree"][0]
-            text = f'{entry["mode"]} {entry["type"]} {entry["sha"]}\t{entry["path"]}\n'
-            return {"sha": self.git("mktree", data=text).stdout.strip()}
-        if method == "POST" and path == "git/commits":
-            args = ["commit-tree", payload["tree"]]
-            for parent in payload["parents"]:
-                args += ["-p", parent]
-            return {"sha": self.git(*args, data=payload["message"]).stdout.strip()}
         if method == "GET" and path.startswith("git/commits/"):
             return {"tree": {"sha": self.git("show", "-s", "--format=%T", path.split("/")[-1]).stdout.strip()}}
         if method == "GET" and path.startswith("git/trees/"):
@@ -61,26 +60,41 @@ class GitFixture(state.GitHubStateStore):
         if method == "GET" and path.startswith("git/blobs/"):
             raw = self.git("cat-file", "blob", path.split("/")[-1]).stdout.encode()
             return {"encoding": "base64", "size": len(raw), "content": base64.b64encode(raw).decode()}
-        if method in {"PATCH", "POST"} and path in {"git/refs", "git/refs/" + self.ref}:
-            if self.barrier:
-                self.barrier.wait(timeout=10)
-            ref = "refs/" + self.ref
-            current = self.git("rev-parse", "--verify", ref, check=False)
-            old = current.stdout.strip() if current.returncode == 0 else "0" * 40
-            if method == "POST" and old != "0" * 40:
-                raise state.StateConflict("already exists")
-            if method == "PATCH":
-                assert payload["force"] is False
-                if self.git("merge-base", "--is-ancestor", old, payload["sha"], check=False).returncode:
-                    raise state.StateConflict("not a fast-forward")
-            result = self.git("update-ref", ref, payload["sha"], old, check=False)
-            if result.returncode:
-                raise state.StateConflict("another child won")
-            return {"ref": ref, "object": {"sha": payload["sha"]}}
         raise AssertionError((method, path))
 
 
 class GitAdmissionIntegrationTests(unittest.TestCase):
+    def test_regression_to_rest_mutation_cannot_pass_real_git_fixture(self):
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as directory:
+            store = GitFixture(directory)
+            first = store.initialize_empty_for_adoption()
+            _, original = store.read()
+            def unsafe_rest_writer(expected, content):
+                return store.request("PATCH", "git/refs/" + store.ref,
+                                     {"sha": "0" * 40, "force": False})
+            with patch.object(store, "_write_state", side_effect=unsafe_rest_writer):
+                with self.assertRaisesRegex(AssertionError, "REST mutation"):
+                    store.compare_and_swap(first, original)
+            self.assertEqual(store.read(), (first, original))
+
+    def test_v2_replay_tombstones_survive_real_git_roundtrip(self):
+        from datetime import datetime, timezone
+        from test_release_vector import prepare
+        with tempfile.TemporaryDirectory() as directory:
+            store = GitFixture(directory)
+            revision = store.initialize_empty_for_adoption(schema_version=2)
+            _, initial = store.read()
+            record = prepare()
+            reserved = state.reserve(initial, record, now=datetime(2026, 11, 1, tzinfo=timezone.utc))
+            selected = store.compare_and_swap(revision, reserved)
+            reserved['active']['phase'] = 'success'
+            store.compare_and_swap(selected, reserved)
+            _, restarted = store.read()
+            self.assertEqual(restarted['admitted'], [record['release_id']])
+            with self.assertRaises(state.StateConflict):
+                state.reserve(restarted, record, now=datetime(2026, 11, 1, tzinfo=timezone.utc))
+
     def test_real_git_roundtrip_and_stale_parent_rejection(self):
         with tempfile.TemporaryDirectory() as directory:
             store = GitFixture(directory)
@@ -112,7 +126,9 @@ class GitAdmissionIntegrationTests(unittest.TestCase):
             def reserve():
                 try:
                     results.append(("won", store.compare_and_swap(parent, empty)))
-                except state.StateConflict:
+                except (state.StateConflict, state.StateUnavailable):
+                    # A receive-pack race can report an atomic-transaction
+                    # failure, which must hold for readback rather than retry.
                     results.append(("conflict", None))
 
             workers = [threading.Thread(target=reserve) for _ in range(2)]
@@ -144,6 +160,7 @@ class GitAdmissionIntegrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             fixture = GitFixture(directory)
             store = state.GitHubStateStore("example/product", "production", "fixture-token")
+            store._write_state = fixture._write_state
 
             def open_request(request, timeout):
                 path = request.full_url.removeprefix("https://api.github.com/repos/example/product/")

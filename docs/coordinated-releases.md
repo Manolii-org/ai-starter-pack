@@ -1,6 +1,6 @@
 # Coordinated release capability
 
-The version 1 capability prepares and validates immutable release proposals and
+The capability reads version 1 and version 2 immutable release proposals and
 activation-only continuation proposals. It does not execute migrations, activate
 traffic or certify human approval. Existing product workflows remain authoritative.
 
@@ -22,7 +22,7 @@ compares evidence without another production operation or human decision.
 Coordinated mode requires a qualified owner profile; a static declaration does not
 establish live protection. Preserve installed decision scopes, actors and branch
 rules. Combining distinct schema/activation decisions requires explicit owner
-policy adoption. Automatic profiles retain their existing production policy.
+policy adoption. A legacy automatic declaration is not standing production authority. Qualify the owning native boundary before cutover; preserve installed controls until replacement admission is verified.
 
 ## Manifest validation
 
@@ -81,8 +81,7 @@ That endpoint records reviewer, environment, state and comment. It does not bind
 a manifest digest, exact job/attempt and authenticated decision timestamp.
 Adding similarly named fields to a client JSON file does not repair that API
 contract. A qualified provider-retained immutable linkage still needs a reviewed
-adapter and actual transport evidence. Until then, retain legacy execution and
-hold all coordinated paths depending on this capability. Do not use typed
+adapter and actual transport evidence. The qualified native profile uses protected execution as its authority and does not depend on approval-history precision. Retain legacy execution and hold only paths whose actual native protection or credential boundary has not been proved. Do not use typed
 confirmation, a dispatch actor or a mutable summary as a replacement.
 
 ## Interrupted activation and admission
@@ -114,7 +113,7 @@ Runtime reads require an initialized revision. `initialize_empty_for_adoption`
 is a distinct bootstrap after writer closure and verified legacy drain; it can
 only create an empty custom ref and cannot overwrite an existing ref. Never call
 it as a runtime read-error fallback. The store retains exact parent
-revisions and creates a unique child commit, then updates without force. Two
+revisions and creates a unique child commit, then pushes with an atomic Git receive-pack expected-old lease. Two
 concurrent children cannot both advance one revision, including identical
 proposals created in the same second. An unknown write result holds for readback;
 it is not permission to execute or blindly repeat the mutation.
@@ -189,3 +188,60 @@ change selection; it does not issue an agent-check receipt or release authority.
 
 The final public candidate must also pass the existing secret scan. No model
 call, additional business database or new approval service is added to releases.
+
+## Version 2 selected release reader
+
+`schemas/release-manifest.v2.schema.json` adds one entity-local component vector.
+Use `prepare(subject, schema_version=2)` explicitly; the default remains v1.
+The existing composite reads either version. Unknown versions fail closed, and
+old v1 readers reject v2 rather than treating it as compatible execution input.
+Publish these readers before any owner producer changes its installed profile.
+Strict deployment receipt formats are unchanged.
+
+Each selected component names its independent source repository/commit/tree,
+optional promotion commit, artifact digest, configuration, feature states,
+expected before-state, recovery artifact/digest, databases and ordered component
+dependencies. Unchanged dependencies are explicit. Independent databases retain
+their own source, adapter, writer, migration digest, ordered baseline/pending/after
+sets, fixture and compatible consumers. There is no aggregate migration hash.
+Qualification binds `digest(qualification_subject(subject))`, the complete
+combined runtime vector, with provider/workflow/run/attempt, retained evidence,
+first-attempt outcome, retries and no unsatisfied obligations. This digest is a
+tested-input identity, not proof that a particular producer ran those tests;
+the owning adapter must verify trusted producer identity and evidence contents.
+
+Feature readiness and off/kill generations are explicit and hashed. Development
+cannot default enabled. Effective runtime activation must additionally honor
+intentional off and kill state. Empty feature arrays prove no runtime isolation.
+The reader does not publish flags, clear kills, apply SQL or activate artifacts.
+Adapters still enforce their compiled owner/target allowlists and native graph
+ordering/compatibility; same-organization source checks are only a portable floor.
+
+`validate_native_binding` rechecks the independently retained subject digest,
+reviewed controller, preparation run/attempt, protected execution run/job/attempt, native executor environment and
+fixed execution deadline. Call it inside a separately qualified protected job,
+using the reviewed adapter's native context and preparation dependency. It is not
+an approval oracle: candidate JSON, a successful return or a copied context cannot
+prove protection settings, reviewer entitlement or credential isolation. The owner
+must prove those real native controls and acquire the actual mutation lock/CAS
+before writes. Actor/time may remain unavailable; `github_approval.py` remains
+non-authorizing audit enrichment. Never fabricate an approval timestamp or accept
+an `approved` boolean from a downloaded record.
+
+GitHub REST `PATCH force:false` is not a compare-and-swap guarantee for custom refs. The writer therefore uses ephemeral Git objects and `git push --atomic --force-with-lease=<custom-ref>:<expected-old>`; the expected-old identity is enforced by receive-pack. It never falls back to REST writes. Git credentials remain in repository-scoped process environment headers, redirects and credential-helper fallback are disabled, and existing proxy/CA trust is preserved. A rejected or ambiguous push holds for verified readback, never a blind retry. The owning trusted runner needs Git. Actual provider transport must be qualified using this adapter before production admission.
+
+Version 2 records require explicitly adopted state schema v2. Its `admitted`
+identities survive completed releases/restarts and prevent replay after later
+work. Initialize only through `initialize_empty_for_adoption(schema_version=2)`
+after owner-qualified legacy drain and writer closure; it cannot replace an
+existing ref. There is no automatic state upgrade or missing-read fallback.
+Retain tombstones and active/recovery history; the existing bounded store refuses
+oversize writes instead of discarding replay evidence. The state schema v1 reader
+remains supported. A live owner transport and mixed-reader cutover must still be
+qualified before a v2 producer starts. Admission metadata never replaces provider
+locks, native approval or expected live-state readback.
+
+The v1 `activation_only` convenience builder deliberately refuses a v2 parent:
+a v2 continuation needs freshly bound combined-state qualification, empty pending
+sets, the predecessor/schema evidence and a new exact native decision. The v2
+reader validates that explicit record; it does not synthesize fresh evidence.

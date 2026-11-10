@@ -329,10 +329,11 @@ def test_validation_layout_distribution_boundary(default_render, branded_render)
 
 
 def test_release_capability_distribution_boundary(default_render, branded_render):
-    """Consumers receive the documented release capability and canonical schemas."""
+    """Ship runtime readers, omit pack maintenance, and run a consumer check."""
     paths = (
         "docs/coordinated-releases.md",
         "schemas/release-manifest.v1.schema.json",
+        "schemas/release-manifest.v2.schema.json",
         "schemas/release-adoption.v1.schema.json",
         ".github/actions/validate-release-manifest/action.yml",
         ".github/actions/validate-release-manifest/release_manifest.py",
@@ -342,10 +343,11 @@ def test_release_capability_distribution_boundary(default_render, branded_render
     for rendered in (default_render, branded_render):
         for rel in paths:
             assert (rendered / rel).read_bytes() == (ROOT / rel).read_bytes()
-        for rel in ("scripts/tests/test_release_manifest.py",
-                    "scripts/tests/test_release_admission_git.py",
-                    "scripts/tests/fixtures/release-manifest.v1.json"):
-            assert not (rendered / rel).exists()
+        maintenance_paths = list((ROOT / "scripts/tests").glob("test_release_*.py"))
+        maintenance_paths += list((ROOT / "scripts/tests/fixtures").glob("release-manifest.v*.json"))
+        assert maintenance_paths, "the pack maintenance inventory must not become vacuous"
+        for path in maintenance_paths:
+            assert not (rendered / path.relative_to(ROOT)).exists()
         config = json.loads((rendered / "config/agent-checks.json").read_text())
         assert all(c["id"] not in {"release-manifest-contract", "feature-controls", "feature-controls-distribution"} for c in config["checks"])
         assert all(e["id"] not in {"release-contract-python", "feature-controls-python"} for e in config["environments"])
@@ -359,6 +361,30 @@ def test_release_capability_distribution_boundary(default_render, branded_render
         )
         assert result.returncode == 0, result.stdout + result.stderr
         assert "authority=none" in result.stdout
+        vector_fixture = ROOT / "scripts/tests/fixtures/release-manifest.v2.json"
+        vector_id = json.loads(vector_fixture.read_text())["release_id"]
+        vector_result = subprocess.run(
+            [sys.executable, str(validator), "--manifest", str(vector_fixture),
+             "--expected-release-id", vector_id, "--dry-run"],
+            cwd=rendered, capture_output=True, text=True, timeout=30,
+        )
+        assert vector_result.returncode == 0, vector_result.stdout + vector_result.stderr
+        assert "authority=none" in vector_result.stdout
+        # Exercise the same discovery seam that previously collected the leaked
+        # vector tests, then positively run an intentionally portable unit test.
+        env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
+        discovery = subprocess.run(
+            [sys.executable, "-c", "import unittest; suite=unittest.TestLoader().discover('scripts/tests', pattern='test_release_*.py'); assert suite.countTestCases() == 0"],
+            cwd=rendered, capture_output=True, text=True, timeout=30, env=env,
+        )
+        assert discovery.returncode == 0, discovery.stdout + discovery.stderr
+        portable = subprocess.run(
+            [sys.executable, "-m", "unittest", "discover", "-s", "scripts/tests",
+             "-p", "test_agent_check.py", "-k", "test_execute_and_reuse_only_identical_candidate", "-q"],
+            cwd=rendered, capture_output=True, text=True, timeout=30, env=env,
+        )
+        assert portable.returncode == 0, portable.stdout + portable.stderr
+        assert "Ran 1 test" in portable.stderr, "the positive consumer smoke must execute"
 
 
 def test_security_audit_tests_run_in_rendered_consumers(default_render, branded_render):
