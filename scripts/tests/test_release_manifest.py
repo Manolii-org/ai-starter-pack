@@ -455,6 +455,45 @@ class ApprovalCapabilityTests(unittest.TestCase):
         messages = [options['input'] for argv, options in calls if argv[3] == 'commit-tree']
         self.assertNotEqual(messages[0], messages[1])
 
+    def test_native_wire_conflict_requires_exact_ref_expected_old_and_different_live_oid(self):
+        from unittest.mock import patch
+        from types import SimpleNamespace
+        ref = 'refs/release-state/production'
+        expected, actual, proposed = 'b' * 40, 'c' * 40, 'a' * 40
+        message = f"[remote rejected] (cannot lock ref '{ref}': is at {actual} but expected {expected})"
+        cases = [(message, ref, state.StateConflict),
+                 ('[rejected] (stale info)', ref, state.StateConflict),
+                 (message.replace(ref, ref + '-other'), ref, state.StateUnavailable),
+                 (message.replace(actual, expected), ref, state.StateUnavailable),
+                 (message.replace('expected ' + expected, 'expected ' + actual), ref, state.StateUnavailable),
+                 (message.replace(actual, 'invalid'), ref, state.StateUnavailable),
+                 (message, ref + '-other', state.StateUnavailable),
+                 ('[remote rejected] (atomic transaction failed)', ref, state.StateUnavailable),
+                 ('[remote rejected] (permission denied)', ref, state.StateUnavailable),
+                 ('unexpected [rejected] (stale info)', ref, state.StateUnavailable)]
+        for status, reported_ref, error in cases:
+            def run(argv, **kwargs):
+                if argv[3] == 'push':
+                    return SimpleNamespace(returncode=1, stderr='unavailable',
+                        stdout=f'To https://github.com/example/product.git\n!\t{proposed}:{reported_ref}\t{status}\nDone\n')
+                return SimpleNamespace(returncode=0, stdout=proposed, stderr='')
+            with self.subTest(status=status, reported_ref=reported_ref), patch.object(state.subprocess, 'run', side_effect=run):
+                store = state.GitHubStateStore('example/product', 'production', 'fixture-token')
+                with self.assertRaises(error):
+                    store._write_state(expected, '{}')
+
+    def test_native_wire_timeout_still_requires_reconciliation(self):
+        from unittest.mock import patch
+        from types import SimpleNamespace
+        def run(argv, **kwargs):
+            if argv[3] == 'push':
+                raise subprocess.TimeoutExpired(argv, 30)
+            return SimpleNamespace(returncode=0, stdout='a' * 40, stderr='')
+        with patch.object(state.subprocess, 'run', side_effect=run):
+            store = state.GitHubStateStore('example/product', 'production', 'fixture-token')
+            with self.assertRaises(state.StateUnavailable):
+                store._write_state('b' * 40, '{}')
+
 
 
 

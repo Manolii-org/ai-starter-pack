@@ -180,8 +180,17 @@ class GitHubStateStore:
                 except (OSError, subprocess.TimeoutExpired) as exc:
                     raise StateUnavailable("Git state write/transport outcome unavailable; reconcile before proceeding") from exc
                 if result.returncode:
-                    if writing and "[rejected]" in result.stdout and "(stale info)" in result.stdout:
-                        raise StateConflict("Git expected-old lease refused a stale state revision")
+                    if writing:
+                        for line in result.stdout.splitlines():
+                            fields = line.split("\t")
+                            if len(fields) != 3 or fields[0] != "!" or fields[1] != args[-1]:
+                                continue
+                            mismatch = re.fullmatch(
+                                r"\[remote rejected\] \(cannot lock ref '" + re.escape(ref)
+                                + r"': is at ([0-9a-f]{40}) but expected ([0-9a-f]{40})\)", fields[2])
+                            if (fields[2] == "[rejected] (stale info)"
+                                    or (mismatch and mismatch[2] == expected and mismatch[1] != expected)):
+                                raise StateConflict("Git expected-old lease refused a stale state revision")
                     raise StateUnavailable("Git state transport refused or write outcome ambiguous; reconcile before proceeding")
                 return result.stdout.strip()
 
