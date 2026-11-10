@@ -32,10 +32,18 @@ requires unique, ordered walkthrough and risk boundaries, the same exact-head
 coverage record inside the risk section, and a recognized complete no-actionable
 issue verdict. A risk rating or absence of production risk cannot supply that
 verdict. Partial or non-clean legacy sections cannot fall through to this form.
-For this newer form, the pre-coverage region accepts only whitespace or the
-observed generated Minimal label bound to the requested commit prefix. After the
+For this newer form, the pre-walkthrough region accepts only the canonical
+prefix and optional generated change-stack link. The walkthrough-to-risk gap
+accepts only whitespace or the observed Minimal risk wrapper bound to the
+requested commit prefix. The pre-coverage region accepts only whitespace or the
+observed generated Minimal label, also bound to that prefix. After the
 risk section, only its closing tags, framed generated pre-merge checks and fixed
 Autofix control are recognized; other prose or unknown trailers fail closed.
+Fences are masked only when locating generated markers, preserving offsets.
+Semantic checks use the original text: fenced findings in the risk section,
+gaps and unframed trailer reject; quoted fences remain allowed within the
+walkthrough and separately framed generated pre-merge checks. Unclosed fences
+fail closed.
 Both forms require the same complete authenticated edit history below.
 Fetch evidence from GitHub; never construct a passing input or post an approval
 under the implementing account. A reviewer acknowledgement is not source review.

@@ -308,6 +308,22 @@ def _clean_recent_review_body(body, head):
             and value.get("sourceCommitId") == head and value.get("coveredCommitId") == head)
 
 
+def _fenced_mask(body):
+    """Locate generated markers without deleting quoted content from validation."""
+    result = []
+    fence = None
+    for line in body.splitlines(keepends=True):
+        opening = re.match(r" {0,3}(`{3,}|~{3,})", line)
+        inside = fence is not None
+        if fence is None and opening:
+            fence = opening[1]
+        elif fence and re.fullmatch(r" {0,3}" + re.escape(fence[0])
+                                   + "{" + str(len(fence)) + r",}[ \t]*(?:\r?\n)?", line):
+            fence = None
+        result.append(re.sub(r"[^\r\n]", " ", line) if inside or opening else line)
+    return None if fence else "".join(result)
+
+
 def clean_coderabbit_body(body, head):
     """Recognize an explicit clean verdict, pending complete edit provenance.
 
@@ -319,23 +335,43 @@ def clean_coderabbit_body(body, head):
         return False
     if _clean_recent_review_body(body, head):
         return True
-    if "recent_review_start" in body or "recent_review_end" in body:
-        return False
     body = coderabbit_body(body)
     if not body.startswith(PREFIX):
         return False
-    body = re.sub(r"^(```|~~~)[^\n]*\n.*?^\1[ \t]*$", "", body, flags=re.MULTILINE | re.DOTALL)
+    # Mask only for locating top-level markers. Semantic regions below always
+    # use the original text, so a fenced finding cannot disappear from review.
+    visible = _fenced_mask(body)
+    if visible is None or "recent_review_start" in visible or "recent_review_end" in visible:
+        return False
     positions = []
     for marker in ("walkthrough_start", "walkthrough_end", "final_review_risk_start", "final_review_risk_end"):
-        matches = list(re.finditer(r"^<!-- " + marker + r" -->[ \t]*$", body, re.MULTILINE))
+        matches = list(re.finditer(r"^<!-- " + marker + r" -->[ \t]*$", visible, re.MULTILINE))
         if len(matches) != 1:
             return False
         positions.append(matches[0].start())
     if positions != sorted(positions):
         return False
-    if re.search(r"review (?:in progress|skipped)|rate.?limit|limit reached", body[:positions[0]], re.IGNORECASE):
+    # Derive every non-walkthrough boundary from the known generated grammar,
+    # rather than deleting text or checking only individual notice phrases.
+    asset = r"https://storage\.googleapis\.com/coderabbit_public_assets/"
+    prefix = (re.escape(PREFIX) + r'\s*(?:<!-- review_stack_entry_start -->\s*'
+              r'<a href="https://app\.coderabbit\.ai/change-stack/[^\s"<>]+"><picture>'
+              r'<source media="\(prefers-color-scheme: dark\)" srcset="' + asset + r'review-stack-buttons-v1/explain-change-dark\.svg">'
+              r'<source media="\(prefers-color-scheme: light\)" srcset="' + asset + r'review-stack-buttons-v1/explain-change\.svg">'
+              r'<img src="' + asset + r'review-stack-buttons-v1/explain-change\.svg" alt="Explain Change →" height="32">'
+              r'</picture></a>\s*<!-- review_stack_entry_end -->\s*)?')
+    if re.fullmatch(prefix, body[:positions[0]]) is None:
         return False
-    coverage = list(re.finditer(r"^<!-- final_review_risk_coverage:(.*?) -->[ \t]*$", body, re.MULTILINE))
+    gap = body[positions[1] + len("<!-- walkthrough_end -->"):positions[2]]
+    frame = re.fullmatch(
+        r'\s*(?:<details>\s*<summary><strong>Merge Risk:</strong> <strong><picture>'
+        r'<img src="' + asset + r'review-comment-icons-v1/risk-unassessed-16\.svg" width="16" height="16" '
+        r'align="absmiddle" alt=""></picture> Minimal</strong> · up to <code>([0-9a-f]{5,40})</code>'
+        r'</summary>\s*<dl>\s*<dd>\s*<br>\s*)?', gap,
+    )
+    if frame is None or (frame[1] and not head.startswith(frame[1])):
+        return False
+    coverage = list(re.finditer(r"^<!-- final_review_risk_coverage:(.*?) -->[ \t]*$", visible, re.MULTILINE))
     if len(coverage) != 1 or not positions[2] < coverage[0].start() < positions[3]:
         return False
     try:

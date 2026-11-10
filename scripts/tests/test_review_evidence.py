@@ -125,6 +125,79 @@ def test_findings_outside_the_verdict_and_unrecognized_trailers_fail_closed(body
     assert not module.clean_coderabbit_body(body, SHA)
 
 
+RISK_FRAME = (
+    '\n<details>\n<summary><strong>Merge Risk:</strong> <strong><picture>'
+    '<img src="https://storage.googleapis.com/coderabbit_public_assets/review-comment-icons-v1/risk-unassessed-16.svg" '
+    'width="16" height="16" align="absmiddle" alt=""></picture> Minimal</strong> · up to '
+    '<code>aaaaa</code></summary>\n<dl>\n<dd>\n<br>\n'
+)
+RISK_STACK = (
+    '\n<!-- review_stack_entry_start -->\n'
+    '<a href="https://app.coderabbit.ai/change-stack/Example/framework/pull/201?scope=all&amp;cs_source=github">'
+    '<picture><source media="(prefers-color-scheme: dark)" '
+    'srcset="https://storage.googleapis.com/coderabbit_public_assets/review-stack-buttons-v1/explain-change-dark.svg">'
+    '<source media="(prefers-color-scheme: light)" '
+    'srcset="https://storage.googleapis.com/coderabbit_public_assets/review-stack-buttons-v1/explain-change.svg">'
+    '<img src="https://storage.googleapis.com/coderabbit_public_assets/review-stack-buttons-v1/explain-change.svg" '
+    'alt="Explain Change →" height="32"></picture></a>\n<!-- review_stack_entry_end -->\n'
+)
+
+
+def test_known_generated_frames_bind_both_displayed_commit_prefixes():
+    framed = RISK_BODY.replace("<!-- walkthrough_start -->", RISK_STACK + "<!-- walkthrough_start -->").replace(
+        "<!-- final_review_risk_start -->", RISK_FRAME + "<!-- final_review_risk_start -->") + RISK_TRAILER
+    assert module.clean_coderabbit_body(framed, SHA)
+    assert not module.clean_coderabbit_body(framed.replace("<code>aaaaa</code>", "<code>bbbbb</code>"), SHA)
+    assert not module.clean_coderabbit_body(framed.replace("Minimal</strong>", "High</strong>"), SHA)
+    assert not module.clean_coderabbit_body(framed.replace("change-stack/Example", "unrecognized/Example"), SHA)
+
+
+@pytest.mark.parametrize("notice", ["Unresolved defect.", "Review skipped.", "Rate limit reached."])
+@pytest.mark.parametrize("zone", ["prefix", "gap", "after_frame"])
+def test_every_unframed_boundary_rejects_findings_and_notices(notice, zone):
+    if zone == "prefix":
+        body = RISK_BODY.replace("<!-- walkthrough_start -->", notice + "\n<!-- walkthrough_start -->")
+    else:
+        gap = notice if zone == "gap" else RISK_FRAME + notice
+        body = RISK_BODY.replace("<!-- final_review_risk_start -->", gap + "\n<!-- final_review_risk_start -->")
+    assert not module.coderabbit_clean_summary([with_provenance(dict(COMMENT, body=body))], SHA, REPO, 201)
+
+
+@pytest.mark.parametrize("opening,closing", [("```", "```"), ("~~~", "~~~"),
+                                            ("````python", "`````"), ("   ```text", "   ```")])
+@pytest.mark.parametrize("zone", ["prefix", "gap", "risk_label", "verdict", "trailer"])
+def test_fenced_findings_cannot_disappear_from_semantic_regions(opening, closing, zone):
+    finding = "\n" + opening + "\nUnresolved defect.\n" + closing + "\n"
+    anchors = {"prefix": "<!-- walkthrough_start -->", "gap": "<!-- final_review_risk_start -->",
+               "risk_label": "<!-- final_review_risk_label", "verdict": "No actionable issue"}
+    body = RISK_BODY + finding if zone == "trailer" else RISK_BODY.replace(anchors[zone], finding + anchors[zone])
+    assert not module.clean_coderabbit_body(body, SHA)
+
+
+@pytest.mark.parametrize("opening,closing", [("```", "```"), ("~~~", "~~~"),
+                                            ("````python", "`````"), ("   ```text", "   ```")])
+def test_quoted_fences_stay_allowed_only_in_walkthrough_and_framed_checks(opening, closing):
+    quoted = (opening + "\n<!-- final_review_risk_start -->\n"
+              "<!-- final_review_risk_coverage:{} -->\n<!-- recent_review_start -->\n"
+              "Unresolved defect in a quoted example.\n" + closing + "\n")
+    body = RISK_BODY.replace("Reviewed implementation.", quoted)
+    assert module.clean_coderabbit_body(body, SHA)
+    trailer = RISK_TRAILER.replace("Passed: title check.", quoted)
+    assert module.clean_coderabbit_body(RISK_BODY + trailer, SHA)
+
+
+@pytest.mark.parametrize("body", [
+    RISK_BODY.replace("<!-- walkthrough_end -->", "<!-- walkthrough_end -->\n<details>Unknown trailer</details>"),
+    RISK_BODY.replace("<!-- final_review_risk_start -->", RISK_FRAME.replace("<dd>", "<dd>Unresolved defect.") + "<!-- final_review_risk_start -->"),
+    RISK_BODY.replace("<!-- walkthrough_start -->", RISK_STACK + "Unresolved defect.\n<!-- walkthrough_start -->"),
+    RISK_BODY.replace("<!-- walkthrough_start -->", RISK_STACK + RISK_STACK + "<!-- walkthrough_start -->"),
+    RISK_BODY.replace("Reviewed implementation.", "```\nUnclosed example."),
+    RISK_BODY + RISK_TRAILER.replace("Passed: title check.", "```python\nUnclosed example."),
+])
+def test_unknown_ambiguous_or_incomplete_boundary_structure_fails_closed(body):
+    assert not module.clean_coderabbit_body(body, SHA)
+
+
 def test_risk_verdict_cannot_be_quoted_from_walkthrough_or_code():
     clean = "No actionable issue is established for this change."
     body = RISK_BODY.replace("Reviewed implementation.", clean).replace(
