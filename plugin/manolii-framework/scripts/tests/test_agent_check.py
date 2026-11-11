@@ -878,6 +878,116 @@ class AgentCheckTests(unittest.TestCase):
         self.assertEqual([r["id"] for r in self.receipt()["results"]], ["diff-check", "dependencies"])
         self.assertFalse((self.root / ".ai/agent-checks/environments").exists())
 
+    def independent_tool_fixture(self, *, consumer_tools=(), requirements=None):
+        state = self.root / '.ai/agent-checks'
+        binaries = state / 'bin'
+        binaries.mkdir(parents=True)
+        binary = binaries / 'node'
+        binary.write_text(f'#!{sys.executable}\nfrom pathlib import Path\nimport sys\n'
+                          "ready=Path('.ai/agent-checks/tool-ready').exists()\n"
+                          "print('vfixture-1' if ready else 'not installed')\n"
+                          'sys.exit(0 if ready else 1)\n')
+        binary.chmod(0o755)
+        environments = []
+        checks = []
+        for name in ('first', 'second'):
+            setup = ('from pathlib import Path; '
+                     f"p=Path('node_modules/{name}'); p.mkdir(parents=True,exist_ok=True); "
+                     "c=p/'installs'; c.write_text(c.read_text()+'1' if c.exists() else '1')")
+            if name == 'second':
+                setup += "; Path('.ai/agent-checks/tool-ready').touch()"
+            environments.append({'id': name, 'inputs': ['lock.json'],
+                                 'tools': [] if name == 'first' else ['node'],
+                                 'ready_paths': [f'node_modules/{name}'],
+                                 'commands': [[sys.executable, '-c', setup]]})
+            checks.append({**self.config['checks'][0], 'id': f'check-{name}',
+                           'environment': name, 'tools': list(consumer_tools) if name == 'first' else ['node']})
+        self.config.update(environments=environments, checks=checks)
+        if requirements is not None:
+            self.config['tool_requirements'] = requirements
+        self.save_config()
+        return {**load('agent-check').git_environment(),
+                'PATH': str(binaries) + os.pathsep + os.environ['PATH']}
+
+    def test_independent_later_tool_install_does_not_invalidate_earlier_setup(self):
+        env = self.independent_tool_fixture()
+        self.run_check('--provision', env=env)
+        self.assertTrue(all(r['status'] == 'passed' for r in self.receipt()['results']))
+        self.assertEqual((self.root / 'node_modules/first/installs').read_text(), '1')
+        self.run_check('--provision', env=env)
+        self.assertTrue(self.receipt()['cached'])
+        self.assertEqual((self.root / 'node_modules/first/installs').read_text(), '1')
+
+    def test_consuming_check_tool_still_invalidates_earlier_setup(self):
+        env = self.independent_tool_fixture(consumer_tools=['node'])
+        self.run_check('--provision', expected=1, env=env)
+        first = next(r for r in self.receipt()['results'] if r['id'] == 'first')
+        self.assertIn('later provisioning', first['reason'])
+        self.assertFalse(any(r['id'].startswith('check-') for r in self.receipt()['results']))
+
+    def test_global_required_tool_still_invalidates_earlier_setup(self):
+        env = self.independent_tool_fixture(requirements={'node': 'vfixture-1'})
+        self.run_check('--provision', expected=1, env=env)
+        first = next(r for r in self.receipt()['results'] if r['id'] == 'first')
+        self.assertIn('later provisioning', first['reason'])
+        self.assertFalse(any(r['id'].startswith('check-') for r in self.receipt()['results']))
+
+    def test_root_tool_requirement_is_probed_without_a_declared_consumer(self):
+        binaries = self.root / 'node_modules/bin'
+        binaries.mkdir(parents=True)
+        binary = binaries / 'node'
+        binary.write_text(f'#!{sys.executable}\nprint("vfixture-wrong")\n')
+        binary.chmod(0o755)
+        self.config['tool_requirements'] = {'node': 'vfixture-required'}
+        self.save_config()
+        self.run_check(expected=1, env={**load('agent-check').git_environment(),
+            'PATH': str(binaries) + os.pathsep + os.environ['PATH']})
+        self.assertEqual(self.receipt()['tool_versions']['node'], 'vfixture-wrong')
+        self.assertTrue(any(r['id'] == 'toolchain-node' for r in self.receipt()['results']))
+
+    def test_setup_tool_binding_keeps_root_and_exact_consuming_contexts(self):
+        runner = load('agent-check')
+        environment = {'id': 'first', 'tools': ['uv'], 'commands': [[sys.executable, '-c', 'pass']]}
+        consumer = {'environment': 'first', 'tools': ['node'], 'cwd': 'app', 'env': {'MODE': 'selected'}}
+        other = {'environment': 'second', 'tools': ['node'], 'cwd': 'other', 'env': {'MODE': 'unrelated'}}
+        plan = {'checks': [consumer, other], 'environments': [environment]}
+        selected = runner.tool_context_key('node', 'app', runner.encoded(consumer['env']).decode())
+        unrelated = runner.tool_context_key('node', 'other', runner.encoded(other['env']).decode())
+        tools = {'platform': 'fixture', 'python': 'Python fixture', 'uv': 'fixture-1',
+                 selected: 'vfixture-1', unrelated: 'vfixture-1'}
+        before = runner.environment_digest(self.root, environment, tools, b'fixture-key', {}, plan=plan)
+        self.assertEqual(set(runner.environment_tools(environment, tools, plan)),
+                         {'platform', 'python', 'uv', selected})
+        for name in ('platform', 'python', 'uv', selected):
+            with self.subTest(context=name):
+                changed = {**tools, name: 'changed'}
+                self.assertNotEqual(before, runner.environment_digest(
+                    self.root, environment, changed, b'fixture-key', {}, plan=plan))
+        self.assertEqual(before, runner.environment_digest(
+            self.root, environment, {**tools, unrelated: 'changed'}, b'fixture-key', {}, plan=plan))
+        plan['tool_requirements'] = {'node': 'vfixture-'}
+        self.assertIn(unrelated, runner.environment_tools(environment, tools, plan))
+
+    def test_legacy_global_tool_environment_receipt_is_revalidated(self):
+        env = self.independent_tool_fixture()
+        self.run_check('--provision', env=env)
+        runner = load('agent-check')
+        environment = self.config['environments'][0]
+        state = self.root / '.ai/agent-checks'
+        path = state / 'environments' / f"environment-{runner.sha(runner.encoded('first'))}.json"
+        prior = json.loads(path.read_text())
+        # Exact pre-migration digest structure; retain its valid result/readiness.
+        prior['digest'] = runner.sha(runner.encoded({
+            'recipe': environment,
+            'inputs': {'lock.json': runner.sha((self.root / 'lock.json').read_bytes())},
+            'tools': self.receipt()['tool_versions'],
+            'execution_environment': runner.environment_fingerprint(
+                runner.private_cache_key(self.root), runner.execution_environment(environment, env))}))
+        path.write_text(json.dumps(prior))
+        self.run_check('--provision', env=env)
+        self.assertEqual((self.root / 'node_modules/first/installs').read_text(), '11')
+        self.assertFalse(self.receipt()['cached'])
+
     def test_all_environment_receipts_use_final_provisioned_tool_versions(self):
         state = self.root / ".ai/agent-checks"
         binaries = state / "bin"

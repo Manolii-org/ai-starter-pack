@@ -373,24 +373,37 @@ def plan_for(root: Path, config: dict, base: str | None = None) -> dict:
     needed = {c.get("environment") for c in checks}
     return {"base": base_sha, "paths": paths, "checks": checks,
             "environments": [e for e in config.get("environments", []) if e["id"] in needed],
-            "review_paths": [p for p in paths if matches([p], config.get("review_paths", []))]}
+            "review_paths": [p for p in paths if matches([p], config.get("review_paths", []))],
+            "tool_requirements": config.get("tool_requirements", {})}
+
+
+def tool_contexts(items: list[dict], requirements=()) -> set[tuple[str, str, str]]:
+    # Keep the framework interpreter; explicit tool contexts retain owner pins.
+    contexts = {("python", ".", "{}")}
+    for item in items:
+        for name in item.get("tools", []):
+            contexts.add((name, str(Path(item.get("cwd", "."))), encoded(item.get("env", {})).decode()))
+    # A required tool with no selected context still needs a root probe.
+    present = {context[0] for context in contexts}
+    contexts.update((name, ".", "{}") for name in requirements if name not in present)
+    return contexts
+
+
+def tool_context_key(name: str, cwd: str, env_json: str) -> str:
+    key = name if cwd == "." and env_json == "{}" else f"{name}@{cwd}"
+    return key + "#" + sha(env_json.encode())[:12] if env_json != "{}" else key
 
 
 def versions(root: Path, plan: dict, inherited: dict | None = None) -> dict:
     # Corepack/pyenv and similar shims select versions from their working
     # directory. Probe each distinct execution context, never the caller's cwd.
-    contexts = {("python", ".", "{}")}
-    for item in [*plan["checks"], *plan["environments"]]:
-        for name in item.get("tools", []):
-            contexts.add((name, str(Path(item.get("cwd", "."))), encoded(item.get("env", {})).decode()))
+    contexts = tool_contexts([*plan["checks"], *plan["environments"]], plan.get("tool_requirements", {}))
     result = {"platform": platform.platform()}
     for name, cwd, env_json in sorted(contexts):
         if name not in TOOLS:
             raise ValueError(f"unknown tool fingerprint: {name}")
         declared_env = json.loads(env_json)
-        key = name if cwd == "." and not declared_env else f"{name}@{cwd}"
-        if declared_env:
-            key += "#" + sha(env_json.encode())[:12]
+        key = tool_context_key(name, cwd, env_json)
         env = execution_environment({"env": declared_env}, inherited)
         try:
             proc = subprocess.run(TOOLS[name], cwd=inside(root, cwd), env=env,
@@ -423,12 +436,25 @@ def execute(root: Path, item: dict, inherited: dict | None = None) -> dict:
             "duration_ms": round((time.monotonic() - start) * 1000)}
 
 
-def environment_digest(root: Path, item: dict, tools: dict, key: bytes, inherited: dict) -> str:
+def environment_tools(item: dict, tools: dict, plan: dict) -> dict:
+    consumers = [check for check in plan["checks"] if check.get("environment") == item["id"]]
+    required = plan.get("tool_requirements", {})
+    contexts = tool_contexts([item, *consumers], required)
+    # A root requirement constrains every selected context of that tool.
+    contexts.update(context for context in tool_contexts([*plan["checks"], *plan["environments"]])
+                    if context[0] in required)
+    keys = {"platform", *(tool_context_key(*context) for context in contexts)}
+    return {name: value for name, value in tools.items() if name in keys}
+
+
+def environment_digest(root: Path, item: dict, tools: dict, key: bytes, inherited: dict,
+                       *, plan: dict | None = None) -> str:
     inputs = {}
     for name in item.get("inputs", []):
         path = inside(root, name)
         inputs[name] = sha(path.read_bytes()) if path.is_file() else None
-    return sha(encoded({"recipe": item, "inputs": inputs, "tools": tools,
+    return sha(encoded({"tool_contract": "agent-environment-tools/v2", "recipe": item, "inputs": inputs,
+                        "tools": environment_tools(item, tools, plan) if plan is not None else tools,
                         "execution_environment": environment_fingerprint(key, execution_environment(item, inherited))}))
 
 
@@ -769,7 +795,7 @@ def main(argv=None) -> int:
         reused_environments = []
         results.append(execute(root, {"id": "diff-check", "commands": [["git", "diff", "--check", plan["base"]]]}, inherited))
         for environment in plan["environments"]:
-            env_digest = environment_digest(root, environment, tools, key, inherited)
+            env_digest = environment_digest(root, environment, tools, key, inherited, plan=plan)
             # One slot per environment prevents an earlier tool fingerprint
             # from resurrecting success after a failed reinstall changes tools.
             env_receipt = state / "environments" / f"environment-{sha(encoded(environment['id']))}.json"
@@ -794,7 +820,7 @@ def main(argv=None) -> int:
             # An interrupted/failed reinstall must revoke the old success
             # before it can leave a partially populated dependency directory.
             env_receipt.unlink(missing_ok=True)
-            input_digest = environment_digest(root, environment, {}, key, inherited)
+            input_digest = environment_digest(root, environment, {}, key, inherited, plan=plan)
             result = execute(root, environment, inherited)
             missing = missing_ready_paths(root, environment)
             if result["status"] == "passed" and missing:
@@ -804,7 +830,7 @@ def main(argv=None) -> int:
                 # Bind setup to the tools it actually left ready, before a
                 # later selected environment can replace any of those tools.
                 tools = versions(root, plan, inherited)
-                validated_digest = environment_digest(root, environment, tools, key, inherited)
+                validated_digest = environment_digest(root, environment, tools, key, inherited, plan=plan)
                 validated_ready = ready_identity(root, environment, key=key)
                 provisioned.append((environment, env_receipt, input_digest, validated_digest, validated_ready, result))
         # Provisioning may install tools. Missing tools must not be mistaken
@@ -826,7 +852,7 @@ def main(argv=None) -> int:
         # change a shared tool, so it must still match before checks can run.
         # Revoke stale setup evidence and require a bounded fresh invocation.
         for environment, env_receipt, reused_digest, reused_ready in reused_environments:
-            if (environment_digest(root, environment, tools, key, inherited) != reused_digest
+            if (environment_digest(root, environment, tools, key, inherited, plan=plan) != reused_digest
                     or ready_identity(root, environment, key=key) != reused_ready):
                 env_receipt.unlink(missing_ok=True)
                 results.append({"id": environment["id"], "status": "failed",
@@ -836,8 +862,8 @@ def main(argv=None) -> int:
         for environment, env_receipt, input_digest, validated_digest, validated_ready, result in provisioned:
             if result["status"] != "passed":
                 continue
-            if (environment_digest(root, environment, {}, key, inherited) != input_digest
-                    or environment_digest(root, environment, tools, key, inherited) != validated_digest
+            if (environment_digest(root, environment, {}, key, inherited, plan=plan) != input_digest
+                    or environment_digest(root, environment, tools, key, inherited, plan=plan) != validated_digest
                     or ready_identity(root, environment, key=key) != validated_ready):
                 env_receipt.unlink(missing_ok=True)
                 result.update(status="failed",
