@@ -80,6 +80,7 @@ def _instant(value: str) -> datetime:
 
 def validate(manifest: dict, *, expected_release_id: str | None = None,
              trusted_source_policy: dict | None = None) -> dict:
+    """Validate against separately trusted policy; grant no execution authority."""
     version = manifest.get("schema_version") if isinstance(manifest, dict) else None
     if type(version) is not int or version not in (1, 2):
         raise ManifestError("unsupported release manifest version")
@@ -218,6 +219,7 @@ def _code_source_allowance(subject: dict, policy: dict | None) -> set[tuple[str,
 
 
 def _validate_vector(subject: dict, *, trusted_source_policy: dict | None = None) -> None:
+    """Check selected code/migration identities; database source repos stay same-org."""
     components = subject["components"]
     databases = subject["databases"]
     ids = [item["id"] for item in components]

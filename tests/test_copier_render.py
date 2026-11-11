@@ -347,6 +347,7 @@ def test_release_capability_distribution_boundary(default_render, branded_render
             assert (rendered / rel).read_bytes() == (ROOT / rel).read_bytes()
         maintenance_paths = list((ROOT / "scripts/tests").glob("test_release_*.py"))
         maintenance_paths += list((ROOT / "scripts/tests/fixtures").glob("release-manifest.v*.json"))
+        maintenance_paths.append(ROOT / "scripts/tests/fixtures/release-manifest.c435.py")
         assert maintenance_paths, "the pack maintenance inventory must not become vacuous"
         for path in maintenance_paths:
             assert not (rendered / path.relative_to(ROOT)).exists()

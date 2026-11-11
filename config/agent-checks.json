@@ -216,7 +216,8 @@
         "schemas/release-source-policy.v1.schema.json",
         "plugin/manolii-framework/schemas/release-source-policy.v1.schema.json",
         "registry/platform/framework/schemas/release-source-policy.v1.schema.json",
-        "scripts/tests/test_release_source_policy.py"
+        "scripts/tests/test_release_source_policy.py",
+        "scripts/tests/fixtures/release-manifest.c435.py"
       ],
       "tools": [
         "uv"
