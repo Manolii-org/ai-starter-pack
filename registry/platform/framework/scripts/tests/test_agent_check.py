@@ -372,8 +372,13 @@ class AgentCheckTests(unittest.TestCase):
         self.git("update-index", "--add", "--cacheinfo", "160000," + head + ",module")
         (self.root / "module").mkdir()
         runner = load("agent-check")
+        original = os.open
+        def no_directory_open(path, flags, *args, **kwargs):
+            if flags & getattr(os, "O_DIRECTORY", 0) and Path(path) == self.root / "module":
+                raise AssertionError("unsupported directory open")
+            return original(path, flags, *args, **kwargs)
         with mock.patch.object(runner.os, "supports_fd", set()), \
-             mock.patch.object(runner.os, "open", side_effect=AssertionError("unsupported directory open")):
+             mock.patch.object(runner.os, "open", side_effect=no_directory_open):
             with self.assertRaisesRegex(ValueError, "raw-input validation adapter"):
                 runner.raw_tracked_inputs(self.root)
 
@@ -384,10 +389,14 @@ class AgentCheckTests(unittest.TestCase):
         runner = load("agent-check")
         original = os.open
         for timeout in (False, True):
-            descriptors = []
+            descriptors, control_descriptors = [], []
             def opened(*args, **kwargs):
                 descriptor = original(*args, **kwargs)
-                descriptors.append(descriptor)
+                # Git control files now have their own bounded no-follow reader;
+                # retain the exact one-directory-descriptor contract and prove
+                # those extra metadata descriptors are closed as well.
+                target = descriptors if Path(args[0]) == self.root / "module" else control_descriptors
+                target.append(descriptor)
                 return descriptor
             try:
                 with mock.patch.object(runner.os, "open", side_effect=opened):
@@ -398,11 +407,11 @@ class AgentCheckTests(unittest.TestCase):
                     else:
                         self.assertEqual(runner.empty_gitlink_identity(self.root, "module"), head)
                 self.assertEqual(len(descriptors), 1)
-                for descriptor in descriptors:
+                for descriptor in descriptors + control_descriptors:
                     with self.assertRaises(OSError):
                         os.fstat(descriptor)
             finally:
-                for descriptor in descriptors:
+                for descriptor in descriptors + control_descriptors:
                     try:
                         os.close(descriptor)
                     except OSError:
@@ -419,7 +428,9 @@ class AgentCheckTests(unittest.TestCase):
         with mock.patch.object(runner.subprocess, "run", side_effect=bounded):
             runner.git(self.root, "ls-files")
             runner.require_unfiltered_tracked_inputs(self.root)
-        self.assertEqual(len(calls), 4)
+        scope_reads = [command for command in calls if command[-1:] == [runner.SOURCE_SCOPE_POLICY]]
+        self.assertEqual(len(scope_reads), 2)
+        self.assertEqual(len(calls) - len(scope_reads), 4)
         self.run_check()
         with mock.patch.object(runner, "plan_for", side_effect=subprocess.TimeoutExpired(["git"], 30)):
             self.assertEqual(runner.main(["--repo-root", str(self.root), "--provider", "codex"]), 2)

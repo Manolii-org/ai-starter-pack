@@ -33,6 +33,7 @@ import os
 import re
 import shlex
 import signal
+import stat
 import subprocess
 import sys
 import time
@@ -56,6 +57,225 @@ TAIL_LINE_CHARS = 240
 # Any MCP server name: mcp__github__…, mcp__plugin_github_github__…, etc.
 PR_TOOL = re.compile(r"^mcp__.+__create_pull_request$")
 BYPASS_ENV = "AGENT_FINALISE_GATE"
+SOURCE_SCOPE_POLICY = ".ai/source-scope-policy.json"
+
+
+class SourceScopeHeld(ValueError):
+    """A content boundary is held, including non-execution entrypoints."""
+
+
+def _source_scope_exists(path: Path) -> bool:
+    """An inaccessible declaration is unknown, never evidence of absence."""
+    try:
+        path.lstat()
+        return True
+    except FileNotFoundError:
+        return False
+    except OSError:
+        raise ValueError("source-scope metadata unavailable") from None
+
+
+def _source_scope_roots(root: Path) -> tuple[list[Path], bool]:
+    """Inspect enclosing declarations before a nested repository can hide them."""
+    roots = []
+    path = Path(os.path.abspath(root))
+    for parent in (path, *path.parents):
+        if _source_scope_exists(parent / SOURCE_SCOPE_POLICY):
+            return [], True
+        if _source_scope_exists(parent / ".git"):
+            roots.append(parent)
+    # A committed enclosing declaration must hold before a nested repository's
+    # control metadata (itself potentially protected by that owner) is read.
+    return list(reversed(roots)), False
+
+
+def _source_scope_control_metadata(path: Path, *, optional: bool = False):
+    """Check a control file without opening it or any aliased payload."""
+    for parent in path.parents:
+        if parent.is_symlink():
+            raise ValueError("unqualified Git metadata alias")
+    try:
+        before = path.lstat()
+    except FileNotFoundError:
+        if optional:
+            return None
+        raise ValueError("missing Git control metadata") from None
+    if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or before.st_size > 65536:
+        raise ValueError("unqualified Git control metadata")
+    return before
+
+
+def _source_scope_control_bytes(path: Path, *, optional: bool = False) -> bytes | None:
+    """Read bounded verified control metadata, never an alias/include target."""
+    before = _source_scope_control_metadata(path, optional=optional)
+    if before is None:
+        return None
+    if not hasattr(os, "O_NOFOLLOW"):
+        raise ValueError("no qualified no-follow metadata reader")
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0))
+    try:
+        opened = os.fstat(descriptor)
+        if (opened.st_dev, opened.st_ino, opened.st_mode, opened.st_nlink) != (
+                before.st_dev, before.st_ino, before.st_mode, 1):
+            raise ValueError("Git control metadata changed")
+        data = os.read(descriptor, 65537)
+        after = os.fstat(descriptor)
+        if (len(data) > 65536 or (before.st_size, before.st_mtime_ns, before.st_ctime_ns) != (
+                after.st_size, after.st_mtime_ns, after.st_ctime_ns)):
+            raise ValueError("Git control metadata changed")
+        return data
+    finally:
+        os.close(descriptor)
+
+
+def _source_scope_alias_metadata(path: Path) -> None:
+    """Bounded descriptor-only alias check; never read Git object payload bytes."""
+    if not hasattr(os, "O_DIRECTORY") or not hasattr(os, "O_NOFOLLOW"):
+        raise ValueError("no qualified descriptor metadata reader")
+    count = 0
+    def visit(descriptor, depth):
+        nonlocal count
+        if depth > 128:
+            raise ValueError("Git metadata directory bound exceeded")
+        before = os.fstat(descriptor)
+        with os.scandir(descriptor) as entries:
+            for entry in entries:
+                count += 1
+                if count > 100000:
+                    raise ValueError("Git metadata entry bound exceeded")
+                details = entry.stat(follow_symlinks=False)
+                if stat.S_ISDIR(details.st_mode):
+                    child = os.open(entry.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                                    dir_fd=descriptor)
+                    try:
+                        opened = os.fstat(child)
+                        if (opened.st_dev, opened.st_ino) != (details.st_dev, details.st_ino):
+                            raise ValueError("Git metadata directory changed")
+                        visit(child, depth + 1)
+                    finally:
+                        os.close(child)
+                elif not stat.S_ISREG(details.st_mode) or details.st_nlink != 1:
+                    raise ValueError("Git metadata aliases require a qualified adapter")
+        after = os.fstat(descriptor)
+        if (before.st_dev, before.st_ino, before.st_mtime_ns, before.st_ctime_ns) != (
+                after.st_dev, after.st_ino, after.st_mtime_ns, after.st_ctime_ns):
+            raise ValueError("Git metadata directory changed")
+    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        visit(descriptor, 0)
+    finally:
+        os.close(descriptor)
+
+
+def _source_scope_head_chain(gitdir: Path, common: Path) -> None:
+    """Bound symbolic HEAD to checked ref namespaces, never other worktrees."""
+    raw = _source_scope_control_bytes(gitdir / "HEAD")
+    for _ in range(32):
+        if raw is None:
+            return  # A missing loose ref may resolve through checked packed refs.
+        text = raw.decode("utf-8").strip()
+        if re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", text):
+            return
+        if not text.startswith("ref: refs/"):
+            raise ValueError("unqualified symbolic HEAD route")
+        reference = text[5:]
+        parts = reference.split("/")
+        if (any(part in ("", ".", "..") for part in parts)
+                or any(ord(char) < 32 or ord(char) == 127 for char in reference)
+                or "\\" in reference):
+            raise ValueError("unqualified symbolic HEAD route")
+        # Git keeps these namespaces private to the current linked worktree.
+        private = reference.startswith(("refs/bisect/", "refs/worktree/", "refs/rewritten/"))
+        target = (gitdir if private else common) / reference
+        raw = _source_scope_control_bytes(target, optional=True)
+    raise ValueError("symbolic HEAD route bound exceeded")
+
+
+def _source_scope_git_controls(root: Path) -> None:
+    """Reject config indirections BEFORE native Git can interpret their targets.
+
+    These repeated observations are not an atomic filesystem/host guarantee.
+    Independently pinned owning scope inputs refuse before this metadata route.
+    """
+    marker = root / ".git"
+    if stat.S_ISDIR(marker.lstat().st_mode):
+        gitdir = marker
+        common = gitdir
+    else:
+        raw = _source_scope_control_bytes(marker)
+        if raw is None or not raw.startswith(b"gitdir: ") or len(raw.splitlines()) != 1:
+            raise ValueError("unqualified Git directory pointer")
+        target = raw.decode("utf-8").strip()[8:]
+        gitdir = Path(os.path.abspath(root / target))
+        # Qualify the standard control namespace before opening anything at the
+        # pointer target. Arbitrary directories are not metadata read grants.
+        if gitdir.parent.name != "worktrees" or not gitdir.parent.parent.name.endswith(".git"):
+            raise ValueError("unqualified linked-worktree control namespace")
+        common_raw = _source_scope_control_bytes(gitdir / "commondir")
+        if common_raw is None or len(common_raw.splitlines()) != 1:
+            raise ValueError("unqualified linked-worktree metadata")
+        common = Path(os.path.abspath(gitdir / common_raw.decode("utf-8").strip()))
+        # Only the standard linked-worktree topology is qualified here. An
+        # arbitrary Git pointer must not expand this metadata read boundary.
+        if gitdir.parent.name != "worktrees" or gitdir.parent.parent != common:
+            raise ValueError("unqualified linked-worktree topology")
+        backpointer = _source_scope_control_bytes(gitdir / "gitdir")
+        if backpointer is None or Path(os.path.abspath(backpointer.decode("utf-8").strip())) != marker:
+            raise ValueError("linked-worktree ownership differs")
+    for path in (common / "config", gitdir / "config.worktree"):
+        raw = _source_scope_control_bytes(path, optional=True)
+        if raw is not None and re.search(rb"\[\s*include", raw, re.IGNORECASE):
+            raise ValueError("Git config includes require a qualified metadata adapter")
+    # Native Git must not follow alternate-object routing from this probe.
+    if _source_scope_exists(common / "objects/info/alternates"):
+        raise ValueError("Git object alternates require a qualified metadata adapter")
+    for directory in dict.fromkeys((common, gitdir)):
+        for leaf in ("packed-refs", "shallow"):
+            _source_scope_control_metadata(directory / leaf, optional=True)
+        # The fixed metadata probe disables graft interpretation independently;
+        # static graft aliases also hold without opening any graft contents.
+        _source_scope_control_metadata(directory / "info/grafts", optional=True)
+    _source_scope_head_chain(gitdir, common)
+    # Native fixed-argv tree metadata probes may access refs, loose objects or
+    # pack/index metadata. Reject static external aliases before any such Git
+    # access. No file in these directories is opened for content by this walk.
+    for path in (common / "refs", common / "objects"):
+        _source_scope_alias_metadata(path)
+    private_refs = gitdir / "refs"
+    if gitdir != common and _source_scope_exists(private_refs):
+        _source_scope_alias_metadata(private_refs)
+
+
+def source_scope_declared(root: Path) -> bool:
+    """A declared or unproven boundary holds before Git/config/log/hook reads."""
+    if "AGENT_SOURCE_SCOPE_SHA256" in os.environ or "AGENT_SOURCE_SCOPE_REPOSITORY" in os.environ:
+        return True
+    try:
+        roots, declared = _source_scope_roots(root)
+    except (OSError, ValueError):
+        return True
+    if declared:
+        return True
+    environment = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    environment.update({"GIT_NO_LAZY_FETCH": "1", "GIT_ALLOW_PROTOCOL": "",
+                        "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
+                        "GIT_GRAFT_FILE": os.devnull})
+    for owner in roots:
+        try:
+            _source_scope_git_controls(owner)
+            result = subprocess.run(["git", "--no-replace-objects", "-c", "protocol.allow=never",
+                                     "ls-tree", "-z", "HEAD", "--", SOURCE_SCOPE_POLICY],
+                                    cwd=owner, env=environment, capture_output=True, timeout=30, check=False)
+        except (OSError, ValueError, TypeError, subprocess.SubprocessError, UnicodeError):
+            return True
+        if result.returncode or result.stdout:
+            return True
+    return False
+
+
+def require_source_scope(root: Path) -> None:
+    if source_scope_declared(root):
+        raise SourceScopeHeld("FINALISE-GATE SOURCE-SCOPE-HELD: no qualified content projection; no hand-off authority.")
 
 
 # ── command classification ──────────────────────────────────────────────────
@@ -274,6 +494,7 @@ def classify_command(command: str) -> dict:
 # ── repository + configuration ──────────────────────────────────────────────
 
 def git_toplevel(start: Path) -> Path | None:
+    require_source_scope(start)
     try:
         proc = subprocess.run(["git", "rev-parse", "--show-toplevel"], cwd=start,
                               capture_output=True, text=True, timeout=10)
@@ -284,6 +505,7 @@ def git_toplevel(start: Path) -> Path | None:
 
 def load_qa_config(root: Path) -> tuple[dict, bool]:
     """Return (finalise_gate section, config_present)."""
+    require_source_scope(root)
     path = root / "config" / "qa.json"
     if not path.is_file():
         return {}, False
@@ -324,6 +546,8 @@ def agent_check_path(root: Path) -> Path | None:
 
 def run_checks(root: Path, provider: str, timeout: int) -> dict:
     """Run agent-check and classify the outcome as pass|fail|incomplete."""
+    if source_scope_declared(root):
+        return {"outcome": "source-scope-held", "summary": "no qualified content projection; full validation held"}
     runner = agent_check_path(root)
     if runner is None:
         return {"outcome": "incomplete", "summary": "scripts/agent-check.py is not installed"}
@@ -353,6 +577,11 @@ def run_checks(root: Path, provider: str, timeout: int) -> dict:
                 except subprocess.TimeoutExpired:
                     continue
     duration_ms = round((time.monotonic() - start) * 1000)
+    if code == 4:
+        # The runner may discover a boundary after this caller's first probe.
+        # Do not inspect a stale receipt/config or convert this hold to a PASS.
+        return {"duration_ms": duration_ms, "outcome": "source-scope-held",
+                "summary": "no qualified content projection; full validation held"}
     receipt = {}
     receipt_path = state / "receipt.json"
     if receipt_path.is_file():
@@ -567,9 +796,13 @@ def gate_one(root: Path, provider: str, bypass_inline: bool, trigger: str,
     `cap` bounds the repository's own timeout so concurrent candidates
     finish inside the host's hook timeout.
     """
+    if source_scope_declared(root):
+        return "deny", "FINALISE-GATE SOURCE-SCOPE-HELD: no qualified content projection; no hand-off authority."
     try:
         section, present = load_qa_config(root)
         mode, source = resolve_mode(section, present, bypass_inline)
+    except SourceScopeHeld as exc:
+        return "deny", str(exc)
     except ValueError as exc:
         return "warn", f"FINALISE-GATE INCOMPLETE: {exc}"
     if mode == "off":
@@ -584,6 +817,8 @@ def gate_one(root: Path, provider: str, bypass_inline: bool, trigger: str,
     if cap is not None:
         timeout = min(timeout, cap)
     result = run_checks(root, provider, timeout)
+    if result["outcome"] == "source-scope-held":
+        return "deny", "FINALISE-GATE SOURCE-SCOPE-HELD: no qualified content projection; no hand-off authority."
     result["root"] = str(root)
     record(root, {"ts": time.time(), "provider": provider, "trigger": trigger, "mode": mode,
                   "outcome": result["outcome"], "duration_ms": result.get("duration_ms"),
@@ -639,7 +874,12 @@ SHIM = """#!/bin/sh
 # Runs the repository's finalise gate before every push. Remove this file to
 # uninstall. Re-run `python3 scripts/qa/finalise-gate.py --install-git-hook`
 # to refresh it.
-ROOT="$(git rev-parse --show-toplevel)" || exit 0
+# Discover only directory metadata. Native Git may parse protected config/ref/
+# object aliases before Python can enforce a newly installed owner boundary.
+ROOT="$PWD"
+while [ "$ROOT" != "/" ] && [ ! -e "$ROOT/.git" ] && [ ! -L "$ROOT/.git" ]; do
+  ROOT=$(dirname "$ROOT") || exit 1
+done
 GATE="$ROOT/scripts/qa/finalise-gate.py"
 [ -f "$GATE" ] || GATE={fallback}
 [ -f "$GATE" ] || exit 0
@@ -649,6 +889,7 @@ exec python3 "$GATE" --hook git-pre-push "$@"
 
 def install_git_hook(root: Path) -> int:
     """Install a marked pre-push shim without displacing any hook manager."""
+    require_source_scope(root)
     configured = subprocess.run(["git", "config", "--get", "core.hooksPath"], cwd=root,
                                 capture_output=True, text=True).stdout.strip()
     if configured:
@@ -672,7 +913,7 @@ def install_git_hook(root: Path) -> int:
     return 0
 
 
-def main(argv: list[str] | None = None) -> int:
+def _main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     group = parser.add_mutually_exclusive_group(required=True)
@@ -683,12 +924,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("remainder", nargs="*", help=argparse.SUPPRESS)  # git passes remote name/url
     args = parser.parse_args(argv)
     if args.install_git_hook:
+        require_source_scope(args.repo_root or Path.cwd())
         root = git_toplevel(args.repo_root or Path.cwd())
         if root is None:
             print("finalise-gate: not a git repository", file=sys.stderr)
             return 1
         return install_git_hook(root)
     if args.query:
+        require_source_scope(args.repo_root or Path.cwd())
         root = git_toplevel(args.repo_root or Path.cwd())
         try:
             section, _ = load_qa_config(root) if root else ({}, False)
@@ -702,6 +945,19 @@ def main(argv: list[str] | None = None) -> int:
     if trigger is None:
         return emit(args.hook, "allow", "")
     return gate(args.hook, starts, bypass, trigger, workspaces_for(args.hook, payload))
+
+
+def main(argv: list[str] | None = None) -> int:
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    try:
+        return _main(arguments)
+    except SourceScopeHeld as exc:
+        if "--hook" in arguments:
+            index = arguments.index("--hook") + 1
+            if index < len(arguments):
+                return emit(arguments[index], "deny", str(exc))
+        print(str(exc), file=sys.stderr)
+        return 4
 
 
 if __name__ == "__main__":
