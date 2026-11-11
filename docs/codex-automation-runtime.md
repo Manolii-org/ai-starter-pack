@@ -9,6 +9,16 @@ Implementation/autofix and all-role deployment are not implemented by this compo
 
 ## Boundaries
 
+The unprivileged `codex-automation-request.yml` producer is opt-in and runs only
+for nondraft same-repository PRs. It checks out no source and uploads only
+repository/PR/base/head/run/attempt metadata, never prompt, executable or credential
+data. The pure `codex_automation_request.admit` reader authenticates actual API
+run/workflow/repository/PR/artifact identities, current full revisions, approved
+base branches and holds before reading that single bounded inert JSON file.
+Ambiguous, stale, forked or unreadable evidence is refused. The artifact cannot
+select its own operation, endpoint, account or executable. This reader starts
+no account/model work and supplies no custody, sensitivity or funding grant.
+
 `scripts/ci/codex_subscription_text.py` runs inside the credential-free,
 networkless guest. It opens only `/broker/model.sock` and makes one stateless
 request. It accepts no credential, endpoint or alternate-provider configuration,
