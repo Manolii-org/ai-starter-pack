@@ -1166,7 +1166,7 @@ def test_bootstrap_mirror_push_target_pass(tmp_path, monkeypatch, inherited_trus
            cwd=fm0, capture_output=True)
     sp.run(["git", "config", "core.fsmonitor", "true"],
            cwd=fm0, capture_output=True)
-    real_git = os.path.realpath(shutil.which("git") or "/usr/bin/git")
+    real_git = os.path.realpath(shutil.which("git", path=os.defpath) or "/usr/bin/git")
     gitstub = tmp_path / "bin" / "git"
     gitstub.parent.mkdir(exist_ok=True)
     gitstub.write_text(
