@@ -11,13 +11,18 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def load(name):
-    """Load an actual runner without launching its CLI."""
-    spec = importlib.util.spec_from_file_location('contract_' + name.replace('-', '_'), ROOT / 'scripts' / name)
+def load_source(name, path):
+    """Execute exact source bytes without trusting or writing bytecode caches."""
+    spec = importlib.util.spec_from_file_location(name, path)
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
+    exec(compile(path.read_bytes(), str(path), 'exec'), module.__dict__)
     return module
+
+
+def load(name):
+    """Load an actual runner without launching its CLI."""
+    return load_source('contract_' + name.replace('-', '_'), ROOT / 'scripts' / name)
 
 
 @pytest.fixture
@@ -744,16 +749,18 @@ def test_deep_recomputed_hash_does_not_authorize_missing_or_changed_sast_account
 
 @pytest.mark.parametrize('directory', ['plugin/manolii-framework', 'registry/platform/framework'])
 def test_deep_generated_runtime_has_real_builder_parser_and_guard_closure(runner, deep_repo, directory):
-    spec = importlib.util.spec_from_file_location('distributed_deep_' + directory.replace('/', '_'),
-                                                  ROOT / directory / 'scripts/run-broad-agents.py')
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
+    path = ROOT / directory / 'scripts/run-broad-agents.py'
+    before = set(path.parent.rglob('*.pyc'))
+    module = load_source('distributed_deep_' + directory.replace('/', '_'), path)
     packet = module.build_security_deep_dive_input(deep_repo[0], **deep_repo[2])
     parsed = module.parse_security_deep_dive_output(json.dumps(deep_output(packet)), packet, stop_reason='end_turn')
     assert parsed['status'] == 'provisional_complete'
     assert parsed['provider_execution'] == 'unknown'
     assert len(parsed['promoted']) == len(parsed['dismissed']) == 1
+    assert module._deep_json('[' * 128 + '0' + ']' * 128)
+    with pytest.raises(ValueError, match='nesting'):
+        module._deep_json('[' * 129 + '0' + ']' * 129)
+    assert set(path.parent.rglob('*.pyc')) == before
 
 
 @pytest.mark.parametrize('mutation', ['text', 'sha256', 'blob', 'side', 'commit', 'mode', 'duplicate',
@@ -882,6 +889,57 @@ def test_deep_valid_json_guard_traversal_depth_is_controlled(runner, deep_repo, 
             runner.parse_security_deep_dive_output(raw, packet, stop_reason='end_turn')
 
 
+@pytest.mark.parametrize('kind', ['array', 'object', 'mixed'])
+@pytest.mark.parametrize('depth', [127, 128, 129])
+def test_deep_exact_container_depth_boundary_is_runtime_independent(runner, kind, depth):
+    import hashlib
+    value, raw = 0, '0'
+    for level in range(depth):
+        if kind == 'object' or (kind == 'mixed' and level % 2):
+            value, raw = {'value': value}, '{"value":' + raw + '}'
+        else:
+            value, raw = [value], '[' + raw + ']'
+    guard = runner._deep_screen_helpers()
+    if depth > 128:
+        for operation in (lambda: runner._deep_json(raw), lambda: runner._deep_digest(value),
+                          lambda: runner._deep_require_safe(guard, value)):
+            with pytest.raises(ValueError, match='nesting'):
+                operation()
+    else:
+        assert runner._deep_json(raw) == value
+        canonical = json.dumps(value, sort_keys=True, ensure_ascii=True,
+                               separators=(',', ':'), allow_nan=False).encode()
+        assert runner._deep_digest(value) == hashlib.sha256(canonical).hexdigest()
+        runner._deep_require_safe(guard, value)
+
+
+def test_deep_cycles_fail_as_controlled_nesting_before_recursive_consumers(runner):
+    array, mapping, linked = [], {}, []
+    array.append(array)
+    mapping['self'] = mapping
+    pair = (linked,)
+    linked.append(pair)
+    guard = runner._deep_screen_helpers()
+    for value in (array, mapping, pair):
+        with pytest.raises(ValueError, match='nesting'):
+            runner._deep_digest(value)
+        with pytest.raises(ValueError, match='nesting'):
+            runner._deep_require_safe(guard, value)
+
+
+def test_deep_aliases_and_quoted_unicode_keep_existing_canonical_identity(runner):
+    import hashlib
+    shared = {'text': 'brackets[{}] quote" slash\\ snowman \u2603'}
+    value = {'first': shared, 'second': shared, 'tuple': (None, True, 2)}
+    canonical = json.dumps(value, sort_keys=True, ensure_ascii=True,
+                           separators=(',', ':'), allow_nan=False).encode()
+    assert runner._deep_digest(value) == hashlib.sha256(canonical).hexdigest()
+    raw = json.dumps({'value': shared}, ensure_ascii=False)
+    assert runner._deep_json('\ufeff' + raw) == {'value': shared}
+    assert runner._deep_json(('\ufeff' + raw).encode()) == {'value': shared}
+    runner._deep_require_safe(runner._deep_screen_helpers(), value)
+
+
 def test_deep_malformed_source_mode_is_controlled_value_error(runner, deep_repo):
     packet = deep_packet(runner, deep_repo)
     packet['sources'][0]['mode'] = {}
@@ -922,11 +980,8 @@ def test_deep_retained_diff_requires_nontriggering_old_and_new_sources(runner, d
     args['evidence_paths'] = []
     module = runner
     if directory:
-        spec = importlib.util.spec_from_file_location('p2_' + directory.replace('/', '_'),
-                                                    ROOT / directory / 'scripts/run-broad-agents.py')
-        module = importlib.util.module_from_spec(spec)
-        sys.modules[spec.name] = module
-        spec.loader.exec_module(module)
+        module = load_source('p2_' + directory.replace('/', '_'),
+                             ROOT / directory / 'scripts/run-broad-agents.py')
     for name in ('get_api_key', '_proxy_base', '_urlopen_https'):
         monkeypatch.setattr(module, name, lambda *a, **k: pytest.fail('provider/credential attempted'))
     packet = module.build_security_deep_dive_input(root, **args)
@@ -1004,11 +1059,8 @@ def test_deep_unchanged_evidence_requires_identical_source_pairs(runner, deep_re
     import hashlib
     module = runner
     if directory:
-        spec = importlib.util.spec_from_file_location('unchanged_' + directory.replace('/', '_'),
-                                                    ROOT / directory / 'scripts/run-broad-agents.py')
-        module = importlib.util.module_from_spec(spec)
-        sys.modules[spec.name] = module
-        spec.loader.exec_module(module)
+        module = load_source('unchanged_' + directory.replace('/', '_'),
+                             ROOT / directory / 'scripts/run-broad-agents.py')
     for name in ('get_api_key', '_proxy_base', '_urlopen_https'):
         monkeypatch.setattr(module, name, lambda *a, **k: pytest.fail('provider/credential attempted'))
     packet = module.build_security_deep_dive_input(deep_repo[0], **deep_repo[2])

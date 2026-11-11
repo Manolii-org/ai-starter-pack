@@ -54,6 +54,14 @@ supplied SAST bytes, repeated legacy finding IDs with position/content entry IDs
 full base/head diff and complete immutable old/new blobs for every changed and requested source path. It
 reuses the existing Judge privacy screen. It refuses missing or sensitive evidence
 and serialized input over the existing transport ceiling instead of truncating.
+
+JSON values are limited to 128 nested containers, counting a root object or
+array as one; the limit is checked iteratively before recursive identity or
+privacy traversal. A 129th container or cycle is incomplete evidence on every
+supported Python runtime, independently of the interpreter's recursion guards.
+Repeated noncyclic values retain the same canonical bytes. Duplicate fields,
+nonfinite values, BOM handling and byte budgets keep their existing contracts.
+
 Caller-supplied SAST/repository bindings and content hashes establish consistency,
 not authenticated producer identity or completeness of the requested source scope.
 The producer must still establish SAST provenance; reviewers must explicitly
