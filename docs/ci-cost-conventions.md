@@ -43,9 +43,13 @@ step's errexit, nounset and pipefail settings.
 Semgrep action accepted only `config`/`publishToken`, so its `output`/`json`
 arguments did not establish a report. Missing, malformed, scanner-error or
 scope-less reports, skipped rules and inconsistent file metrics now fail the SAST job, preserving its existing name.
-Semgrep profiling is retained to check its internal `fixpoint_timeouts` too:
-known dataflow aborts remain incomplete even when the public `errors` array is
-empty. Missing completion profiling also fails. The 30-second rule/file ceiling,
+Semgrep 1.185.0 labels `time.fixpoint_timeouts` experimental profiling/debug
+metadata. The [provider source](https://github.com/semgrep/semgrep/blob/9240f708f8d7e2fbd38b67aa6cd17704b1f81e14/src/core/Core_error.ml#L383)
+separates these limits from native errors. They are retained as diagnostic counts
+when available; a missing or unrecognized field stays unknown. They do
+not replace the provider's native exit/error contract or prove exhaustive taint
+analysis. Native top-level timeouts and parsing errors still fail, including
+warning-level errors alongside findings. The 30-second rule/file ceiling,
 no-early-abandonment setting, provider versions, rule selection and job deadline
 are unchanged. Large synthetic bootstrap cases live in non-test helper modules;
 the legacy registry entrypoint keeps every existing pytest node and assertion.

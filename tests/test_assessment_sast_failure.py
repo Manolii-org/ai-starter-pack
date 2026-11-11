@@ -308,26 +308,55 @@ def test_runner_policy_alone_selects_its_owning_recipe():
 
 
 @pytest.mark.parametrize('workflow', WORKFLOWS)
-@pytest.mark.parametrize('profile', [None, {}, {'fixpoint_timeouts': None},
-                                     {'fixpoint_timeouts': [{'error_type': 'Fixpoint timeout',
-                                                            'severity': 'warn', 'message': 'Synthetic dataflow abort'}]}])
-def test_missing_or_aborted_dataflow_profile_is_never_complete(tmp_path, workflow, profile):
+@pytest.mark.parametrize('present,profile,count', [
+    (False, None, None), (True, None, None), (True, {}, None),
+    (True, {'fixpoint_timeouts': None}, None),
+    (True, {'fixpoint_timeouts': {}}, None),
+    (True, {'fixpoint_timeouts': []}, 0),
+    (True, {'fixpoint_timeouts': [{'error_type': 'Fixpoint timeout',
+                                 'severity': 'warn', 'message': 'Synthetic profiling limit'}]}, 1),
+])
+def test_optional_profiling_limits_do_not_replace_native_completion(
+        tmp_path, workflow, present, profile, count):
     semgrep, _ = reports(tmp_path)
-    semgrep['time'] = profile
+    if present:
+        semgrep['time'] = profile
+    else:
+        del semgrep['time']
     (tmp_path / 'semgrep-results.json').write_text(json.dumps(semgrep))
     result = run_step(workflow, 'Merge SAST findings', tmp_path)
-    assert result.returncode != 0
-    assert not (tmp_path / '.ai/sast-findings.json').exists()
+    assert result.returncode == 0, result.stderr
+    assert json.loads((tmp_path / '.ai/sast-findings.json').read_text()) == []
+    expected = {'status': 'available' if count is not None else 'unknown',
+                'reported_fixpoint_entries': count}
+    assert {'semgrep_profile_audit': expected} in [
+        json.loads(line) for line in result.stdout.splitlines() if line.startswith('{')]
 
 
 @pytest.mark.parametrize('workflow', WORKFLOWS)
-def test_complete_profile_preserves_normal_profiling_metadata(tmp_path, workflow):
+def test_optional_profiling_preserves_normal_timing_metadata(tmp_path, workflow):
     semgrep, _ = reports(tmp_path)
     semgrep['time'].update(rules=['fixture.rule'], total_bytes=5,
                           profiling_times={'core_time': 0.1})
     (tmp_path / 'semgrep-results.json').write_text(json.dumps(semgrep))
     result = run_step(workflow, 'Merge SAST findings', tmp_path)
     assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize('workflow', WORKFLOWS)
+@pytest.mark.parametrize('profile', [None, {'fixpoint_timeouts': [{'message': 'Synthetic limit'}]}])
+def test_public_native_error_still_fails_with_optional_profiling(tmp_path, workflow, profile):
+    semgrep, _ = reports(tmp_path)
+    semgrep['time'] = profile
+    semgrep['results'] = [{'check_id': 'fixture.rule', 'path': 'fixture.py', 'start': {'line': 1},
+                           'extra': {'message': 'Synthetic finding', 'severity': 'WARNING'}}]
+    semgrep['errors'] = [{'code': 2, 'level': 'warn', 'type': 'Timeout',
+                         'path': 'fixture.py', 'message': 'Synthetic native timeout'}]
+    (tmp_path / 'semgrep-results.json').write_text(json.dumps(semgrep))
+    result = run_step(workflow, 'Merge SAST findings', tmp_path, SEMGREP_EXIT='1')
+    assert result.returncode != 0
+    assert 'semgrep: incomplete or malformed report' in result.stderr
+    assert not (tmp_path / '.ai/sast-findings.json').exists()
 
 
 @pytest.mark.parametrize('workflow', WORKFLOWS)
