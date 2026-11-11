@@ -144,7 +144,11 @@
         ".cursor/rules/agent-validation.mdc",
         "scripts/install-agent-validation.py",
         "config/agent-checks.json",
-        ".claude/skills/agent-validation/SKILL.md"
+        ".claude/skills/agent-validation/SKILL.md",
+        "scripts/tests/test_source_scope_boundary.py",
+        "scripts/qa/finalise-gate.py",
+        "schemas/source-scope-policy.v1.schema.json",
+        "docs/source-scope-boundary.md"
       ],
       "tools": [
         "python"
@@ -164,6 +168,17 @@
           "scripts/tests",
           "-p",
           "test_agent_check.py",
+          "-v"
+        ],
+        [
+          "python3",
+          "-m",
+          "unittest",
+          "discover",
+          "-s",
+          "scripts/tests",
+          "-p",
+          "test_source_scope_boundary.py",
           "-v"
         ]
       ]

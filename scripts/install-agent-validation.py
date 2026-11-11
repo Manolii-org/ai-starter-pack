@@ -582,6 +582,10 @@ def build_plan(args):
     if explicit and not DIRFD_ATOMIC:
         raise ValueError("explicit layout requires no-follow directory-descriptor replacement support")
     root = args.repo_root.absolute() if explicit else args.repo_root.resolve()
+    # Public reviewed runner code is read here, never an owner data file.
+    # Refuse before layout, recipes, owner prose or output materialization.
+    scope_runner = load_module("agent_check_scope", SOURCE / "scripts/agent-check.py")
+    scope_runner.require_source_scope(root)
     plan = OutputPlan(root, explicit)
     context = None
     if explicit:

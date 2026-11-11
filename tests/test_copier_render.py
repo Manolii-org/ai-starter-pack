@@ -275,22 +275,22 @@ def test_cost_profile_lean_omits_measured_waste_callers(default_render):
     ("flags", "expected"),
     [
         ({}, {"Hooks": 5, "Commands": 51, "Skills": 41, "Agents": 27,
-              "Scripts": 61, "Husky": 3, "CI": 39, "Docs": 40}),
+              "Scripts": 61, "Husky": 3, "CI": 39, "Docs": 41}),
         ({flag: "true" for flag in FEATURE_FLAGS},
          {"Hooks": 5, "Commands": 54, "Skills": 45, "Agents": 28,
-              "Scripts": 61, "Husky": 3, "CI": 39, "Docs": 42}),
+              "Scripts": 61, "Husky": 3, "CI": 39, "Docs": 43}),
         ({"cost_profile": "lean"},
          {"Hooks": 5, "Commands": 51, "Skills": 41, "Agents": 27,
-              "Scripts": 61, "Husky": 3, "CI": 38, "Docs": 40}),
+              "Scripts": 61, "Husky": 3, "CI": 38, "Docs": 41}),
         ({"codex_review": "false"},
          {"Hooks": 5, "Commands": 51, "Skills": 41, "Agents": 27,
-              "Scripts": 61, "Husky": 3, "CI": 35, "Docs": 40}),
+              "Scripts": 61, "Husky": 3, "CI": 35, "Docs": 41}),
         ({"isolation_profile": "strict"},
          {"Hooks": 5, "Commands": 51, "Skills": 41, "Agents": 27,
-              "Scripts": 58, "Husky": 3, "CI": 31, "Docs": 40}),
+              "Scripts": 58, "Husky": 3, "CI": 31, "Docs": 41}),
         ({"isolation_profile": "strict", "cost_profile": "lean"},
          {"Hooks": 5, "Commands": 51, "Skills": 41, "Agents": 27,
-              "Scripts": 58, "Husky": 3, "CI": 31, "Docs": 40}),
+              "Scripts": 58, "Husky": 3, "CI": 31, "Docs": 41}),
     ],
 )
 def test_rendered_readme_counts_match_rendered_tree(flags, expected):
@@ -327,6 +327,65 @@ def test_validation_layout_distribution_boundary(default_render, branded_render)
         assert not (rendered / "tests/test_assessment_sast_failure.py").exists()
         # The existing default validation bundle remains available to callers.
         assert (rendered / "scripts/tests/test_agent_check.py").is_file()
+
+
+
+def test_source_scope_distribution_holds_before_reads_and_preserves_legacy_failure(tmp_path, default_render, branded_render):
+    """Actual rendered code holds opaque bytes; absent scope still executes checks."""
+    for rendered in (default_render, branded_render):
+        for relative in ("scripts/agent-check.py", "scripts/install-agent-validation.py",
+                         "scripts/qa/finalise-gate.py", "schemas/source-scope-policy.v1.schema.json",
+                         "docs/source-scope-boundary.md"):
+            assert (rendered / relative).read_bytes() == (ROOT / relative).read_bytes()
+
+    owner = tmp_path / "synthetic-owner"
+    (owner / "src").mkdir(parents=True)
+    (owner / "config").mkdir()
+    (owner / ".ai").mkdir()
+    (owner / "opaque").mkdir()
+    (owner / "src/value.py").write_text("value = 1\n")
+    (owner / "opaque/sentinel.bin").write_bytes(b"synthetic opaque fixture\n")
+    (owner / ".gitignore").write_text(".ai/agent-checks/\n")
+    config = {"schema_version": 1, "base": "origin/main", "environments": [],
+              "checks": [{"id": "existing-failure", "paths": ["src/*"],
+                          "commands": [[sys.executable, "-c", "raise SystemExit(17)"]]}]}
+    (owner / "config/agent-checks.json").write_text(json.dumps(config))
+    # Only synthetic files enter this real Git repository. No ambient Git routes
+    # or credentials are needed for either the metadata probe or failing check.
+    env = {key: os.environ[key] for key in ("PATH", "HOME", "LANG") if key in os.environ}
+    env.update({"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
+                "GIT_TERMINAL_PROMPT": "0", "PYTHONDONTWRITEBYTECODE": "1"})
+    for args in (("init", "-q"), ("config", "user.name", "Synthetic Fixture"),
+                 ("config", "user.email", "fixture@example.invalid"), ("add", "."),
+                 ("-c", "commit.gpgsign=false", "commit", "-qm", "Synthetic source"),
+                 ("update-ref", "refs/remotes/origin/main", "HEAD")):
+        subprocess.run(["git", *args], cwd=owner, env=env, check=True, capture_output=True, timeout=30)
+    (owner / "src/value.py").write_text("value = 2\n")
+    runner = default_render / "scripts/agent-check.py"
+    legacy = subprocess.run([sys.executable, "-B", str(runner), "--repo-root", str(owner), "--no-cache"],
+                            cwd=owner, env=env, capture_output=True, text=True, timeout=30)
+    assert legacy.returncode == 1, legacy.stdout + legacy.stderr
+    receipt = json.loads((owner / ".ai/agent-checks/receipt.json").read_text())
+    assert receipt["outcome"] == "failed"
+    (owner / ".ai/source-scope-policy.json").write_text("deliberately unreadable as policy content")
+    wrapper = r"""
+import importlib.util,sys
+from pathlib import Path
+runner,root=map(Path,sys.argv[1:3])
+def audit(event,args):
+    if event == 'open' and isinstance(args[0],(str,bytes)):
+        if Path(args[0]).absolute().is_relative_to(root):
+            raise AssertionError('owner bytes opened before source-scope refusal')
+sys.addaudithook(audit)
+spec=importlib.util.spec_from_file_location('rendered_boundary_runner',runner)
+module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+raise SystemExit(module.main(['--repo-root',str(root),'--no-cache']))
+"""
+    held = subprocess.run([sys.executable, "-B", "-c", wrapper, str(runner), str(owner)],
+                          cwd=owner, env=env, capture_output=True, text=True, timeout=30)
+    assert held.returncode == 4, held.stdout + held.stderr
+    assert "AGENT-CHECK-SOURCE-SCOPE-HELD" in held.stderr
+    assert json.loads((owner / ".ai/agent-checks/receipt.json").read_text()) == receipt
 
 
 def test_release_capability_distribution_boundary(default_render, branded_render):

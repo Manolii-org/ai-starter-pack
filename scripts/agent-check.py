@@ -15,6 +15,7 @@ import json
 import os
 from pathlib import Path
 import platform
+import re
 import secrets
 import stat
 import subprocess
@@ -24,6 +25,297 @@ import time
 SCHEMA = "agent-check/v1"
 STATE = ".ai/agent-checks"
 GIT_TIMEOUT = 30
+SOURCE_SCOPE_POLICY = ".ai/source-scope-policy.json"
+SOURCE_SCOPE_PIN = "AGENT_SOURCE_SCOPE_SHA256"
+SOURCE_SCOPE_REPOSITORY = "AGENT_SOURCE_SCOPE_REPOSITORY"
+SOURCE_SCOPE_EXIT = 4
+
+
+class SourceScopeError(ValueError):
+    """Content is outside this runner's qualified scope; never a cached PASS."""
+
+
+def _source_scope_exists(path: Path) -> bool:
+    """An inaccessible declaration is unknown, never evidence of absence."""
+    try:
+        path.lstat()
+        return True
+    except FileNotFoundError:
+        return False
+    except OSError:
+        raise ValueError("source-scope metadata unavailable") from None
+
+
+def _source_scope_roots(root: Path) -> tuple[list[Path], bool]:
+    """Inspect enclosing declarations before a nested repository can hide them."""
+    roots = []
+    path = Path(os.path.abspath(root))
+    for parent in (path, *path.parents):
+        if _source_scope_exists(parent / SOURCE_SCOPE_POLICY):
+            return [], True
+        if _source_scope_exists(parent / ".git"):
+            roots.append(parent)
+    # A committed enclosing declaration must hold before a nested repository's
+    # control metadata (itself potentially protected by that owner) is read.
+    return list(reversed(roots)), False
+
+
+def _source_scope_control_metadata(path: Path, *, optional: bool = False):
+    """Check a control file without opening it or any aliased payload."""
+    for parent in path.parents:
+        if parent.is_symlink():
+            raise ValueError("unqualified Git metadata alias")
+    try:
+        before = path.lstat()
+    except FileNotFoundError:
+        if optional:
+            return None
+        raise ValueError("missing Git control metadata") from None
+    if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or before.st_size > 65536:
+        raise ValueError("unqualified Git control metadata")
+    return before
+
+
+def _source_scope_control_bytes(path: Path, *, optional: bool = False) -> bytes | None:
+    """Read bounded verified control metadata, never an alias/include target."""
+    before = _source_scope_control_metadata(path, optional=optional)
+    if before is None:
+        return None
+    if not hasattr(os, "O_NOFOLLOW"):
+        raise ValueError("no qualified no-follow metadata reader")
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0))
+    try:
+        opened = os.fstat(descriptor)
+        if (opened.st_dev, opened.st_ino, opened.st_mode, opened.st_nlink) != (
+                before.st_dev, before.st_ino, before.st_mode, 1):
+            raise ValueError("Git control metadata changed")
+        data = os.read(descriptor, 65537)
+        after = os.fstat(descriptor)
+        if (len(data) > 65536 or (before.st_size, before.st_mtime_ns, before.st_ctime_ns) != (
+                after.st_size, after.st_mtime_ns, after.st_ctime_ns)):
+            raise ValueError("Git control metadata changed")
+        return data
+    finally:
+        os.close(descriptor)
+
+
+def _source_scope_alias_metadata(path: Path) -> None:
+    """Bounded descriptor-only alias check; never read Git object payload bytes."""
+    if not hasattr(os, "O_DIRECTORY") or not hasattr(os, "O_NOFOLLOW"):
+        raise ValueError("no qualified descriptor metadata reader")
+    count = 0
+    def visit(descriptor, depth):
+        nonlocal count
+        if depth > 128:
+            raise ValueError("Git metadata directory bound exceeded")
+        before = os.fstat(descriptor)
+        with os.scandir(descriptor) as entries:
+            for entry in entries:
+                count += 1
+                if count > 100000:
+                    raise ValueError("Git metadata entry bound exceeded")
+                details = entry.stat(follow_symlinks=False)
+                if stat.S_ISDIR(details.st_mode):
+                    child = os.open(entry.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                                    dir_fd=descriptor)
+                    try:
+                        opened = os.fstat(child)
+                        if (opened.st_dev, opened.st_ino) != (details.st_dev, details.st_ino):
+                            raise ValueError("Git metadata directory changed")
+                        visit(child, depth + 1)
+                    finally:
+                        os.close(child)
+                elif not stat.S_ISREG(details.st_mode) or details.st_nlink != 1:
+                    raise ValueError("Git metadata aliases require a qualified adapter")
+        after = os.fstat(descriptor)
+        if (before.st_dev, before.st_ino, before.st_mtime_ns, before.st_ctime_ns) != (
+                after.st_dev, after.st_ino, after.st_mtime_ns, after.st_ctime_ns):
+            raise ValueError("Git metadata directory changed")
+    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        visit(descriptor, 0)
+    finally:
+        os.close(descriptor)
+
+
+def _source_scope_head_chain(gitdir: Path, common: Path) -> None:
+    """Bound symbolic HEAD to checked ref namespaces, never other worktrees."""
+    raw = _source_scope_control_bytes(gitdir / "HEAD")
+    for _ in range(32):
+        if raw is None:
+            return  # A missing loose ref may resolve through checked packed refs.
+        text = raw.decode("utf-8").strip()
+        if re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", text):
+            return
+        if not text.startswith("ref: refs/"):
+            raise ValueError("unqualified symbolic HEAD route")
+        reference = text[5:]
+        parts = reference.split("/")
+        if (any(part in ("", ".", "..") for part in parts)
+                or any(ord(char) < 32 or ord(char) == 127 for char in reference)
+                or "\\" in reference):
+            raise ValueError("unqualified symbolic HEAD route")
+        # Git keeps these namespaces private to the current linked worktree.
+        private = reference.startswith(("refs/bisect/", "refs/worktree/", "refs/rewritten/"))
+        target = (gitdir if private else common) / reference
+        raw = _source_scope_control_bytes(target, optional=True)
+    raise ValueError("symbolic HEAD route bound exceeded")
+
+
+def _source_scope_git_controls(root: Path) -> None:
+    """Reject config indirections BEFORE native Git can interpret their targets.
+
+    These repeated observations are not an atomic filesystem/host guarantee.
+    Independently pinned owning scope inputs refuse before this metadata route.
+    """
+    marker = root / ".git"
+    if stat.S_ISDIR(marker.lstat().st_mode):
+        gitdir = marker
+        common = gitdir
+    else:
+        raw = _source_scope_control_bytes(marker)
+        if raw is None or not raw.startswith(b"gitdir: ") or len(raw.splitlines()) != 1:
+            raise ValueError("unqualified Git directory pointer")
+        target = raw.decode("utf-8").strip()[8:]
+        gitdir = Path(os.path.abspath(root / target))
+        # Qualify the standard control namespace before opening anything at the
+        # pointer target. Arbitrary directories are not metadata read grants.
+        if gitdir.parent.name != "worktrees" or not gitdir.parent.parent.name.endswith(".git"):
+            raise ValueError("unqualified linked-worktree control namespace")
+        common_raw = _source_scope_control_bytes(gitdir / "commondir")
+        if common_raw is None or len(common_raw.splitlines()) != 1:
+            raise ValueError("unqualified linked-worktree metadata")
+        common = Path(os.path.abspath(gitdir / common_raw.decode("utf-8").strip()))
+        # Only the standard linked-worktree topology is qualified here. An
+        # arbitrary Git pointer must not expand this metadata read boundary.
+        if gitdir.parent.name != "worktrees" or gitdir.parent.parent != common:
+            raise ValueError("unqualified linked-worktree topology")
+        backpointer = _source_scope_control_bytes(gitdir / "gitdir")
+        if backpointer is None or Path(os.path.abspath(backpointer.decode("utf-8").strip())) != marker:
+            raise ValueError("linked-worktree ownership differs")
+    for path in (common / "config", gitdir / "config.worktree"):
+        raw = _source_scope_control_bytes(path, optional=True)
+        if raw is not None and re.search(rb"\[\s*include", raw, re.IGNORECASE):
+            raise ValueError("Git config includes require a qualified metadata adapter")
+    # Native Git must not follow alternate-object routing from this probe.
+    if _source_scope_exists(common / "objects/info/alternates"):
+        raise ValueError("Git object alternates require a qualified metadata adapter")
+    for directory in dict.fromkeys((common, gitdir)):
+        for leaf in ("packed-refs", "shallow"):
+            _source_scope_control_metadata(directory / leaf, optional=True)
+        # The fixed metadata probe disables graft interpretation independently;
+        # static graft aliases also hold without opening any graft contents.
+        _source_scope_control_metadata(directory / "info/grafts", optional=True)
+    _source_scope_head_chain(gitdir, common)
+    # Native fixed-argv tree metadata probes may access refs, loose objects or
+    # pack/index metadata. Reject static external aliases before any such Git
+    # access. No file in these directories is opened for content by this walk.
+    for path in (common / "refs", common / "objects"):
+        _source_scope_alias_metadata(path)
+    private_refs = gitdir / "refs"
+    if gitdir != common and _source_scope_exists(private_refs):
+        _source_scope_alias_metadata(private_refs)
+
+
+def source_scope_declared(root: Path) -> bool:
+    """Check enclosing policy declarations and safely bounded Git metadata."""
+    if SOURCE_SCOPE_PIN in os.environ or SOURCE_SCOPE_REPOSITORY in os.environ:
+        return True
+    try:
+        roots, declared = _source_scope_roots(root)
+    except (OSError, ValueError):
+        raise SourceScopeError("source-scope metadata unavailable; content reads held") from None
+    if declared:
+        return True
+    # Probe-only environment: inherited Git tracing/config/executable routing
+    # must not cause reads or side writes before this non-authorizing hold.
+    # Normal owner git_environment()/writers retain their existing behavior.
+    environment = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    environment.update({"GIT_NO_LAZY_FETCH": "1", "GIT_ALLOW_PROTOCOL": "",
+                        "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
+                        "GIT_GRAFT_FILE": os.devnull})
+    for owner in roots:
+        def metadata(*arguments):
+            return subprocess.run(["git", "--no-replace-objects", "-c", "protocol.allow=never", *arguments],
+                                  cwd=owner, env=environment, capture_output=True, timeout=GIT_TIMEOUT, check=False)
+        try:
+            _source_scope_git_controls(owner)
+            result = metadata("ls-tree", "-z", "HEAD", "--", SOURCE_SCOPE_POLICY)
+            if result.returncode == 0:
+                if result.stdout:
+                    return True
+                continue
+            head = metadata("rev-parse", "--verify", "--quiet", "HEAD")
+            symbolic = metadata("symbolic-ref", "--quiet", "HEAD")
+            ref = symbolic.stdout.decode("utf-8").strip()
+            unborn = (head.returncode != 0 and symbolic.returncode == 0
+                      and ref.startswith("refs/heads/") and "\0" not in ref and "\n" not in ref
+                      and metadata("check-ref-format", ref).returncode == 0
+                      and metadata("show-ref", "--verify", "--quiet", ref).returncode == 1)
+            if not unborn:
+                raise ValueError("source-scope metadata unavailable")
+        except (OSError, ValueError, TypeError, subprocess.SubprocessError, UnicodeError):
+            raise SourceScopeError("source-scope metadata unavailable; content reads held") from None
+    return False
+
+
+def validate_source_scope_policy(raw: bytes, *, expected_sha256: str, repository: str) -> dict:
+    """Validate already trusted compiled bytes; this never grants execution scope."""
+    if (not isinstance(expected_sha256, str) or not re.fullmatch(r"[a-f0-9]{64}", expected_sha256)
+            or expected_sha256 == "0" * 64 or not isinstance(repository, str)
+            or not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository)
+            or not isinstance(raw, bytes) or len(raw) > 16384 or sha(raw) != expected_sha256):
+        raise SourceScopeError("source-scope policy differs from independent owner pins")
+    def pairs(items):
+        value = {}
+        for key, item in items:
+            if key in value:
+                raise SourceScopeError("duplicate source-scope policy field")
+            value[key] = item
+        return value
+    try:
+        policy = json.loads(raw, object_pairs_hook=pairs,
+                            parse_constant=lambda _: (_ for _ in ()).throw(SourceScopeError("invalid scope number")))
+        if (not isinstance(policy, dict)
+                or set(policy) != {"schema_version", "repository", "scope", "allowed_paths", "protected_paths"}
+                or type(policy["schema_version"]) is not int or policy["schema_version"] != 1
+                or policy["repository"] != repository or policy["scope"] != "source-only"):
+            raise SourceScopeError("source-scope policy identity or fields differ")
+        for field in ("allowed_paths", "protected_paths"):
+            values = policy[field]
+            if (not isinstance(values, list) or not values or len(values) > 256
+                    or any(not isinstance(value, str) or not value or len(value) > 500
+                           or value.startswith("/") or "\\" in value or "\0" in value
+                           or any(ord(character) < 32 or ord(character) == 127 for character in value)
+                           or any(part in ("", ".", "..") for part in value.removesuffix("/").split("/"))
+                           or any(character in value for character in "*?[]\r\n") for value in values)
+                    or len(set(values)) != len(values)):
+                raise SourceScopeError("source-scope paths must be unique bounded literal paths")
+            for value in values:
+                value.encode("utf-8")
+    except (ValueError, TypeError, UnicodeError, RecursionError):
+        raise SourceScopeError("source-scope compiled policy invalid") from None
+    return policy
+
+
+def require_source_scope(root: Path) -> None:
+    """Refuse broad validation without opening even the working policy file.
+
+    The fixed declaration or independent owner pin is a hold, never an allow
+    switch. A future projection must verify trusted compiled policy bytes and
+    physical absence of opaque objects before any restricted-scope execution.
+    """
+    if source_scope_declared(root):
+        raise SourceScopeError("source-scope requires a reviewed isolated projection; full validation held")
+
+
+def require_content_path_scope(path: Path) -> None:
+    """Guard standalone low-level readers at their lexical owning Git root."""
+    if SOURCE_SCOPE_PIN in os.environ or SOURCE_SCOPE_REPOSITORY in os.environ:
+        raise SourceScopeError("source-scope content reads require a reviewed isolated projection")
+    require_source_scope(Path(os.path.abspath(path)).parent)
+
+
 TOOLS = {
     "git": ["git", "--version"],
     "python": [sys.executable, "--version"],
@@ -61,6 +353,7 @@ def git_environment(environ: dict | None = None) -> dict:
 
 
 def git(root: Path, *args: str) -> bytes:
+    require_source_scope(root)
     if args and args[0] == "diff":
         # Evidence must describe bytes, independently of display-only drivers.
         args = (args[0], "--no-ext-diff", "--no-textconv", "--no-color", *args[1:])
@@ -75,6 +368,7 @@ def execution_environment(item: dict, inherited: dict | None = None) -> dict:
 
 def private_cache_key(root: Path) -> bytes:
     """Create one ignored private key without exposing inherited secret values."""
+    require_source_scope(root)
     path = inside(root, f"{STATE}/environment.key")
     if subprocess.run(["git", "check-ignore", "-q", str(path.relative_to(root))],
                       cwd=root, env=git_environment(), timeout=GIT_TIMEOUT).returncode:
@@ -131,6 +425,7 @@ def inside(root: Path, value: str) -> Path:
 
 def require_unfiltered_tracked_inputs(root: Path) -> set[str]:
     """Reject Git metadata that can conceal raw working-file changes."""
+    require_source_scope(root)
     names = subprocess.run(["git", "ls-files", "-z"], cwd=root,
                            env=git_environment(), capture_output=True, timeout=GIT_TIMEOUT, check=True).stdout
     attributes = subprocess.run(["git", "check-attr", "--all", "-z", "--stdin"],
@@ -170,6 +465,7 @@ def directory_state(details: os.stat_result) -> tuple:
 
 
 def empty_gitlink_identity(root: Path, name: str) -> str | None:
+    require_source_scope(root)
     path = root / name
     # Descriptor enumeration is unavailable on some hosts. The existing
     # unsupported-submodule block remains their conservative fallback.
@@ -203,6 +499,7 @@ def empty_gitlink_identity(root: Path, name: str) -> str | None:
 
 def raw_tracked_inputs(root: Path) -> dict:
     """Hash physical working bytes independently of Git's stat/index hints."""
+    require_source_scope(root)
     algorithm = git(root, "rev-parse", "--show-object-format").decode().strip()
     if algorithm not in {"sha1", "sha256"}:
         raise ValueError("unsupported Git object format for raw-input validation")
@@ -241,6 +538,7 @@ def raw_tracked_inputs(root: Path) -> dict:
 
 
 def snapshot(root: Path) -> dict:
+    require_source_scope(root)
     require_unfiltered_tracked_inputs(root)
     # Include staged AND unstaged edits, additions and deletions. Generated
     # ignored files are not evidence inputs; declare their source/config.
@@ -273,6 +571,7 @@ def snapshot(root: Path) -> dict:
 
 
 def config_for(root: Path) -> dict:
+    require_source_scope(root)
     config = json.loads(inside(root, "config/agent-checks.json").read_text(encoding="utf-8"))
     if config.get("schema_version") != 1 or not config.get("base"):
         raise ValueError("config/agent-checks.json requires schema_version=1 and base")
@@ -313,6 +612,7 @@ def working_tree_matches_base(root: Path, name: str, actual: tuple, baseline: tu
     (CRLF, ident, encoding) are applied to the immutable base blob, so edits
     hidden by clean conversion still select their owning checks.
     """
+    require_source_scope(root)
     if baseline is None or actual[0] == "missing":
         return False
     mode, identity = baseline
@@ -335,6 +635,7 @@ def working_tree_matches_base(root: Path, name: str, actual: tuple, baseline: tu
 
 
 def plan_for(root: Path, config: dict, base: str | None = None) -> dict:
+    require_source_scope(root)
     conversion_paths = require_unfiltered_tracked_inputs(root)
     # Include conservative potential conversions even when bytes equal the
     # canonical blob (e.g. an expanded ident replaced by literal $Id$).
@@ -398,6 +699,7 @@ def tool_context_key(name: str, cwd: str, env_json: str) -> str:
 def versions(root: Path, plan: dict, inherited: dict | None = None) -> dict:
     # Corepack/pyenv and similar shims select versions from their working
     # directory. Probe each distinct execution context, never the caller's cwd.
+    require_source_scope(root)
     contexts = tool_contexts([*plan["checks"], *plan["environments"]], plan.get("tool_requirements", {}))
     result = {"platform": platform.platform()}
     for name, cwd, env_json in sorted(contexts):
@@ -416,6 +718,7 @@ def versions(root: Path, plan: dict, inherited: dict | None = None) -> dict:
 
 
 def execute(root: Path, item: dict, inherited: dict | None = None) -> dict:
+    require_source_scope(root)
     start = time.monotonic()
     status, reason = "passed", "completed"
     env = execution_environment(item, inherited)
@@ -476,6 +779,7 @@ def environment_tools(item: dict, tools: dict, plan: dict) -> dict:
 
 def environment_digest(root: Path, item: dict, tools: dict, key: bytes, inherited: dict,
                        *, plan: dict | None = None) -> str:
+    require_source_scope(root)
     inputs = {}
     for name in item.get("inputs", []):
         path = inside(root, name)
@@ -487,6 +791,7 @@ def environment_digest(root: Path, item: dict, tools: dict, key: bytes, inherite
 
 def ready_path(root: Path, value: str) -> Path:
     """Keep the declared name local; external links are usable but never cached."""
+    require_source_scope(root)
     path = root / value
     if Path(value).is_absolute() or not Path(os.path.abspath(path)).is_relative_to(root):
         raise ValueError(f"path must stay inside the repository: {value}")
@@ -496,6 +801,7 @@ def ready_path(root: Path, value: str) -> Path:
 
 
 def missing_ready_paths(root: Path, item: dict) -> list[str]:
+    require_source_scope(root)
     return [p for p in item.get("ready_paths", []) if not ready_path(root, p).exists()]
 
 
@@ -516,6 +822,7 @@ def ready_identity(root: Path, item: dict, *, key: bytes | None = None) -> str |
     External/unsafe links, special files, unsupported descriptor operations and
     bounded-scan exhaustion disable both caches without suppressing checks.
     """
+    require_source_scope(root)
     if (not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "O_DIRECTORY")
             or os.open not in os.supports_dir_fd or os.scandir not in os.supports_fd):
         return None
@@ -697,6 +1004,7 @@ def dotenv_identity(root: Path, plan: dict, key: bytes) -> dict:
     Frameworks read them during builds and tests, but Git ignores them, so the
     candidate snapshot does not. Keyed so cache files never hold a bare hash.
     """
+    require_source_scope(root)
     directories = {"."} | {item.get("cwd", ".") for item in [*plan["checks"], *plan["environments"]]}
     result = {}
     for directory in sorted(directories):
@@ -723,6 +1031,7 @@ def unreadable_state(path: Path) -> bytes:
     A tool that rewrites or replaces a file cannot keep its inode and ctime,
     so an unreadable file still changes identity when it changes.
     """
+    require_content_path_scope(path)
     try:
         details = path.stat() if path.exists() else path.lstat()
     except OSError:
@@ -733,6 +1042,7 @@ def unreadable_state(path: Path) -> bytes:
 
 def file_digest(path: Path) -> str:
     """SHA-256 of a file read in blocks, or its visible state if unreadable."""
+    require_content_path_scope(path)
     try:
         digest = hashlib.sha256()
         with open(path, "rb") as stream:
@@ -751,6 +1061,7 @@ def dotenv_bytes(path: Path) -> bytes:
     that file's contents; links to directories are not followed, so a link
     cycle cannot loop.
     """
+    require_content_path_scope(path)
     try:
         if path.is_file():
             return b"regular\0" + path.read_bytes()
@@ -789,6 +1100,7 @@ def dotenv_bytes(path: Path) -> bytes:
 
 
 def write_json(path: Path, value: dict) -> None:
+    require_content_path_scope(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(f".{os.getpid()}.tmp")
     temporary.write_bytes(encoded(value) + b"\n")
@@ -808,6 +1120,7 @@ def main(argv=None) -> int:
     inherited = git_environment()
     receipt_path = None
     try:
+        require_source_scope(root)
         if not args.plan:
             state = inside(root, STATE)
             receipt_path = state / "receipt.json"
@@ -1040,6 +1353,11 @@ def main(argv=None) -> int:
                 ))
         print(f"AGENT-CHECK-{outcome.upper()} {candidate_digest[:12]}")
         return 0 if outcome == "passed" else 1
+    except SourceScopeError:
+        # Do not read, delete or rewrite stale state under an unqualified
+        # boundary. Callers must honor this held exit before any old receipt.
+        print("AGENT-CHECK-SOURCE-SCOPE-HELD: no qualified content projection; no validation authority.", file=sys.stderr)
+        return SOURCE_SCOPE_EXIT
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
         if receipt_path is not None:
             try:
