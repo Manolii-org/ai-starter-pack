@@ -321,6 +321,10 @@ def require_content_path_scope(path: Path) -> None:
 
 TOOLS = {
     "git": ["git", "--version"],
+    # Optional Pack Linux source-executor contract; never selected by the
+    # portable consumer recipe. Unknown/missing tools remain unavailable.
+    "bwrap": ["/usr/bin/bwrap", "--version"],
+    "cc": ["/usr/bin/cc", "--version"],
     "python": [sys.executable, "--version"],
     "node": ["node", "--version"],
     "npm": ["npm", "--version"],

@@ -150,11 +150,17 @@
         "schemas/source-scope-policy.v1.schema.json",
         "docs/source-scope-boundary.md",
         "scripts/lib/source_projection.py",
-        "scripts/tests/test_source_projection.py"
+        "scripts/tests/test_source_projection.py",
+        "scripts/lib/source_executor.py",
+        "scripts/tests/test_source_executor.py",
+        "docs/source-only-execution.md",
+        ".github/workflows/plugin-eval-gate.yml"
       ],
       "tools": [
         "python",
-        "git"
+        "git",
+        "bwrap",
+        "cc"
       ],
       "commands": [
         [
@@ -193,6 +199,17 @@
           "scripts/tests",
           "-p",
           "test_source_projection.py",
+          "-v"
+        ],
+        [
+          "python3",
+          "-m",
+          "unittest",
+          "discover",
+          "-s",
+          "scripts/tests",
+          "-p",
+          "test_source_executor.py",
           "-v"
         ]
       ]

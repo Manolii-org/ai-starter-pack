@@ -325,7 +325,8 @@ def test_validation_layout_distribution_boundary(default_render, branded_render)
             assert (rendered / rel).read_bytes() == (ROOT / rel).read_bytes()
         assert not (rendered / "scripts/tests/test_agent_validation_layout.py").exists()
         for pack_only in ("scripts/tests/test_source_scope_boundary.py", "scripts/tests/test_source_projection.py",
-                          "scripts/lib/source_projection.py"):
+                          "scripts/lib/source_projection.py", "scripts/lib/source_executor.py",
+                          "scripts/tests/test_source_executor.py", "docs/source-only-execution.md"):
             assert not (rendered / pack_only).exists()
         assert not (rendered / "tests/test_assessment_sast_failure.py").exists()
         # The existing default validation bundle remains available to callers.
@@ -512,12 +513,16 @@ def test_agent_validation_base_uses_owner_ref(tmp_path, default_render, base_ref
     canonical["checks"] = [c for c in canonical["checks"] if c["id"] not in {"release-manifest-contract", "feature-controls", "feature-controls-distribution", "assessment-sast-failure-contract", "registry-bootstrap-contract"}]
     canonical["environments"] = [e for e in canonical["environments"] if e["id"] not in {"release-contract-python", "feature-controls-python"}]
     pack_only_paths = {"scripts/tests/test_source_scope_boundary.py", "scripts/tests/test_source_projection.py",
-                       "scripts/lib/source_projection.py"}
+                       "scripts/lib/source_projection.py", "scripts/lib/source_executor.py",
+                       "scripts/tests/test_source_executor.py", "docs/source-only-execution.md",
+                       ".github/workflows/plugin-eval-gate.yml"}
     pack_only_commands = [["python3", "-m", "unittest", "discover", "-s", "scripts/tests", "-p", name, "-v"]
-                          for name in ("test_source_scope_boundary.py", "test_source_projection.py")]
+                          for name in ("test_source_scope_boundary.py", "test_source_projection.py", "test_source_executor.py")]
     owner_check = next(check for check in canonical["checks"] if check["id"] == "agent-validation-contract")
     owner_check["paths"] = [path for path in owner_check["paths"] if path not in pack_only_paths]
     owner_check["commands"] = [command for command in owner_check["commands"] if command not in pack_only_commands]
+    owner_check["tools"] = [tool for tool in owner_check["tools"] if tool not in {"bwrap", "cc"}]
+    assert owner_check["tools"] == ["python", "git"]
     assert owner_check["commands"] == [["python3", "scripts/sync-agent-validation.py", "--check"],
                                         ["python3", "-m", "unittest", "discover", "-s", "scripts/tests", "-p", "test_agent_check.py", "-v"]]
     assert json.loads((default_render / "config/agent-checks.json").read_text()) == canonical
@@ -1111,3 +1116,69 @@ def test_standard_keeps_codex_review_unless_opted_out(default_render, tmp_path):
 def test_strict_refuses_manolii_hosted_services(tmp_path, flag):
     with pytest.raises(subprocess.CalledProcessError):
         render(tmp_path / "bad", isolation_profile="strict", **{flag: "true"})
+
+
+def test_executor_pack_recipe_renders_without_linux_consumer_dependencies():
+    """Plain Jinja smoke; actual Copier follows the committed canonical source."""
+    from jinja2 import Environment, FileSystemLoader, StrictUndefined
+
+    environment = Environment(loader=FileSystemLoader(ROOT), undefined=StrictUndefined)
+    environment.filters["from_json"] = json.loads
+    template = environment.get_template("config/agent-checks.json.jinja")
+    owner = json.loads((ROOT / "config/agent-checks.json").read_text())
+    command = ["python3", "-m", "unittest", "discover", "-s", "scripts/tests", "-p", "test_source_executor.py", "-v"]
+    assert command in owner["checks"][0]["commands"]
+    assert owner["checks"][0]["tools"] == ["python", "git", "bwrap", "cc"]
+    # Fingerprint the actual fixed binaries used by the reviewed executor/tests,
+    # rather than a same-named executable earlier on an unrelated PATH.
+    runner = runpy.run_path(str(ROOT / "scripts/agent-check.py"))
+    assert runner["TOOLS"]["bwrap"] == ["/usr/bin/bwrap", "--version"]
+    assert runner["TOOLS"]["cc"] == ["/usr/bin/cc", "--version"]
+    assert len(owner["checks"]) == 7
+    assert len(owner["environments"]) == 3
+    for base in ("origin/trunk", "master"):
+        rendered = json.loads(template.render(agent_validation_base=base))
+        assert rendered["base"] == base
+        portable = rendered["checks"][0]
+        assert portable["id"] == "agent-validation-contract"
+        assert portable["tools"] == ["python", "git"]
+        assert portable["commands"] == [
+            ["python3", "scripts/sync-agent-validation.py", "--check"],
+            ["python3", "-m", "unittest", "discover", "-s", "scripts/tests", "-p", "test_agent_check.py", "-v"],
+        ]
+        assert not any("source_executor" in item or "source_projection" in item for item in portable["paths"])
+        assert "docs/source-only-execution.md" not in portable["paths"]
+        assert ".github/workflows/plugin-eval-gate.yml" not in portable["paths"]
+        assert all("bwrap" not in check.get("tools", []) and "cc" not in check.get("tools", [])
+                   for check in rendered["checks"])
+    copier = yaml.safe_load((ROOT / "copier.yml").read_text())
+    for path in ("scripts/lib/source_executor.py", "scripts/tests/test_source_executor.py",
+                 "docs/source-only-execution.md", "scripts/lib/source_projection.py",
+                 "scripts/tests/test_source_projection.py", "scripts/tests/test_release_validation_gate.py"):
+        assert path in copier["_exclude"]
+
+
+def test_executor_native_linux_gate_declares_tools_and_preserves_qualification():
+    """Missing capability exits incomplete; the actual tests have no success waiver."""
+    workflow = yaml.safe_load((ROOT / ".github/workflows/plugin-eval-gate.yml").read_text())
+    assert workflow["permissions"] == {"contents": "read"}
+    job = workflow["jobs"]["eval-gate"]
+    assert job["runs-on"] == "ubuntu-latest"
+    assert job["timeout-minutes"] == 15
+    steps = {step.get("name"): step for step in job["steps"]}
+    setup = steps["Install public Linux source-executor prerequisites"]
+    assert 'apt-cache policy bubblewrap' in setup["run"]
+    assert 'apt-cache policy build-essential' in setup["run"]
+    assert '"bubblewrap=$bubblewrap_version" "build-essential=$build_version"' in setup["run"]
+    assert "exit 2" in setup["run"]
+    capability = steps["Verify Linux source-executor capability"]
+    for token in ("--unshare-user", "--disable-userns", "--unshare-all", "--cap-drop ALL", "--clearenv", "exit 2"):
+        assert token in capability["run"]
+    execution = steps["Linux source-executor contracts"]
+    assert execution["run"] == "python3 -m unittest discover -s scripts/tests -p test_source_executor.py -v"
+    for step in (setup, capability, execution):
+        assert "if" not in step
+        assert "continue-on-error" not in step
+        assert "|| true" not in step["run"]
+    # The established portable contract is still called independently.
+    assert "test_agent_check.py" in steps["Local agent validation contract"]["run"]

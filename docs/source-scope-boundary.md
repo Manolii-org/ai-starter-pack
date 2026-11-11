@@ -48,15 +48,18 @@ Each owning caller must install and invoke the guard before its own broad reads.
 Unadopted owners remain held operationally; no old receipt is upgraded to proof.
 
 There is intentionally no `projection_verified` input or success override. A
-future authorized source-only executor needs a real Git metadata/allowed-byte
+source-only executor requires a real Git metadata/allowed-byte
 projection with opaque objects physically absent, no alternates/lazy fetch/network
 or credentials, exact source/tree/policy/path/mode/blob bindings and independently
 reviewed command/dependency closure. A test that requests an omitted input must
 fail, and the result must have a separate restricted-scope identity with no
 full-repository/runtime/merge authority. Merely omitting files while executing
 unreviewed whole-repository commands cannot meet that contract. This hold neither
-implements that projection nor claims full safe qualification. No existing
-required check is removed, skipped or renamed.
+installs the additive projection/executor nor claims full safe qualification.
+The separately reviewed Pack libraries have a Pack-only guide at
+`docs/source-only-execution.md`; that guide is not installed with this guard.
+No installed guard caller routes into those libraries or upgrades an old receipt.
+No existing required check is removed, skipped or renamed.
 
 Control checks are bounded repeated observations, not an atomic filesystem or
 host security boundary. Independently pinned owner scope inputs remain the
@@ -73,9 +76,19 @@ adapter; packed/shared/linked-worktree input remains unsupported by that
 foundation. The metadata-only guard's narrower packed-query support does not
 change those projection limits.
 
-Pack-only scope/projection tests and the projection library do not render into
-consumers or their recipes. The existing portable validation suite remains
-independent of an optional QA helper. Pack consumer tests separately exercise an
+Pack-only scope/projection/executor tests and both libraries do not render into
+consumers or their recipes. The standalone executor guide is Pack-only as well.
+The first Pack check additionally requires the explicit Linux `bwrap`/`cc`
+contract and runs its exact 17 cases; those tools and that command are excluded
+from the consumer recipe. The existing Linux Plugin Eval Gate installs exact
+versions resolved from its signed public package candidates, checks actual
+namespace capability, and runs the same executor tests. Missing tools or denied
+isolation is incomplete qualification (a failing native preflight exits 2), never
+a skipped passing proof. Local Pack source qualification requires that Linux
+adapter; portable Mac consumers retain their existing Python/Git recipe. Existing
+seven check identities, three dependency environments and budgets remain intact.
+Actual new-head native execution is still required after source publication.
+The existing portable validation suite remains independent of an optional QA helper. Pack consumer tests separately exercise an
 actual rendered guard hold and an ordinary failing check; absent maintenance
 tests are never counted as successful boundary qualification.
 
