@@ -326,6 +326,7 @@ _exclude:
   - scripts/registry-lint.py
   - scripts/bootstrap-mirror.py
   - tests/test_registry.py
+  - tests/_registry_cases_*.py
   - tests/test_native_guidance.py
   - tests/test_session_terminal_callers.py
   - scripts/tests/test_agent_validation_layout.py
@@ -334,6 +335,7 @@ _exclude:
   - scripts/tests/test_release_manifest.py
   - scripts/tests/test_release_admission_git.py
   - scripts/tests/test_release_vector.py
+  - scripts/tests/test_release_validation_gate.py
   - scripts/tests/fixtures/release-manifest.v1.json
   - scripts/tests/fixtures/release-manifest.v2.json
   - .github/workflows/registry-lint.yml

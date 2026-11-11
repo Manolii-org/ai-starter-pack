@@ -43,6 +43,18 @@ checks still run. The cache walker never reads file bytes or directory entries
 outside the owning repository. Dependency identities use the private cache key
 and remain in local evidence.
 
+The portable `READY_IDENTITY_CONTRACT` is `agent-ready-content/v3`; its hash
+domain separates earlier readiness evidence without changing receipt schemas,
+the CLI or the optional private-key call interface.
+
+Directory membership and physical identity are checked again after each subtree.
+Directory timestamps detect drift during a walk but never enter the persisted
+directory digest. Cached and freshly executed PASS results both recheck source,
+declared dependencies, dotenv and tool identities before publication. These are
+bounded repeated observations, not an atomic filesystem snapshot: concurrent
+writes that occur after an observation or fully reverse between observations
+cannot be ruled out. Observable changes fail closed.
+
 Install only on an isolated task branch. The installer preserves the owner's
 integration `base` and optional `protected_branches`, including the current
 recipe when a replacement is supplied. Policy sync keeps every previously
@@ -130,7 +142,7 @@ src/
 4. Use `AbortSignal.timeout()` for all external HTTP calls
 5. Fix root causes, not symptoms — every fix needs a `Root cause:` explanation
 6. Every API route needs a security marker: `// PUBLIC:`, `// USER:`, `// ADMIN:`, `// WEBHOOK:`
-7. Follow `docs/ci-cost-conventions.md` for GitHub Actions minutes: skip drafts on PR Assessment (keep `ready_for_review` and `converted_to_draft`); Autofix is not draft-gated; path-filter non-required browser/`supabase start` PR workflows; do not add `on.paths` to internally detect-gated e2e that might become required; extract `gh run list` wait loops to `scripts/ci/` with a fake-`gh` test; put shared `concurrency:` on the job that holds the lock, not a detect-only workflow
+7. Follow `docs/ci-cost-conventions.md` for GitHub Actions minutes: run deterministic PR source qualification on drafts and keep optional model reviews non-draft (keep `ready_for_review` and `converted_to_draft`); Autofix is not draft-gated; path-filter non-required browser/`supabase start` PR workflows; do not add `on.paths` to internally detect-gated e2e that might become required; extract `gh run list` wait loops to `scripts/ci/` with a fake-`gh` test; put shared `concurrency:` on the job that holds the lock, not a detect-only workflow
 8. {Add project-specific rules here}
 
 ## Framework Rules

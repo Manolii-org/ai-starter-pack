@@ -1161,6 +1161,7 @@ def test_failed_cleanup_preserves_another_writers_temp_entry(
         else:
             handle = module.os.open(src, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644,
                                     dir_fd=descriptor)
+            os.fchmod(handle, 0o644)
             with os.fdopen(handle, "wb") as stream:
                 stream.write(b"Other writer bytes.\n")
         names.append(root / src)
@@ -1242,6 +1243,7 @@ def test_failed_cleanup_preserves_replacement_after_final_name_snapshot(
                 else:
                     handle = original_open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL,
                                            0o644, dir_fd=parent)
+                    os.fchmod(handle, 0o644)
                     with os.fdopen(handle, "wb") as stream:
                         stream.write(b"Other writer bytes.\n")
         return observed
