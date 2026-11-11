@@ -203,6 +203,7 @@
         ".github/workflows/REUSABLE-WORKFLOWS.md",
         "schemas/release-adoption.v1.schema.json",
         "scripts/tests/test_release_admission_git.py",
+        "scripts/tests/test_release_validation_gate.py",
         "plugin/manolii-framework/schemas/release-adoption.v1.schema.json",
         "plugin/manolii-framework/schemas/release-manifest.v1.schema.json",
         "registry/platform/framework/schemas/release-adoption.v1.schema.json",

@@ -345,6 +345,9 @@ def test_release_capability_distribution_boundary(default_render, branded_render
         for rel in paths:
             assert (rendered / rel).read_bytes() == (ROOT / rel).read_bytes()
         maintenance_paths = list((ROOT / "scripts/tests").glob("test_release_*.py"))
+        # Finalise-gate assertions are maintainer-only too: the portable
+        # six-file installer does not ship that optional QA helper.
+        assert ROOT / "scripts/tests/test_release_validation_gate.py" in maintenance_paths
         maintenance_paths += list((ROOT / "scripts/tests/fixtures").glob("release-manifest.v*.json"))
         registry_cases = list((ROOT / "tests").glob("_registry_cases_*.py"))
         assert registry_cases, "the registry case inventory must not become vacuous"
