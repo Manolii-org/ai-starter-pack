@@ -275,22 +275,22 @@ def test_cost_profile_lean_omits_measured_waste_callers(default_render):
     ("flags", "expected"),
     [
         ({}, {"Hooks": 5, "Commands": 51, "Skills": 41, "Agents": 27,
-              "Scripts": 61, "Husky": 3, "CI": 39, "Docs": 40}),
+              "Scripts": 61, "Husky": 3, "CI": 40, "Docs": 41}),
         ({flag: "true" for flag in FEATURE_FLAGS},
          {"Hooks": 5, "Commands": 54, "Skills": 45, "Agents": 28,
-              "Scripts": 61, "Husky": 3, "CI": 39, "Docs": 42}),
+              "Scripts": 61, "Husky": 3, "CI": 40, "Docs": 43}),
         ({"cost_profile": "lean"},
          {"Hooks": 5, "Commands": 51, "Skills": 41, "Agents": 27,
-              "Scripts": 61, "Husky": 3, "CI": 38, "Docs": 40}),
+              "Scripts": 61, "Husky": 3, "CI": 39, "Docs": 41}),
         ({"codex_review": "false"},
          {"Hooks": 5, "Commands": 51, "Skills": 41, "Agents": 27,
-              "Scripts": 61, "Husky": 3, "CI": 35, "Docs": 40}),
+              "Scripts": 61, "Husky": 3, "CI": 36, "Docs": 41}),
         ({"isolation_profile": "strict"},
          {"Hooks": 5, "Commands": 51, "Skills": 41, "Agents": 27,
-              "Scripts": 58, "Husky": 3, "CI": 31, "Docs": 40}),
+              "Scripts": 58, "Husky": 3, "CI": 32, "Docs": 41}),
         ({"isolation_profile": "strict", "cost_profile": "lean"},
          {"Hooks": 5, "Commands": 51, "Skills": 41, "Agents": 27,
-              "Scripts": 58, "Husky": 3, "CI": 31, "Docs": 40}),
+              "Scripts": 58, "Husky": 3, "CI": 32, "Docs": 41}),
     ],
 )
 def test_rendered_readme_counts_match_rendered_tree(flags, expected):
@@ -329,6 +329,23 @@ def test_validation_layout_distribution_boundary(default_render, branded_render)
         assert (rendered / "scripts/tests/test_agent_check.py").is_file()
 
 
+def test_subscription_guest_distribution_boundary(default_render, branded_render):
+    """Ship the accepted guest closure, without its Pack-only test command."""
+    paths = (
+        "scripts/ci/codex_automation_adapter.py", "scripts/ci/codex_automation_context.py",
+        "scripts/ci/codex_subscription_text.py", "scripts/ci/codex_text_response.py",
+        "scripts/ci/codex_review_models.py", "scripts/lib/subscription_guest.py",
+        "scripts/lib/agent_capabilities.py", "scripts/run-pr-classifier.py",
+        "scripts/run-specialists.py", "scripts/run-broad-agents.py", "scripts/run-judge.py",
+    )
+    for rendered in (default_render, branded_render):
+        for relative in paths:
+            assert (rendered / relative).read_bytes() == (ROOT / relative).read_bytes()
+        assert not (rendered / "tests/test_codex_automation_adapter.py").exists()
+        config = json.loads((rendered / "config/agent-checks.json").read_text())
+        assert "subscription-automation-text-contract" not in {c["id"] for c in config["checks"]}
+
+
 def test_release_capability_distribution_boundary(default_render, branded_render):
     """Ship runtime readers, omit pack maintenance, and run a consumer check."""
     paths = (
@@ -350,7 +367,7 @@ def test_release_capability_distribution_boundary(default_render, branded_render
         for path in maintenance_paths:
             assert not (rendered / path.relative_to(ROOT)).exists()
         config = json.loads((rendered / "config/agent-checks.json").read_text())
-        assert all(c["id"] not in {"release-manifest-contract", "feature-controls", "feature-controls-distribution", "assessment-sast-failure-contract"} for c in config["checks"])
+        assert all(c["id"] not in {"release-manifest-contract", "feature-controls", "feature-controls-distribution", "assessment-sast-failure-contract", "subscription-automation-text-contract"} for c in config["checks"])
         assert all(e["id"] not in {"release-contract-python", "feature-controls-python"} for e in config["environments"])
         fixture = ROOT / "scripts/tests/fixtures/release-manifest.v1.json"
         release_id = json.loads(fixture.read_text())["release_id"]
@@ -441,7 +458,7 @@ def test_branded_attribution(branded_render, default_render):
 def test_agent_validation_base_uses_owner_ref(tmp_path, default_render, base_ref):
     """A real rendered CLI plans correctly with remote or local owner refs."""
     canonical = json.loads((ROOT / "config/agent-checks.json").read_text())
-    canonical["checks"] = [c for c in canonical["checks"] if c["id"] not in {"release-manifest-contract", "feature-controls", "feature-controls-distribution", "assessment-sast-failure-contract"}]
+    canonical["checks"] = [c for c in canonical["checks"] if c["id"] not in {"release-manifest-contract", "feature-controls", "feature-controls-distribution", "assessment-sast-failure-contract", "subscription-automation-text-contract"}]
     canonical["environments"] = [e for e in canonical["environments"] if e["id"] not in {"release-contract-python", "feature-controls-python"}]
     assert json.loads((default_render / "config/agent-checks.json").read_text()) == canonical
     dst = tmp_path / "custom-integration"

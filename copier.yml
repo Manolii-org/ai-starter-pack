@@ -194,6 +194,7 @@ _exclude:
   - .github/workflows/codex-review-isolation-proof.yml
   - tests/codex_review_isolation_probe.py
   - tests/test_codex_review_isolation_probe.py
+  - tests/test_codex_automation_adapter.py
   # The pack's own leaf context manifest (master context governance); a rendered
   # instance must author its own, never inherit the template's identity.
   - /.ai/repo-context.yaml
