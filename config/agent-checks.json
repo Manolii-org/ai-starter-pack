@@ -416,6 +416,7 @@
       "environment": "release-contract-python",
       "paths": [
         "tests/test_registry.py",
+        "tests/_registry_cases_*.py",
         "registry/pack-surface-allowlist.txt",
         "config/agent-checks.json"
       ],

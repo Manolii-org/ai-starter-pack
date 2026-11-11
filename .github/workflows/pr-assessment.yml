@@ -541,10 +541,8 @@ jobs:
               if exit_code not in {'0', '1'}:
                   raise ValueError(f'{scanner}: missing or unsuccessful native exit status')
               data = json.loads(Path(path).read_text())
-              errors = data.get('errors')
               if (not isinstance(data, dict) or not isinstance(data.get('results'), list)
-                      or not isinstance(errors, list)
-                      or any(isinstance(e, dict) and e.get('level') == 'error' for e in errors)):
+                      or data.get('errors') != []):
                   raise ValueError(f'{scanner}: incomplete or malformed report')
               if exit_code == '1' and not data['results']:
                   raise ValueError(f'{scanner}: nonzero exit without findings')

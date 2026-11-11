@@ -326,6 +326,7 @@ _exclude:
   - scripts/registry-lint.py
   - scripts/bootstrap-mirror.py
   - tests/test_registry.py
+  - tests/_registry_cases_*.py
   - tests/test_native_guidance.py
   - tests/test_session_terminal_callers.py
   - scripts/tests/test_agent_validation_layout.py
