@@ -51,8 +51,7 @@ not replace the provider's native exit/error contract or prove exhaustive taint
 analysis. Native top-level timeouts and parsing errors still fail, including
 warning-level errors alongside findings. The 30-second rule/file ceiling,
 no-early-abandonment setting, provider versions, rule selection and job deadline
-are unchanged. Large synthetic bootstrap cases live in non-test helper modules;
-the legacy registry entrypoint keeps every existing pytest node and assertion.
+are unchanged.
 Raw scanner reports are retained as a separate owner-local diagnostic artifact
 for seven days, including failed jobs. Those reports never authorize findings
 publication, specialist work or a release.
