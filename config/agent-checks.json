@@ -134,6 +134,10 @@
         "scripts/agent-check.py",
         "scripts/sync-agent-validation.py",
         "scripts/tests/test_agent_check.py",
+        "plugin/manolii-framework/scripts/agent-check.py",
+        "plugin/manolii-framework/scripts/tests/test_agent_check.py",
+        "registry/platform/framework/scripts/agent-check.py",
+        "registry/platform/framework/scripts/tests/test_agent_check.py",
         "docs/agent-validation.md",
         "AGENTS.md",
         "CLAUDE.md",
@@ -199,6 +203,7 @@
         ".github/workflows/REUSABLE-WORKFLOWS.md",
         "schemas/release-adoption.v1.schema.json",
         "scripts/tests/test_release_admission_git.py",
+        "scripts/tests/test_release_validation_gate.py",
         "plugin/manolii-framework/schemas/release-adoption.v1.schema.json",
         "plugin/manolii-framework/schemas/release-manifest.v1.schema.json",
         "registry/platform/framework/schemas/release-adoption.v1.schema.json",
@@ -415,6 +420,36 @@
         }
       ],
       "timeout_seconds": 120
+    },
+    {
+      "id": "registry-bootstrap-contract",
+      "environment": "release-contract-python",
+      "paths": [
+        "tests/test_registry.py",
+        "tests/_registry_cases_*.py",
+        "registry/pack-surface-allowlist.txt",
+        "config/agent-checks.json"
+      ],
+      "tools": [
+        "uv"
+      ],
+      "commands": [
+        [
+          ".ai/agent-checks/release-venv/bin/python",
+          "-m",
+          "pytest",
+          "tests/test_registry.py",
+          "tests/test_native_guidance.py",
+          "-q"
+        ]
+      ],
+      "timeout_seconds": 600,
+      "ci_sources": [
+        {
+          "path": ".github/workflows/registry-lint.yml",
+          "contains": "python3 -m pytest tests/test_registry.py tests/test_native_guidance.py -q"
+        }
+      ]
     }
   ]
 }

@@ -21,7 +21,7 @@ from pathlib import Path, PurePosixPath
 LIMIT = 32 * 1024 * 1024
 SCANNER_VERSIONS = {"semgrep": "1.185.0", "bandit": "1.9.4"}
 CONFIG = {
-    "semgrep": ["semgrep", "scan", "--config", "auto", "--timeout", "30", "--timeout-threshold", "0", "--json", "--disable-nosem", "--metrics=off", "--disable-version-check", "--verbose"],
+    "semgrep": ["semgrep", "scan", "--config", "auto", "--timeout", "30", "--timeout-threshold", "0", "--json", "--time", "--disable-nosem", "--metrics=off", "--disable-version-check", "--verbose"],
     "bandit": ["bandit", "-r", ".", "-f", "json", "--ignore-nosec", "--exclude", "./.venv,./node_modules"],
 }
 
@@ -149,6 +149,14 @@ def normalize(name: str, raw: bytes, exit_code: int | None, version: str | None)
                 raise ValueError("report scanner version differs from observed binary")
             if not isinstance(report.get("skipped_rules"), list) or report["skipped_rules"]:
                 raise ValueError("incomplete scanner rules")
+            # Experimental profiling records routine internal analysis limits;
+            # provider completion remains the native exit/error/scope contract.
+            profile = report.get("time")
+            limits = profile.get("fixpoint_timeouts") if isinstance(profile, dict) else None
+            record["profiling_limits"] = {
+                "status": "available" if isinstance(limits, list) else "unknown",
+                "reported_fixpoint_entries": len(limits) if isinstance(limits, list) else None,
+            }
         else:
             metrics = report["metrics"]
             if not isinstance(metrics, dict) or "_totals" not in metrics:

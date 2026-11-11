@@ -37,9 +37,9 @@ RUNNERS = [
     "run-judge.py",
 ]
 
-# Jobs that execute a runner script and therefore need the runtime present.
+# Jobs that read or execute runner scripts and therefore need the runtime present.
 # `sast` runs Semgrep/Bandit only and must stay un-hydrated.
-RUNNER_JOBS = {"classify", "specialists", "broad-agents", "judge"}
+RUNNER_JOBS = {"classify", "review-routing", "specialists", "broad-agents", "judge"}
 
 
 def _workflow() -> dict:
