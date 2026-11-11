@@ -2458,8 +2458,9 @@ class SurfaceTests(unittest.TestCase):
             self.skipTest("pack-maintainer generated surfaces are not installed consumer inputs")
         runner = load("agent-check")
         config = json.loads((installed / "config/agent-checks.json").read_text())
+        plugin_name = load("build-plugin").PLUGIN_NAME
         paths = [prefix + suffix
-                 for prefix in ("plugin/manolii-framework/", "registry/platform/framework/")
+                 for prefix in (f"plugin/{plugin_name}/", "registry/platform/framework/")
                  for suffix in ("scripts/agent-check.py", "scripts/tests/test_agent_check.py")]
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()
