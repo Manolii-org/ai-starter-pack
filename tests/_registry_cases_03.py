@@ -592,6 +592,9 @@ def test_lock_records_full_installed_mode(tmp_path):
     })
     (reg_root / "registry" / "platform" / "framework" / "skills"
      / "demo" / "run.sh").chmod(0o750)
+    # The assertion below tests this source mask, independent of host umask.
+    (reg_root / "registry" / "platform" / "framework" / "skills"
+     / "demo" / "SKILL.md").chmod(0o644)
     consumer = tmp_path / "consumer"
     consumer.mkdir()
     m = write_manifest(consumer, "manolii",

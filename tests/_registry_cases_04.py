@@ -1203,6 +1203,9 @@ def test_legacy_exec_record_mode_drift_conflicts(tmp_path):
         "platform/framework": [("skills/demo/SKILL.md",
                                 "---\nname: demo\ndescription: d\n---\nv1")],
     })
+    # Establish a real 0644 -> 0600 drift even under a restrictive umask.
+    (reg_root / "registry" / "platform" / "framework" / "skills"
+     / "demo" / "SKILL.md").chmod(0o644)
     consumer = tmp_path / "consumer"
     consumer.mkdir()
     m = write_manifest(consumer, "manolii",

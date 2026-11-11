@@ -90,7 +90,11 @@ def _bootstrap_env(tmp_path):
     # url.insteadOf, which would silently steer push-target checks.
     empty_cfg = tmp_path / "gitconfig.empty"
     empty_cfg.write_text("")
-    return dict(os.environ, PATH=f"{bin_dir}:{os.environ['PATH']}",
+    # Positive fixtures need an authenticated system Git, not a host's
+    # PATH wrapper. The declared gh stub stays first; explicit shadow-Git
+    # negative cases still supply their own PATH and must fail closed.
+    fixture_path = os.pathsep.join((str(bin_dir), os.defpath, os.environ["PATH"]))
+    return dict(os.environ, PATH=fixture_path,
                 GIT_CONFIG_GLOBAL=str(empty_cfg),
                 MIRROR_TRUST_DIRS=os.pathsep.join(filter(None,
                     (str(bin_dir), os.environ.get("MIRROR_TRUST_DIRS", "")))))
@@ -191,7 +195,7 @@ def test_bootstrap_mirror_fails_closed(tmp_path):
            cwd=root, capture_output=True)
     empty_bin = tmp_path / "emptybin"
     empty_bin.mkdir()
-    os.symlink(_shutil.which("git"), empty_bin / "git")
+    os.symlink(_shutil.which("git", path=os.defpath), empty_bin / "git")
     r = run(root, dict(os.environ, PATH=str(empty_bin)))
     assert r.returncode == 2, r.stderr
     assert not (root / "registry").exists()

@@ -136,3 +136,41 @@ def _load_registry_cases():
 
 
 _load_registry_cases()
+
+
+def test_bootstrap_fixture_isolates_host_git_wrapper(tmp_path, monkeypatch):
+    """Positive fixtures use system Git; an untrusted PATH shadow stays denied."""
+    # The stable entrypoint re-exports functions with their original globals.
+    fixture = test_bootstrap_mirror_seed.__globals__["_bootstrap_env"]
+    load_bootstrap = test_bootstrap_mirror_seed.__globals__["_load_bootstrap"]
+    wrapper = tmp_path / "host-wrapper"
+    wrapper.mkdir()
+    marker = tmp_path / "wrapper-executed"
+    shadow = wrapper / "git"
+    shadow.write_text("#!/bin/sh\ntouch '" + str(marker) + "'\nexit 1\n")
+    shadow.chmod(0o755)
+    monkeypatch.setenv("PATH", str(wrapper) + os.pathsep + os.environ["PATH"])
+    env = fixture(tmp_path)
+    system_git = shutil.which("git", path=os.defpath)
+    assert system_git, "the positive fixture requires an installed system Git"
+    assert shutil.which("git", path=env["PATH"]) == system_git
+    bootstrap = load_bootstrap()
+    monkeypatch.setenv("PATH", env["PATH"])
+    monkeypatch.setenv("MIRROR_TRUST_DIRS", env["MIRROR_TRUST_DIRS"])
+    assert bootstrap._trusted_prog("git") == os.path.realpath(system_git)
+    monkeypatch.setenv("PATH", str(wrapper) + os.pathsep + env["PATH"])
+    assert bootstrap._trusted_prog("git") == ""
+    assert not marker.exists()
+
+
+@pytest.mark.parametrize("case", [
+    "test_lock_records_full_installed_mode",
+    "test_legacy_exec_record_mode_drift_conflicts",
+])
+def test_mode_fixtures_preserve_assertions_under_restrictive_umask(tmp_path, case):
+    """The original mode and drift assertions hold even when file creation is 0600."""
+    previous = os.umask(0o077)
+    try:
+        globals()[case](tmp_path)
+    finally:
+        os.umask(previous)
