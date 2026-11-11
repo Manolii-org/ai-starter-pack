@@ -73,3 +73,21 @@ telemetry/README.md#7bc54766
 tests/test_autofix_reusable_yaml.py#ab0e4575
 tests/test_renovate_config.py#e89e494d
 tests/test_run_judge_review_lookup.py#b3e54a7c
+
+# Exact synthetic fixture lines mechanically moved from the legacy registry test.
+tests/_registry_bootstrap_mirror_cases.py#1b70c342
+tests/_registry_bootstrap_mirror_cases.py#37d09e41
+tests/_registry_bootstrap_mirror_cases.py#68545334
+tests/_registry_bootstrap_mirror_cases.py#8cde123b
+tests/_registry_bootstrap_mirror_cases.py#9eb93a11
+tests/_registry_bootstrap_mirror_cases.py#a65c1b3c
+tests/_registry_bootstrap_mirror_cases.py#cfdd2251
+tests/_registry_bootstrap_mirror_cases.py#d41b2c4a
+tests/_registry_bootstrap_mirror_cases.py#d9b8ea7c
+tests/_registry_bootstrap_mirror_cases.py#e6dbf06c
+tests/_registry_bootstrap_mirror_cases.py#fef4e65b
+tests/_registry_bootstrap_ssh_cases.py#3cb4a602
+tests/_registry_bootstrap_ssh_cases.py#5d5ecdf9
+tests/_registry_bootstrap_ssh_cases.py#756a2230
+tests/_registry_bootstrap_ssh_cases.py#9dc0fb3d
+tests/_registry_bootstrap_ssh_cases.py#a753bac1

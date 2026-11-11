@@ -410,6 +410,37 @@
         }
       ],
       "timeout_seconds": 120
+    },
+    {
+      "id": "registry-bootstrap-contract",
+      "environment": "release-contract-python",
+      "paths": [
+        "tests/test_registry.py",
+        "tests/_registry_bootstrap_mirror_cases.py",
+        "tests/_registry_bootstrap_ssh_cases.py",
+        "registry/pack-surface-allowlist.txt",
+        "config/agent-checks.json"
+      ],
+      "tools": [
+        "uv"
+      ],
+      "commands": [
+        [
+          ".ai/agent-checks/release-venv/bin/python",
+          "-m",
+          "pytest",
+          "tests/test_registry.py",
+          "tests/test_native_guidance.py",
+          "-q"
+        ]
+      ],
+      "timeout_seconds": 600,
+      "ci_sources": [
+        {
+          "path": ".github/workflows/registry-lint.yml",
+          "contains": "python3 -m pytest tests/test_registry.py tests/test_native_guidance.py -q"
+        }
+      ]
     }
   ]
 }

@@ -346,11 +346,13 @@ def test_release_capability_distribution_boundary(default_render, branded_render
             assert (rendered / rel).read_bytes() == (ROOT / rel).read_bytes()
         maintenance_paths = list((ROOT / "scripts/tests").glob("test_release_*.py"))
         maintenance_paths += list((ROOT / "scripts/tests/fixtures").glob("release-manifest.v*.json"))
+        maintenance_paths += [ROOT / "tests/_registry_bootstrap_mirror_cases.py",
+                              ROOT / "tests/_registry_bootstrap_ssh_cases.py"]
         assert maintenance_paths, "the pack maintenance inventory must not become vacuous"
         for path in maintenance_paths:
             assert not (rendered / path.relative_to(ROOT)).exists()
         config = json.loads((rendered / "config/agent-checks.json").read_text())
-        assert all(c["id"] not in {"release-manifest-contract", "feature-controls", "feature-controls-distribution", "assessment-sast-failure-contract"} for c in config["checks"])
+        assert all(c["id"] not in {"release-manifest-contract", "feature-controls", "feature-controls-distribution", "assessment-sast-failure-contract", "registry-bootstrap-contract"} for c in config["checks"])
         assert all(e["id"] not in {"release-contract-python", "feature-controls-python"} for e in config["environments"])
         fixture = ROOT / "scripts/tests/fixtures/release-manifest.v1.json"
         release_id = json.loads(fixture.read_text())["release_id"]
@@ -441,7 +443,7 @@ def test_branded_attribution(branded_render, default_render):
 def test_agent_validation_base_uses_owner_ref(tmp_path, default_render, base_ref):
     """A real rendered CLI plans correctly with remote or local owner refs."""
     canonical = json.loads((ROOT / "config/agent-checks.json").read_text())
-    canonical["checks"] = [c for c in canonical["checks"] if c["id"] not in {"release-manifest-contract", "feature-controls", "feature-controls-distribution", "assessment-sast-failure-contract"}]
+    canonical["checks"] = [c for c in canonical["checks"] if c["id"] not in {"release-manifest-contract", "feature-controls", "feature-controls-distribution", "assessment-sast-failure-contract", "registry-bootstrap-contract"}]
     canonical["environments"] = [e for e in canonical["environments"] if e["id"] not in {"release-contract-python", "feature-controls-python"}]
     assert json.loads((default_render / "config/agent-checks.json").read_text()) == canonical
     dst = tmp_path / "custom-integration"

@@ -21,7 +21,7 @@ from pathlib import Path, PurePosixPath
 LIMIT = 32 * 1024 * 1024
 SCANNER_VERSIONS = {"semgrep": "1.185.0", "bandit": "1.9.4"}
 CONFIG = {
-    "semgrep": ["semgrep", "scan", "--config", "auto", "--timeout", "30", "--timeout-threshold", "0", "--json", "--disable-nosem", "--metrics=off", "--disable-version-check", "--verbose"],
+    "semgrep": ["semgrep", "scan", "--config", "auto", "--timeout", "30", "--timeout-threshold", "0", "--json", "--time", "--disable-nosem", "--metrics=off", "--disable-version-check", "--verbose"],
     "bandit": ["bandit", "-r", ".", "-f", "json", "--ignore-nosec", "--exclude", "./.venv,./node_modules"],
 }
 
@@ -149,6 +149,10 @@ def normalize(name: str, raw: bytes, exit_code: int | None, version: str | None)
                 raise ValueError("report scanner version differs from observed binary")
             if not isinstance(report.get("skipped_rules"), list) or report["skipped_rules"]:
                 raise ValueError("incomplete scanner rules")
+            profile = report.get("time")
+            if not isinstance(profile, dict) or not isinstance(profile.get("fixpoint_timeouts"), list):
+                raise ValueError("missing dataflow completion profile")
+            record["reported_dataflow_aborts"] = len(profile["fixpoint_timeouts"])
         else:
             metrics = report["metrics"]
             if not isinstance(metrics, dict) or "_totals" not in metrics:
@@ -168,6 +172,8 @@ def normalize(name: str, raw: bytes, exit_code: int | None, version: str | None)
             record["reason"] = "malformed_report"
         elif errors:
             record["reason"] = "scanner_reported_errors"
+        elif name == "semgrep" and record["reported_dataflow_aborts"]:
+            record["reason"] = "scanner_dataflow_aborted"
         elif not scanned:
             record["reason"] = "no_observed_targets"
         # Semgrep scan does not use --error: its successful findings exit is 0.

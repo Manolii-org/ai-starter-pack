@@ -45,7 +45,8 @@ def report(scanner, findings=False):
         row = dict(check_id='rule.example', path='app.py', start={'line': 1},
                    extra={'message': 'Review input validation', 'severity': 'WARNING'})
         return {'version': '1.185.0', 'results': [row, copy.deepcopy(row)] if findings else [],
-                'errors': [], 'paths': {'scanned': ['app.py', 'scripts/lib/sast_evidence.py']}, 'skipped_rules': []}
+                'errors': [], 'paths': {'scanned': ['app.py', 'scripts/lib/sast_evidence.py']}, 'skipped_rules': [],
+                'time': {'fixpoint_timeouts': []}}
     row = dict(test_id='B101', filename='./app.py', line_number=1,
                issue_text='Review assertion', issue_severity='LOW')
     return {'results': [row, copy.deepcopy(row)] if findings else [], 'errors': [],
@@ -755,3 +756,26 @@ def test_legacy_report_shape_still_normalizes_with_its_observed_version():
     assert set(rows[0]) == {'finding_id', 'rule', 'file', 'line', 'message', 'severity'}
     # Format compatibility does not make an old tool pin current qualification.
     assert module.SCANNER_VERSIONS['semgrep'] == '1.185.0'
+
+
+@pytest.mark.parametrize('relative', ['scripts/lib/sast_evidence.py',
+                                      'plugin/manolii-framework/scripts/lib/sast_evidence.py',
+                                      'registry/platform/framework/scripts/lib/sast_evidence.py'])
+@pytest.mark.parametrize('profile', [None, {}, {'fixpoint_timeouts': None},
+                                     {'fixpoint_timeouts': [{'error_type': 'Fixpoint timeout',
+                                                            'severity': 'warn', 'message': 'Synthetic dataflow abort'}]}])
+def test_dataflow_abort_cannot_hide_behind_empty_public_errors(profile, relative):
+    module = load(ROOT / relative)
+    data = report('semgrep', True)
+    data['time'] = profile
+    state, rows = module.normalize('semgrep', module.encoded(data), 0, '1.185.0')
+    assert state['status'] == 'incomplete'
+    assert len(rows) == 2
+
+
+def test_complete_dataflow_profile_keeps_normal_timing_details():
+    module = load()
+    data = report('semgrep', True)
+    data['time'].update(rules=['rule.example'], profiling_times={'core_time': 0.1})
+    state, rows = module.normalize('semgrep', module.encoded(data), 0, '1.185.0')
+    assert state['status'] == 'complete' and len(rows) == 2

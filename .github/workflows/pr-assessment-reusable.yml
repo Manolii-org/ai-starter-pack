@@ -454,7 +454,7 @@ jobs:
         run: |
           rm -f /tmp/semgrep-results.json /tmp/bandit-results.json
           set +e
-          semgrep scan --config auto --json --error --output /tmp/semgrep-results.json --timeout 30 --timeout-threshold 0 .
+          semgrep scan --config auto --json --error --output /tmp/semgrep-results.json --timeout 30 --timeout-threshold 0 --time .
           status=$?
           set -e
           case "$status" in
@@ -506,6 +506,11 @@ jobs:
                           or not all(isinstance(p, str) and p.strip() for p in scanned)
                           or data.get('skipped_rules', []) != []):
                       raise ValueError('semgrep: incomplete rules, version or scanned-file evidence')
+                  profile = data.get('time')
+                  if (not isinstance(profile, dict)
+                          or not isinstance(profile.get('fixpoint_timeouts'), list)
+                          or profile['fixpoint_timeouts']):
+                      raise ValueError('semgrep: incomplete dataflow analysis or missing completion profile')
               else:
                   metrics = data.get('metrics')
                   if (not isinstance(metrics, dict) or '_totals' not in metrics
@@ -536,6 +541,17 @@ jobs:
           output.write_text(json.dumps(findings, indent=2))
           print(f'Merged {len(findings)} SAST findings from completed scanners')
           PY
+
+      - name: Retain raw scanner diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: sast-scanner-diagnostics
+          path: |
+            /tmp/semgrep-results.json
+            /tmp/bandit-results.json
+          if-no-files-found: warn
+          retention-days: 7
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:

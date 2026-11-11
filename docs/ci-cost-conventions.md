@@ -43,6 +43,16 @@ step's errexit, nounset and pipefail settings.
 Semgrep action accepted only `config`/`publishToken`, so its `output`/`json`
 arguments did not establish a report. Missing, malformed, scanner-error or
 scope-less reports, skipped rules and inconsistent file metrics now fail the SAST job, preserving its existing name.
+Semgrep profiling is retained to check its internal `fixpoint_timeouts` too:
+known dataflow aborts remain incomplete even when the public `errors` array is
+empty. Missing completion profiling also fails. The 30-second rule/file ceiling,
+no-early-abandonment setting, provider versions, rule selection and job deadline
+are unchanged. Large synthetic bootstrap cases live in non-test helper modules;
+the legacy registry entrypoint keeps every existing pytest node and assertion.
+Raw scanner reports are retained as a separate owner-local diagnostic artifact
+for seven days, including failed jobs. Those reports never authorize findings
+publication, specialist work or a release.
+
 Native exit 1 with valid findings remains a completed scan; other native errors
 fail. Bandit may be inapplicable only when the checkout has no Python files.
 Empty findings from a complete scan remain valid. This is failure propagation,
