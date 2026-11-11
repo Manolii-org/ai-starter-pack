@@ -21,6 +21,7 @@ import tempfile
 import json
 import logging
 import os
+import pathlib
 import re
 import sys
 import time
@@ -904,6 +905,30 @@ def invoke_agent(
            (agent_config.system_prompt, agent_config.instructions, user_message)) > _MAX_REQUEST_BYTES:
         logger.error("%s: complete review input exceeds request limit", agent_config.name)
         return _incomplete(agent_config, "input_limit")
+    try:
+        subscription_required = _subscription_required()
+    except (OSError, RuntimeError, ImportError):
+        return _incomplete(agent_config, "subscription_guest_unavailable")
+    if subscription_required:
+        try:
+            if agent_config.name not in _policy_module.selected_review_roles():
+                return _incomplete(agent_config, "subscription_role_not_selected")
+            system = agent_config.system_prompt + (
+                "\n\nReturn the findings payload in the API response; the caller writes the file. "
+                "Return one JSON object with source and findings (a list of finding objects). "
+                "Do not return a file-write acknowledgement or explanatory prose. "
+                "If evidence needed for the assigned checks is unavailable, include "
+                '\"skipped\": \"missing_context\" rather than claiming a clean review.'
+            )
+            text = _subscription_runtime().complete(system,
+                f"{_api_instructions(agent_config.instructions)}\n\n{user_message}",
+                role="assessment", data_sensitivity=agent_config.data_sensitivity,
+                max_tokens=2400, first_party=agent_config.first_party,
+                required_model=agent_config.client_policy_model)
+            parsed = _parse_findings(text)
+            return {"source": agent_config.name, "first_party": False, **parsed}
+        except (RuntimeError, ImportError, OSError, ValueError):
+            return _incomplete(agent_config, "subscription_incomplete")
     # Route through the LiteLLM proxy when configured (Bearer auth); otherwise
     # direct Anthropic (x-api-key). The retired anthropic_only tier has no
     # callers left — its agents were remapped to restricted_us_oss_ok.
@@ -1347,6 +1372,40 @@ def main():
     finally:
         tmp_manifest.unlink(missing_ok=True)
 
+
+def _subscription_required() -> bool:
+    # Lazy import preserves older standalone/default consumers. In required
+    # mode a missing runtime is an error, never permission for an HTTP route.
+    value = os.environ.get("CODEX_AUTOMATION_MODE", "")
+    if not value:
+        return False
+    if value != "required":
+        raise RuntimeError("subscription_mode_invalid")
+    # Never enable this adapter by adding a flag to an old secret-bearing job.
+    # The full trusted controller must launch the separately isolated guest.
+    if os.environ.get("GITHUB_ACTIONS") == "true" or any(
+        os.environ.get(k) for k in os.environ
+        if "DOPPLER" in k or k == "GH_PAT" or k.endswith(
+            ("_TOKEN", "_API_KEY", "_MASTER_KEY", "_PRIVATE_KEY", "_SECRET_KEY", "_PASSWORD"))
+    ):
+        raise RuntimeError("subscription_isolated_guest_required")
+    path = _SUBSCRIPTION_CONTEXT
+    if not path.is_file() or path.is_symlink() or path.stat().st_mode & 0o222:
+        raise RuntimeError("subscription_isolated_guest_required")
+    return True
+
+
+_SUBSCRIPTION_CONTEXT = pathlib.Path("/input/codex-automation.json")
+
+
+def _subscription_runtime():
+    path = pathlib.Path(__file__).resolve().parent / "lib/subscription_guest.py"
+    spec = importlib.util.spec_from_file_location("_subscription_guest_loader", path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("subscription_guest_runtime_unavailable")
+    module = importlib.util.module_from_spec(spec)
+    exec(compile(path.read_bytes(), str(path), "exec"), module.__dict__)
+    return module.runtime()
 
 if __name__ == "__main__":
     sys.exit(main())

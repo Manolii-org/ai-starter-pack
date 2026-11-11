@@ -14,6 +14,7 @@ import json
 import os
 from pathlib import Path
 import re
+import stat
 import subprocess
 import sys
 
@@ -35,6 +36,39 @@ class RouteAdmissionError(ValueError):
     """The requested transport has no admitted consumer policy (no secrets)."""
 
 
+AUTOMATION_CONTEXT = Path("/input/codex-automation.json")
+
+
+def _guest_metadata(environ):
+    """Controller coordinates/roster in a guest, not a manufactured hosted job.
+
+    Host admission and actual execution proof remain outside the guest. Load
+    only the accepted pure metadata helper's source, never a package/cache.
+    """
+    if environ.get("CODEX_AUTOMATION_MODE") != "required" or environ.get("GITHUB_ACTIONS") == "true":
+        raise ValueError("subscription_guest_context_unavailable")
+    if any("DOPPLER" in k or k == "GH_PAT" or k.endswith(
+            ("_TOKEN", "_API_KEY", "_MASTER_KEY", "_PRIVATE_KEY", "_SECRET_KEY", "_PASSWORD")) for k in environ):
+        raise ValueError("subscription_guest_context_unavailable")
+    try:
+        info = AUTOMATION_CONTEXT.lstat()
+        if not stat.S_ISREG(info.st_mode) or info.st_mode & 0o222:
+            raise ValueError("context not immutable")
+    except (OSError, ValueError):
+        raise ValueError("subscription_guest_context_unavailable") from None
+    import importlib.util
+    path = Path(__file__).resolve().parents[1] / "ci/codex_automation_context.py"
+    spec = importlib.util.spec_from_file_location("_subscription_guest_metadata", path)
+    if spec is None or spec.loader is None:
+        raise ValueError("subscription_guest_context_unavailable")
+    try:
+        module = importlib.util.module_from_spec(spec)
+        exec(compile(path.read_bytes(), str(path), "exec"), module.__dict__)
+        return module.read_context(AUTOMATION_CONTEXT, environ)
+    except (OSError, ImportError, SyntaxError):
+        raise ValueError("subscription_guest_context_unavailable") from None
+
+
 def assessment_context(environ=None):
     """Local artifact provenance under an existing trusted Actions launcher.
 
@@ -44,6 +78,11 @@ def assessment_context(environ=None):
     Local legacy callers remain compatible; hosted missing context fails closed.
     """
     env = os.environ if environ is None else environ
+    if env.get("CODEX_AUTOMATION_MODE"):
+        value = _guest_metadata(env)
+        return {"version": 1, "repository": value["repository"], "head": value["head_sha"],
+                "base": value["base_sha"], "run": str(value["controller_run_id"]),
+                "attempt": str(value["controller_run_attempt"])}
     if env.get("GITHUB_ACTIONS") != "true":
         return None
     try:
@@ -74,6 +113,8 @@ def bind_review_candidate(data):
 def selected_review_roles(environ=None):
     """Read both phase selections from trusted workflow control, not artifacts."""
     env = os.environ if environ is None else environ
+    if env.get("CODEX_AUTOMATION_MODE"):
+        return set(_guest_metadata(env)["selected_roles"])
     if env.get("GITHUB_ACTIONS") != "true":
         return None
     if any(key not in env for key in ("REVIEW_SKILLS", "REVIEW_AGENTS")):

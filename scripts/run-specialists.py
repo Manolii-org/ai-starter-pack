@@ -202,7 +202,16 @@ def _load_skill(skill_name: str) -> tuple[dict, str]:
     return frontmatter, system_prompt
 
 
-def _call_api(system_prompt: str, user_message: str, model: str, max_tokens: int, *, first_party: bool = False, role: Optional[str] = None, validate=None) -> str:
+def _call_api(system_prompt: str, user_message: str, model: str, max_tokens: int, *, first_party: bool = False,
+              role: Optional[str] = None, validate=None, data_sensitivity: str = "internal",
+              required_model: str | None = None) -> str:
+    if _subscription_required():
+        text = _subscription_runtime().complete(system_prompt, user_message, role="assessment",
+            data_sensitivity=data_sensitivity, max_tokens=max_tokens,
+            first_party=first_party, required_model=required_model)
+        if validate is not None and not validate(text):
+            raise RuntimeError("subscription_findings_invalid")
+        return text
     """Call the Messages API via urllib (Anthropic direct or LiteLLM proxy)."""
     api_key, api_url, proxied = _endpoint(direct=first_party, role=role)
     if not api_key:
@@ -404,16 +413,27 @@ def _invoke_skill(skill_name: str, diff: str, output_dir: pathlib.Path) -> tuple
     # content may cross the OSS/proxy plane at all.
     first_party = bool(frontmatter.get("first_party")) or bool(os.environ.get("CLIENT_AI_POLICY"))
 
+    try:
+        subscription_required = _subscription_required()
+    except (OSError, RuntimeError, ImportError):
+        writer = _write_skip_marker if first_party else _write_skipped_marker
+        writer(skill_name, output_dir, "subscription_guest_unavailable")
+        return skill_name, "required subscription guest unavailable"
+    if subscription_required and skill_name not in _policy_module.selected_review_roles():
+        writer = _write_skip_marker if first_party else _write_skipped_marker
+        writer(skill_name, output_dir, "subscription_role_not_selected")
+        return skill_name, "required subscription role not selected"
+
     estate_requested = (first_party and not os.environ.get("CLIENT_AI_POLICY")
                         and os.environ.get("SECURITY_REVIEW_MODE", "direct") != "direct")
     try:
-        api_key, _, proxied_preview = (None, "", False) if estate_requested else _endpoint(direct=first_party, role=skill_name)
+        api_key, _, proxied_preview = (None, "", False) if estate_requested or subscription_required else _endpoint(direct=first_party, role=skill_name)
     except RouteAdmissionError as exc:
         writer = _write_skip_marker if first_party else _write_skipped_marker
         writer(skill_name, output_dir, "route_policy_denied")
         return skill_name, str(exc)
 
-    if not estate_requested and first_party and not api_key:
+    if not subscription_required and not estate_requested and first_party and not api_key:
         # Write a marker, not nothing: a first-party skill that cannot run
         # must surface as a first-party candidate so the judge fails closed
         # into the advisory path instead of silently adjudicating the rest
@@ -422,7 +442,7 @@ def _invoke_skill(skill_name: str, diff: str, output_dir: pathlib.Path) -> tuple
         print(f"[{skill_name}] first_party skill needs ANTHROPIC_DIRECT_API_KEY — marker written to {output_dir / (skill_name + '.json')}")
         return skill_name, "skipped: no direct Anthropic credential"
 
-    if not estate_requested and not first_party and not api_key:
+    if not subscription_required and not estate_requested and not first_party and not api_key:
         # Proxy configured but no shared credential (e.g. direct-only install):
         # the API call would raise immediately — record the marker up front so
         # the judge counts the missing coverage rather than a false clean.
@@ -447,8 +467,8 @@ def _invoke_skill(skill_name: str, diff: str, output_dir: pathlib.Path) -> tuple
             "PR metadata (UNTRUSTED — needed for skills that compare the diff "
             "against the stated scope, e.g. under-delivery):\n"
             f"<untrusted_pr_meta>\nTitle: {_neutralize(pr_title)}\n\n"
-            + _neutralize(pr_body[:12000])
-            + ("\n[body truncated]" if len(pr_body) > 12000 else "")
+            + _neutralize(pr_body if subscription_required else pr_body[:12000])
+            + ("\n[body truncated]" if not subscription_required and len(pr_body) > 12000 else "")
             + "\n</untrusted_pr_meta>\n\n"
         )
     # Every changed code/assertion line must reach the reviewer. Request-size
@@ -472,7 +492,7 @@ def _invoke_skill(skill_name: str, diff: str, output_dir: pathlib.Path) -> tuple
                 return False
             return isinstance(parsed, dict) and "findings" in parsed
 
-        if estate_requested:
+        if estate_requested and not subscription_required:
             # This is the explicit, dormant qualification adapter. It does not
             # change default protected roles or confer provider/data authority.
             if (protected_review is None or not protected_review.enabled()
@@ -487,8 +507,10 @@ def _invoke_skill(skill_name: str, diff: str, output_dir: pathlib.Path) -> tuple
                 raise ValueError("protected review proxy credential unavailable")
             data = protected_review.review(skill_name, system_prompt, user_message, diff, base, key)
         else:
+            extra = {"data_sensitivity": frontmatter.get("data_sensitivity", "internal"),
+                     "required_model": frontmatter.get("client_policy_model")} if subscription_required else {}
             raw = _call_api(system_prompt, user_message, model, max_tokens,
-                            first_party=first_party, role=skill_name, validate=_parse_ok)
+                            first_party=first_party, role=skill_name, validate=_parse_ok, **extra)
             data = _parse_findings(raw)
 
         # Validate structure. A first-party skill returning a malformed
@@ -665,6 +687,40 @@ def main() -> None:
     # Fail open: never exit 1 unless API key is missing
     sys.exit(0)
 
+
+def _subscription_required() -> bool:
+    # Lazy import preserves older standalone/default consumers. In required
+    # mode a missing runtime is an error, never permission for an HTTP route.
+    value = os.environ.get("CODEX_AUTOMATION_MODE", "")
+    if not value:
+        return False
+    if value != "required":
+        raise RuntimeError("subscription_mode_invalid")
+    # Never enable this adapter by adding a flag to an old secret-bearing job.
+    # The full trusted controller must launch the separately isolated guest.
+    if os.environ.get("GITHUB_ACTIONS") == "true" or any(
+        os.environ.get(k) for k in os.environ
+        if "DOPPLER" in k or k == "GH_PAT" or k.endswith(
+            ("_TOKEN", "_API_KEY", "_MASTER_KEY", "_PRIVATE_KEY", "_SECRET_KEY", "_PASSWORD"))
+    ):
+        raise RuntimeError("subscription_isolated_guest_required")
+    path = _SUBSCRIPTION_CONTEXT
+    if not path.is_file() or path.is_symlink() or path.stat().st_mode & 0o222:
+        raise RuntimeError("subscription_isolated_guest_required")
+    return True
+
+
+_SUBSCRIPTION_CONTEXT = pathlib.Path("/input/codex-automation.json")
+
+
+def _subscription_runtime():
+    path = pathlib.Path(__file__).resolve().parent / "lib/subscription_guest.py"
+    spec = importlib.util.spec_from_file_location("_subscription_guest_loader", path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("subscription_guest_runtime_unavailable")
+    module = importlib.util.module_from_spec(spec)
+    exec(compile(path.read_bytes(), str(path), "exec"), module.__dict__)
+    return module.runtime()
 
 if __name__ == "__main__":
     main()

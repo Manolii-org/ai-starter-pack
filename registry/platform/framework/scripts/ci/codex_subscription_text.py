@@ -12,8 +12,12 @@ import http.client
 import json
 import socket
 
-from codex_review_models import MODEL
-from codex_text_response import MAX_BODY, TextResponseError, text_completion
+if __package__:
+    from .codex_review_models import MODEL
+    from .codex_text_response import MAX_BODY, TextResponseError, text_completion
+else:
+    from codex_review_models import MODEL
+    from codex_text_response import MAX_BODY, TextResponseError, text_completion
 
 SOCKET = "/broker/model.sock"
 MAX_INPUT_CHARS = 180000

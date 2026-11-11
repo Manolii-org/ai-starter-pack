@@ -90,6 +90,37 @@ being implemented. A lost acknowledgement or competing claim never admits work.
 
 ## Completion of the train
 
+The in-progress pipeline integration adds an explicit `CODEX_AUTOMATION_MODE=required`
+guest adapter. It reads a separate immutable `/input/codex-automation.json` with
+exact repository/PR/base/head, role, sensitivity, reasoning context, actual
+controller run/attempt coordinates and mandatory review-role roster. Context
+is inert input, not host authorization or an execution receipt. The qualified
+controller still owns real API admission, consent, custody and the accepted
+runtime image. Do not enable it by setting a flag on a legacy secret-bearing job.
+
+The classifier, specialist, broad-agent and Judge integrations bypass legacy credential guards and HTTP resolution
+only inside the isolated guest. It sends complete supplied diff, path inventory
+and metadata, or holds when the bounded transport cannot accept them. Unknown
+outcomes, invalid manifests and unsupported policies do not become the legacy
+fallback manifest. Ordinary default consumers retain their existing transport
+and limits. Explicit direct/client-model policies and no-AI sensitivity remain
+holds until a separately accepted eligible contract exists.
+
+Specialist and broad-agent candidates retain their existing findings parsers
+and required-role coverage. Judge retains immutable Git evidence, the existing
+decision parser and incomplete-adjudication behavior. Controller coordinates
+bind the existing candidate provenance shape; the guest does not pretend to be
+a GitHub Actions runner. The host must independently verify those coordinates,
+actual execution, SAST completion and final publication. Neither a guest's
+candidate nor its model response supplies that authority.
+
+The guest loader compiles the fixed accepted source closure without importing
+repository package initializers or candidate bytecode. Candidate Git remains
+inert and separate from that closure. A loader or context file cannot prove
+that deployment boundary by itself. Local critic, full controller, SAST
+integration and mutation/publication integration remain unfinished. These
+optional text-phase seams are not an all-agent rollout or activation.
+
 Before a default-branch landing or consumer activation, implement and independently
 review the credential-free request producer, exact-head trusted controller,
 deployment of explicit role consent and one canonical serialized login lifecycle,

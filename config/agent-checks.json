@@ -407,6 +407,54 @@
         }
       ],
       "timeout_seconds": 120
+    },
+    {
+      "id": "subscription-automation-text-contract",
+      "paths": [
+        "scripts/ci/codex_automation_adapter.py",
+        "scripts/ci/codex_automation_context.py",
+        "scripts/ci/codex_subscription_text.py",
+        "scripts/ci/codex_text_response.py",
+        "scripts/lib/subscription_guest.py",
+        "scripts/lib/agent_capabilities.py",
+        "scripts/run-pr-classifier.py",
+        "scripts/run-specialists.py",
+        "scripts/run-broad-agents.py",
+        "scripts/run-judge.py",
+        "tests/test_codex_automation_adapter.py",
+        "tests/test_agent_capabilities.py",
+        "tests/test_classifier_rule1_scope.py",
+        "tests/test_specialists_thinking_starvation.py",
+        "tests/test_broad_agents_complete_input.py",
+        "tests/test_judge_source_evidence.py",
+        "tests/test_codex_subscription_text.py",
+        "config/agent-checks.json"
+      ],
+      "tools": [
+        "python"
+      ],
+      "commands": [
+        [
+          "python3",
+          "-m",
+          "pytest",
+          "-q",
+          "tests/test_codex_automation_adapter.py",
+          "tests/test_agent_capabilities.py",
+          "tests/test_classifier_rule1_scope.py",
+          "tests/test_specialists_thinking_starvation.py",
+          "tests/test_broad_agents_complete_input.py",
+          "tests/test_judge_source_evidence.py",
+          "tests/test_codex_subscription_text.py"
+        ]
+      ],
+      "ci_sources": [
+        {
+          "path": ".github/workflows/plugin-eval-gate.yml",
+          "contains": "python3 -m pytest tests/ -q"
+        }
+      ],
+      "timeout_seconds": 120
     }
   ]
 }

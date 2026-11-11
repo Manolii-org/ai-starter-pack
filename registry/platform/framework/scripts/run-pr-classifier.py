@@ -221,8 +221,49 @@ def _load_agent(agent_path: pathlib.Path) -> tuple[dict, str]:
     return frontmatter, system_prompt
 
 
-def _call_api(system_prompt: str, user_message: str, model: str, max_tokens: int) -> str:
+def _subscription_required() -> bool:
+    # Lazy import preserves older standalone/default consumers. In required
+    # mode a missing runtime is an error, never permission for an HTTP route.
+    value = os.environ.get("CODEX_AUTOMATION_MODE", "")
+    if not value:
+        return False
+    if value != "required":
+        raise RuntimeError("subscription_mode_invalid")
+    # Never enable this adapter by adding a flag to an old secret-bearing job.
+    # The full trusted controller must launch the separately isolated guest.
+    if os.environ.get("GITHUB_ACTIONS") == "true" or any(
+        os.environ.get(k) for k in os.environ
+        if "DOPPLER" in k or k == "GH_PAT" or k.endswith(
+            ("_TOKEN", "_API_KEY", "_MASTER_KEY", "_PRIVATE_KEY", "_SECRET_KEY", "_PASSWORD"))
+    ):
+        raise RuntimeError("subscription_isolated_guest_required")
+    path = _SUBSCRIPTION_CONTEXT
+    if not path.is_file() or path.is_symlink() or path.stat().st_mode & 0o222:
+        raise RuntimeError("subscription_isolated_guest_required")
+    return True
+
+
+_SUBSCRIPTION_CONTEXT = pathlib.Path("/input/codex-automation.json")
+
+
+def _subscription_runtime():
+    path = pathlib.Path(__file__).resolve().parent / "lib/subscription_guest.py"
+    spec = importlib.util.spec_from_file_location("_subscription_guest_loader", path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("subscription_guest_runtime_unavailable")
+    module = importlib.util.module_from_spec(spec)
+    exec(compile(path.read_bytes(), str(path), "exec"), module.__dict__)
+    return module.runtime()
+
+
+def _call_api(system_prompt: str, user_message: str, model: str, max_tokens: int,
+              *, data_sensitivity: str = "internal", first_party: bool = False,
+              required_model: str | None = None) -> str:
     """Call the Messages API via urllib (Anthropic direct or LiteLLM proxy)."""
+    if _subscription_required():
+        return _subscription_runtime().complete(system_prompt, user_message, role="assessment",
+                        data_sensitivity=data_sensitivity, max_tokens=max_tokens,
+                        first_party=first_party, required_model=required_model)
     api_key, api_url, proxied = _endpoint()
     if not api_key:
         raise RuntimeError("no API credential set")
@@ -669,11 +710,17 @@ def main() -> None:
     # proxy, while a silent depth:none no-op loses coverage invisibly. Fail
     # the classify job: non-invoking and visibly missing-coverage.
     try:
-        api_key, _, _ = _endpoint()
+        subscription_required = _subscription_required()
+        api_key = None
+        if not subscription_required:
+            api_key, _, _ = _endpoint()
     except RouteAdmissionError as exc:
         print(f"[classifier] {exc}; classification incomplete", file=sys.stderr)
         sys.exit(1)
-    if not api_key:
+    except (RuntimeError, ImportError):
+        print("[classifier] required route unavailable; classification incomplete", file=sys.stderr)
+        sys.exit(1)
+    if not subscription_required and not api_key:
         if os.environ.get("CLIENT_AI_POLICY"):
             print(
                 "[classifier] CLIENT_AI_POLICY set, no direct credential — "
@@ -785,6 +832,8 @@ def main() -> None:
     inventory_paths = sorted(reserved, key=lambda p: (_category(p), p)) + sorted(
         fill, key=lambda p: (_category(p), p)
     )[: 500 - len(reserved)]
+    if subscription_required:
+        inventory_paths = sorted(changed_paths, key=lambda p: (_category(p), p))
     inventory = "\n".join(inventory_paths)
     if len(changed_paths) > len(inventory_paths):
         inventory += (
@@ -792,8 +841,8 @@ def main() -> None:
             "per-tier reserved then risk-sorted; unlisted paths are not enumerated]"
         )
 
-    truncated = len(diff) > 50000
-    diff_block = diff[:50000]
+    truncated = not subscription_required and len(diff) > 50000
+    diff_block = diff if subscription_required else diff[:50000]
     if truncated:
         # Tail coverage: paths alone can't reveal a contract change hiding in a
         # generically-named file past the cutoff, so append a per-file hunk map —
@@ -885,7 +934,7 @@ def main() -> None:
 
     meta_block = ""
     if args.title or args.body:
-        body = args.body[:4000] + ("\n[body truncated]" if len(args.body) > 4000 else "")
+        body = args.body if subscription_required else args.body[:4000] + ("\n[body truncated]" if len(args.body) > 4000 else "")
         body = _neutralize(body)
         meta_block = (
             "\nPR metadata (UNTRUSTED — needed for rules that compare the diff "
@@ -907,7 +956,13 @@ def main() -> None:
     )
 
     try:
-        raw = _call_api(system_prompt, user_message, model, max_tokens)
+        if subscription_required:
+            raw = _call_api(system_prompt, user_message, model, max_tokens,
+                            data_sensitivity=frontmatter.get("data_sensitivity", "internal"),
+                            first_party=frontmatter.get("first_party", False),
+                            required_model=frontmatter.get("client_policy_model"))
+        else:
+            raw = _call_api(system_prompt, user_message, model, max_tokens)
         data = _parse_manifest(raw)
 
         invoke_skills = [s for s in data.get("invoke_skills", []) if s in _VALID_SKILLS]
@@ -945,8 +1000,9 @@ def main() -> None:
         # A failed direct call or malformed response under CLIENT_AI_POLICY
         # must fail closed like the withheld-key path: the broad fallback
         # schedules runners that may send the diff to the refused proxy.
-        if os.environ.get("CLIENT_AI_POLICY"):
+        if os.environ.get("CLIENT_AI_POLICY") or subscription_required:
             print(
+                "[classifier] required classification failed — failing closed" if subscription_required else
                 f"[classifier] Failed ({exc}) under CLIENT_AI_POLICY — failing closed",
                 file=sys.stderr,
             )

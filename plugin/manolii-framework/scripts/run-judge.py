@@ -21,6 +21,7 @@ import importlib.util
 import json
 import logging
 import os
+import pathlib
 import re
 import sys
 import subprocess
@@ -1141,18 +1142,23 @@ Only keep original IDs that pass all four gates. Never post to GitHub yourself."
         # candidate findings carry PR content regardless of first_party flags.
         first_party = self._has_first_party_candidates or bool(os.environ.get("CLIENT_AI_POLICY"))
         try:
-            api_key, api_url, proxied = _endpoint(direct=first_party)
+            subscription_required = _subscription_required()
+        except (OSError, RuntimeError, ImportError):
+            logger.error("Required subscription guest unavailable; adjudication withheld")
+            return None
+        try:
+            api_key, api_url, proxied = (None, None, False) if subscription_required else _endpoint(direct=first_party)
         except RouteAdmissionError as exc:
             logger.error("%s; required adjudication incomplete", exc)
             return None
-        if first_party and not api_key:
+        if not subscription_required and first_party and not api_key:
             logger.error(
                 "first-party findings present but no direct Anthropic "
                 "credential (ANTHROPIC_DIRECT_API_KEY) — refusing to "
                 "adjudicate security candidates via the OSS proxy"
             )
             return None
-        if not api_key:
+        if not subscription_required and not api_key:
             logger.error("no API credential set; cannot invoke judge agent")
             return None
 
@@ -1198,10 +1204,11 @@ Only keep original IDs that pass all four gates. Never post to GitHub yourself."
                 "anthropic-version": _ANTHROPIC_API_VERSION,
                 "content-type": "application/json",
             }
-            if proxied:
-                headers["Authorization"] = f"Bearer {api_key.removeprefix('Bearer ')}"
-            else:
-                headers["x-api-key"] = api_key
+            if not subscription_required:
+                if proxied:
+                    headers["Authorization"] = f"Bearer {api_key.removeprefix('Bearer ')}"
+                else:
+                    headers["x-api-key"] = api_key
 
             # Reasoning models behind the LiteLLM proxy share max_tokens with
             # their `thinking` blocks and ignore thinking.budget_tokens /
@@ -1212,6 +1219,15 @@ Only keep original IDs that pass all four gates. Never post to GitHub yourself."
             budgets = (4000, 4000 + _PROXY_THINKING_HEADROOM) if proxied else (4000,)
             response_text = ""
             for attempt_number, budget in enumerate(budgets, 1):
+                if subscription_required:
+                    try:
+                        response_text = _subscription_runtime().complete(self.get_judge_system_prompt(),
+                            user_message, role="judge", data_sensitivity="internal",
+                            max_tokens=budget, first_party=first_party)
+                    except (RuntimeError, ImportError, OSError):
+                        logger.error("Required subscription adjudication incomplete")
+                        return None
+                    break
                 request_body = {
                     "model": model,
                     "max_tokens": budget,
@@ -1252,7 +1268,7 @@ Only keep original IDs that pass all four gates. Never post to GitHub yourself."
                     f"Judge returned incomplete text at max_tokens={budget} "
                     f"(stop_reason={result.get('stop_reason')})"
                 )
-            if result.get("stop_reason") == "max_tokens":
+            if not subscription_required and result.get("stop_reason") == "max_tokens":
                 raise ValueError("Judge output limit reached; verdict incomplete")
             if not response_text:
                 raise KeyError("no text blocks in judge response content")
@@ -1265,7 +1281,7 @@ Only keep original IDs that pass all four gates. Never post to GitHub yourself."
             elif "```" in json_text:
                 json_text = json_text.split("```")[1].split("```")[0]
 
-            if result.get("stop_reason") == "max_tokens":
+            if not subscription_required and result.get("stop_reason") == "max_tokens":
                 raise ValueError("truncated adjudication is incomplete")
             judge_result = json.loads(json_text.strip())
             adjudicated = _validate_judge_decisions(judge_result, findings, evidence, investigations)
@@ -2011,6 +2027,40 @@ def main() -> int:
         judge.repo = args.repo
     return judge.run()
 
+
+def _subscription_required() -> bool:
+    # Lazy import preserves older standalone/default consumers. In required
+    # mode a missing runtime is an error, never permission for an HTTP route.
+    value = os.environ.get("CODEX_AUTOMATION_MODE", "")
+    if not value:
+        return False
+    if value != "required":
+        raise RuntimeError("subscription_mode_invalid")
+    # Never enable this adapter by adding a flag to an old secret-bearing job.
+    # The full trusted controller must launch the separately isolated guest.
+    if os.environ.get("GITHUB_ACTIONS") == "true" or any(
+        os.environ.get(k) for k in os.environ
+        if "DOPPLER" in k or k == "GH_PAT" or k.endswith(
+            ("_TOKEN", "_API_KEY", "_MASTER_KEY", "_PRIVATE_KEY", "_SECRET_KEY", "_PASSWORD"))
+    ):
+        raise RuntimeError("subscription_isolated_guest_required")
+    path = _SUBSCRIPTION_CONTEXT
+    if not path.is_file() or path.is_symlink() or path.stat().st_mode & 0o222:
+        raise RuntimeError("subscription_isolated_guest_required")
+    return True
+
+
+_SUBSCRIPTION_CONTEXT = pathlib.Path("/input/codex-automation.json")
+
+
+def _subscription_runtime():
+    path = pathlib.Path(__file__).resolve().parent / "lib/subscription_guest.py"
+    spec = importlib.util.spec_from_file_location("_subscription_guest_loader", path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("subscription_guest_runtime_unavailable")
+    module = importlib.util.module_from_spec(spec)
+    exec(compile(path.read_bytes(), str(path), "exec"), module.__dict__)
+    return module.runtime()
 
 if __name__ == "__main__":
     sys.exit(main())
