@@ -234,23 +234,34 @@ jobs:
 
 ### Proxy Mode
 
+The deterministic draft/skip-label scan behavior described below is pending a
+reviewed release containing that implementation. The caller example remains
+pinned to v1.25.1, whose classifier skips drafts and `skip-ai-review` PRs; its
+dependent SAST job therefore skips too. Copying that historical example does
+not provide the newer scan guarantee. After publication, update both the
+workflow `uses` pin and matching `pack_ref` to the same supporting immutable
+release before relying on the behavior below.
+
 Callers of `pr-assessment-reusable` must include `ready_for_review`,
-`converted_to_draft`, and `edited` in `on.pull_request.types`. `classify` runs only when
-`github.event_name == 'pull_request'` and `draft != true`. Without
-`ready_for_review`, a PR opened as a draft never starts assessment when it
-is marked ready. `converted_to_draft` starts a skip run; `edited` re-runs
-assessment when the title/body changes without a push — metadata-based
-checks (scope-adherence under-delivery) would otherwise keep evaluating
-the stale description. Callers must also
-set workflow-level `concurrency` with `cancel-in-progress: true` so an
-in-flight LLM/SAST run is cancelled. Do not add `paths` or `paths-ignore`
-on the caller: GitHub applies those filters to `converted_to_draft`, so a
-revert that leaves only ignored files plus convert-to-draft never occupies
-the concurrency group. Downstream jobs require classify success so SAST
-does not start when classify is skipped.
-`workflow_dispatch` is not a supported assessment path: `classify` does
-not run, and later jobs would otherwise read empty `github.base_ref` and
-`github.event.pull_request.number`.
+`converted_to_draft` and `edited` in `on.pull_request.types`. Deterministic
+`classify` runs on `pull_request`, including drafts, without model credentials.
+Every observed nonempty diff selects the existing full SAST scan after classify
+success. Unknown paths stay conservative; AI-review skip labels, mechanical
+titles and trusted sync exclusions apply only to optional model routing.
+
+`review-routing` retains the existing model classifier, credentials and provider
+validation behind an explicit non-draft guard. Specialists, broad agents and
+Judge also require non-draft status, classify success and review-routing
+success. A model routing denial does not block deterministic source scans.
+Ready events enable optional review; converted-to-draft events keep source
+qualification running. Edited events refresh metadata-based review scope.
+
+Set workflow-level `concurrency` with `cancel-in-progress: true` so older runs
+are superseded. Do not add caller `paths` or `paths-ignore`: those filters also
+apply to `converted_to_draft` and can prevent the latest event from occupying
+the concurrency group. `workflow_dispatch` remains unsupported: classify does
+not run without a pull-request payload. Unchanged ready-verdict reuse is not
+implemented; it requires separately qualified provenance.
 
 ```yaml
 name: PR Assessment
