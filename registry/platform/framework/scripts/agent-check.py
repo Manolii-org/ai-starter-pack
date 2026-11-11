@@ -8,7 +8,6 @@ just like package.json; never run a fork's configuration with privileged env.
 from __future__ import annotations
 
 import argparse
-import errno
 import fnmatch
 import hashlib
 import hmac
@@ -433,99 +432,154 @@ def environment_digest(root: Path, item: dict, tools: dict, key: bytes, inherite
                         "execution_environment": environment_fingerprint(key, execution_environment(item, inherited))}))
 
 
+def ready_path(root: Path, value: str) -> Path:
+    """Keep the declared name local; external links are usable but never cached."""
+    path = root / value
+    if Path(value).is_absolute() or not Path(os.path.abspath(path)).is_relative_to(root):
+        raise ValueError(f"path must stay inside the repository: {value}")
+    # Preserve filesystem semantics of ".." through a link. Lexical collapse
+    # would probe a different readiness target; open_owned rejects external data.
+    return path
+
+
 def missing_ready_paths(root: Path, item: dict) -> list[str]:
-    return [p for p in item.get("ready_paths", []) if not inside(root, p).exists()]
+    return [p for p in item.get("ready_paths", []) if not ready_path(root, p).exists()]
 
 
 # Tool caches written while checks run; their churn says nothing about the
 # installed dependencies and must not force a reinstall on every invocation.
 READY_IDENTITY_SKIP = {".cache", ".vite", ".vite-temp", ".vitest", "__pycache__"}
+READY_IDENTITY_MAX_ENTRIES = 250_000
+READY_IDENTITY_MAX_BYTES = 2_000_000_000
 
 
-def ready_identity(root: Path, item: dict) -> str:
-    """Names, kinds, modes, sizes, mtimes, inodes and ctimes under the ready paths.
+def ready_identity(root: Path, item: dict, *, key: bytes | None = None) -> str | None:
+    """Bind owned dependency bytes, or return None to require fresh execution.
 
-    Existence alone let a run reuse setup after a dependency was deleted or
-    edited, then reuse a cached PASS without running the affected checks.
-    Hashing contents would cost seconds per run over hundreds of megabytes of
-    dependencies; the inode and ctime cannot be preserved by a tool that
-    rewrites or replaces a file (unlike size and mtime), so they bind the
-    content cheaply. A symlink also binds the state of what it points to.
+    Same-size writes can retain every timestamp and inode on a coarse-clock
+    filesystem. Metadata alone cannot authorize setup or candidate PASS reuse.
+    Read only declared ready trees and linked targets inside this owner root.
+    External/unsafe links, special files, unsupported descriptor operations and
+    bounded-scan exhaustion disable both caches without suppressing checks.
     """
-    digest = hashlib.sha256()
+    if (not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "O_DIRECTORY")
+            or os.open not in os.supports_dir_fd or os.scandir not in os.supports_fd):
+        return None
+    digest = (hmac.new(key, b"agent-ready-content/v2\0", hashlib.sha256) if key is not None else
+              hashlib.sha256(b"agent-ready-content/v2\0"))
+    remaining_entries = READY_IDENTITY_MAX_ENTRIES
+    remaining_bytes = READY_IDENTITY_MAX_BYTES
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    try:
+        root_fd = os.open(root, directory_flags)
+    except OSError:
+        return None
 
-    def add(relative: str, path: str, details: os.stat_result) -> None:
-        row: list[str | int | None]
-        if stat.S_ISLNK(details.st_mode):
-            try:
-                link = os.readlink(path)
-            except OSError as error:
-                if not isinstance(error, FileNotFoundError) and error.errno != errno.EINVAL:
-                    raise
-                # Removed or replaced by a non-link since lstat: record the change.
-                digest.update(encoded([relative, "vanished"]) + b"\n")
-                return
-            try:
-                target = os.stat(path)
-                if stat.S_ISDIR(target.st_mode):
-                    # Same rule as a real directory: its contents are walked,
-                    # and its times move whenever an excluded cache appears.
-                    row = [relative, "link", link, "dir", stat.S_IMODE(target.st_mode), target.st_ino]
-                else:
-                    row = [relative, "link", link, stat.S_IFMT(target.st_mode), target.st_size,
-                           target.st_mtime_ns, target.st_ino, target.st_ctime_ns]
-            except OSError:
-                row = [relative, "link", link, None]
-        elif stat.S_ISDIR(details.st_mode):
-            # The inode binds a replaced directory; its ctime would also move
-            # whenever an excluded tool cache inside it is created.
-            row = [relative, "dir", stat.S_IMODE(details.st_mode), details.st_ino]
-        else:
-            row = [relative, "file", stat.S_IMODE(details.st_mode), details.st_size, details.st_mtime_ns,
-                   details.st_ino, details.st_ctime_ns]
-        digest.update(encoded(row) + b"\n")
-
-    # Symlinked directories (workspace packages, linked stores) are walked
-    # through their targets; each real directory is walked once, so a link
-    # cycle or a link back into the tree cannot loop or double count.
-    visited: set[str] = set()
-    for name in item.get("ready_paths", []):
-        path = inside(root, name)
+    def open_owned(path: Path) -> tuple[int, Path]:
+        # Resolution only inspects link metadata. No file bytes or directory
+        # entries are read until the path is proven inside the held owner root.
+        resolved = path.resolve(strict=True)
+        relative = resolved.relative_to(root)
+        descriptor = os.dup(root_fd)
         try:
-            details = path.lstat()
-        except FileNotFoundError:
-            digest.update(encoded([name, None]) + b"\n")
-            continue
-        add(name, str(path), details)
-        stack = [(str(path), name)] if os.path.isdir(path) else []
-        while stack:
-            directory, logical = stack.pop()
-            real = os.path.realpath(directory)
-            if real in visited:
-                digest.update(encoded([logical, "seen", real]) + b"\n")
-                continue
-            visited.add(real)
+            for part in relative.parts[:-1]:
+                following = os.open(part, directory_flags, dir_fd=descriptor)
+                os.close(descriptor)
+                descriptor = following
+            if not relative.parts:
+                return os.dup(descriptor), resolved
+            return os.open(relative.parts[-1], os.O_RDONLY | os.O_NOFOLLOW
+                           | getattr(os, "O_NONBLOCK", 0), dir_fd=descriptor), resolved
+        finally:
+            os.close(descriptor)
+
+    def add(relative: str, path: Path, details: os.stat_result) -> bool:
+        nonlocal remaining_bytes
+        if not (stat.S_ISREG(details.st_mode) or stat.S_ISDIR(details.st_mode)
+                or stat.S_ISLNK(details.st_mode)):
+            return False
+        link = os.readlink(path) if stat.S_ISLNK(details.st_mode) else None
+        descriptor, _resolved = open_owned(path)
+        try:
+            target = os.fstat(descriptor)
+            if stat.S_ISDIR(target.st_mode):
+                # Excluded tool-cache churn must not move the tree's identity.
+                row = [relative, "link", link, "dir", stat.S_IMODE(target.st_mode), target.st_ino] if link is not None else [
+                    relative, "dir", stat.S_IMODE(target.st_mode), target.st_ino]
+            elif stat.S_ISREG(target.st_mode):
+                if target.st_size > remaining_bytes:
+                    return False
+                content = hashlib.sha256()
+                while block := os.read(descriptor, min(1_048_576, remaining_bytes + 1)):
+                    remaining_bytes -= len(block)
+                    if remaining_bytes < 0:
+                        return False
+                    content.update(block)
+                after = os.fstat(descriptor)
+                before_state = (target.st_dev, target.st_ino, target.st_mode, target.st_size,
+                                target.st_mtime_ns, target.st_ctime_ns)
+                after_state = (after.st_dev, after.st_ino, after.st_mode, after.st_size,
+                               after.st_mtime_ns, after.st_ctime_ns)
+                if before_state != after_state:
+                    return False
+                row = [relative, "file", link, stat.S_IMODE(target.st_mode), target.st_size,
+                       target.st_mtime_ns, target.st_ino, target.st_ctime_ns, content.hexdigest()]
+            else:
+                return False
+            digest.update(encoded(row) + b"\n")
+            return True
+        finally:
+            os.close(descriptor)
+
+    visited: set[Path] = set()
+    try:
+        for name in item.get("ready_paths", []):
+            path = ready_path(root, name)
             try:
-                entries = sorted(os.listdir(directory))
-            except (FileNotFoundError, NotADirectoryError):
-                continue  # removed while walking
-            children = []
-            for entry in entries:
-                full = os.path.join(directory, entry)
+                details = path.lstat()
+            except FileNotFoundError:
+                digest.update(encoded([name, None]) + b"\n")
+                continue
+            remaining_entries -= 1
+            if remaining_entries < 0 or not add(name, path, details):
+                return None
+            stack = [(path, name)] if path.is_dir() else []
+            while stack:
+                directory, logical = stack.pop()
+                descriptor, real = open_owned(directory)
                 try:
-                    entry_details = os.lstat(full)
-                except FileNotFoundError:
-                    continue  # removed while walking; it is no longer part of the setup
-                relative = f"{logical}/{entry}"
-                if entry in READY_IDENTITY_SKIP and (stat.S_ISDIR(entry_details.st_mode)
-                                                     or stat.S_ISLNK(entry_details.st_mode)):
-                    continue
-                add(relative, full, entry_details)
-                if stat.S_ISDIR(entry_details.st_mode) or (stat.S_ISLNK(entry_details.st_mode)
-                                                           and os.path.isdir(full)):
-                    children.append((full, relative))
-            stack.extend(reversed(children))
-    return digest.hexdigest()
+                    if real in visited:
+                        digest.update(encoded([logical, "seen", str(real)]) + b"\n")
+                        continue
+                    visited.add(real)
+                    entries = []
+                    with os.scandir(descriptor) as stream:
+                        for enumerated in stream:
+                            remaining_entries -= 1
+                            if remaining_entries < 0:
+                                return None
+                            entries.append(enumerated.name)
+                finally:
+                    os.close(descriptor)
+                children = []
+                for entry in sorted(entries):
+                    full = directory / entry
+                    entry_details = full.lstat()
+                    if entry in READY_IDENTITY_SKIP and (stat.S_ISDIR(entry_details.st_mode)
+                                                         or stat.S_ISLNK(entry_details.st_mode)):
+                        continue
+                    relative = f"{logical}/{entry}"
+                    if not add(relative, full, entry_details):
+                        return None
+                    if full.is_dir():
+                        children.append((full, relative))
+                stack.extend(reversed(children))
+        return digest.hexdigest()
+    except (OSError, RuntimeError, ValueError):
+        # Unknown identity is not missing readiness and is never a cache key.
+        return None
+    finally:
+        os.close(root_fd)
 
 
 def dotenv_identity(root: Path, plan: dict, key: bytes) -> dict:
@@ -681,11 +735,12 @@ def main(argv=None) -> int:
                     previous_environment = json.loads(env_receipt.read_text(encoding="utf-8"))
                 except (json.JSONDecodeError, UnicodeDecodeError):
                     print(f"AGENT-CHECK {environment['id']}: invalid environment receipt; frozen setup needs validation")
+            current_ready = ready_identity(root, environment, key=key)
             if (isinstance(previous_environment, dict) and previous_environment.get("digest") == env_digest
                     and isinstance(previous_environment.get("result"), dict)
                     and previous_environment["result"].get("status") == "passed" and ready
-                    and previous_environment.get("ready") == ready_identity(root, environment)):
-                reused_environments.append((environment, env_receipt, env_digest))
+                    and current_ready is not None and previous_environment.get("ready") == current_ready):
+                reused_environments.append((environment, env_receipt, env_digest, current_ready))
                 continue
             if not args.provision:
                 results.append({"id": environment["id"], "status": "unavailable",
@@ -705,7 +760,8 @@ def main(argv=None) -> int:
                 # later selected environment can replace any of those tools.
                 tools = versions(root, plan, inherited)
                 validated_digest = environment_digest(root, environment, tools, key, inherited)
-                provisioned.append((environment, env_receipt, input_digest, validated_digest, result))
+                validated_ready = ready_identity(root, environment, key=key)
+                provisioned.append((environment, env_receipt, input_digest, validated_digest, validated_ready, result))
         # Provisioning may install tools. Missing tools must not be mistaken
         # for a source failure, or cached as a successful old fingerprint.
         tools = versions(root, plan, inherited)
@@ -724,34 +780,37 @@ def main(argv=None) -> int:
         # A cache hit was proved against the initial tools. Later setup can
         # change a shared tool, so it must still match before checks can run.
         # Revoke stale setup evidence and require a bounded fresh invocation.
-        for environment, env_receipt, reused_digest in reused_environments:
-            if environment_digest(root, environment, tools, key, inherited) != reused_digest:
+        for environment, env_receipt, reused_digest, reused_ready in reused_environments:
+            if (environment_digest(root, environment, tools, key, inherited) != reused_digest
+                    or ready_identity(root, environment, key=key) != reused_ready):
                 env_receipt.unlink(missing_ok=True)
                 results.append({"id": environment["id"], "status": "failed",
                                 "reason": "cached environment invalidated by later provisioning; rerun with --provision"})
         # New setups also keep their actual validated context. Never re-key an
         # earlier setup as compatible with a tool installed by a later one.
-        for environment, env_receipt, input_digest, validated_digest, result in provisioned:
+        for environment, env_receipt, input_digest, validated_digest, validated_ready, result in provisioned:
             if result["status"] != "passed":
                 continue
             if (environment_digest(root, environment, {}, key, inherited) != input_digest
-                    or environment_digest(root, environment, tools, key, inherited) != validated_digest):
+                    or environment_digest(root, environment, tools, key, inherited) != validated_digest
+                    or ready_identity(root, environment, key=key) != validated_ready):
                 env_receipt.unlink(missing_ok=True)
                 result.update(status="failed",
                               reason="provisioned environment invalidated by later provisioning or changed inputs; rerun with --provision")
             else:
-                write_json(env_receipt, {"digest": validated_digest, "result": result,
-                                         "ready": ready_identity(root, environment)})
+                write_json(env_receipt, {"digest": validated_digest, "result": result, "ready": validated_ready})
+        ready_identities = {item["id"]: ready_identity(root, item, key=key) for item in plan["environments"]}
         identity = {"schema": SCHEMA, "source": sha(Path(__file__).read_bytes()),
                     "config": config, "plan": plan, "tools": tools, "snapshot": before,
                     "dotenv": dotenv_identity(root, plan, key),
                     # A cached PASS is bound to the dependency trees it ran
                     # against, so reprovisioned or edited dependencies rerun checks.
-                    "ready": {item["id"]: ready_identity(root, item) for item in plan["environments"]},
+                    "ready": ready_identities,
                     "execution_environment": environment_fingerprint(key, {
                         "default": execution_environment({}, inherited),
                         "checks": {item["id"]: execution_environment(item, inherited) for item in plan["checks"]},
                         "environments": {item["id"]: execution_environment(item, inherited) for item in plan["environments"]}})}
+        cache_reusable = cache_reusable and all(value is not None for value in ready_identities.values())
         candidate_digest = sha(encoded(identity))
         cache = state / "cache" / f"{candidate_digest}.json"
         unavailable = [name for name, version in tools.items() if version == "unavailable"]
@@ -779,6 +838,9 @@ def main(argv=None) -> int:
         # Formatters, generators or concurrent edits invalidate the result.
         if snapshot(root) != before and not any(r["id"] == "input-stability" for r in results):
             results.append({"id": "input-stability", "status": "failed", "reason": "inputs changed while checks ran; inspect diff and rerun"})
+        if ready_identities != {item["id"]: ready_identity(root, item, key=key) for item in plan["environments"]}:
+            results.append({"id": "dependency-stability", "status": "failed",
+                            "reason": "dependency inputs changed while checks ran; inspect setup and rerun"})
         outcome = "passed" if all(r["status"] == "passed" for r in results) else "failed"
         receipt = {"schema": SCHEMA, "digest": candidate_digest, "provider": args.provider, "cached": False,
                    "cache_reusable": cache_reusable,

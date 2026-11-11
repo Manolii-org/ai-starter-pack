@@ -263,6 +263,34 @@ def build_user_message(diff: str, changed_files: list[str]) -> str:
 # Provider-free preparation only. No caller in run_broad_agents/invoke_agent is
 # changed to dispatch this contract or turn it into accepted protected coverage.
 _DEEP_DIVE_VERSION = "security-deep-dive-input-v1"
+_DEEP_JSON_MAX_DEPTH = 128
+
+
+def _deep_require_bounded_depth(value) -> None:
+    """Bound JSON containers before recursive serialization or privacy traversal.
+
+    Root containers count as depth one. Walk active ancestors, not all visited
+    objects: repeated noncyclic values retain their existing canonical identity.
+    Iterator frames keep memory proportional to depth, not document width.
+    """
+    active = set()
+    stack = [(iter((value,)), None)]
+    while stack:
+        children, identity = stack[-1]
+        try:
+            item = next(children)
+        except StopIteration:
+            stack.pop()
+            if identity is not None:
+                active.remove(identity)
+            continue
+        if not isinstance(item, (dict, list, tuple)):
+            continue
+        identity = id(item)
+        if len(stack) > _DEEP_JSON_MAX_DEPTH or identity in active:
+            raise ValueError("deep-dive JSON nesting exceeds limit or contains a cycle")
+        active.add(identity)
+        stack.append((iter(item.values() if isinstance(item, dict) else item), identity))
 
 
 def _deep_json(raw: str | bytes):
@@ -283,12 +311,15 @@ def _deep_json(raw: str | bytes):
     if isinstance(raw, str) and raw.startswith("\ufeff"):
         raw = raw[1:]
     try:
-        return json.loads(raw, object_pairs_hook=pairs, parse_constant=invalid)
+        value = json.loads(raw, object_pairs_hook=pairs, parse_constant=invalid)
+        _deep_require_bounded_depth(value)
+        return value
     except RecursionError:
         raise ValueError("deep-dive JSON nesting too deep") from None
 
 
 def _deep_digest(value) -> str:
+    _deep_require_bounded_depth(value)
     try:
         return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=True,
                                          separators=(",", ":"), allow_nan=False).encode()).hexdigest()
@@ -346,7 +377,8 @@ def _deep_screen_helpers():
 
 
 def _deep_require_safe(guard, value) -> None:
-    """Retain canonical refusal, including its Python traversal depth failure."""
+    """Bound containers before retaining the canonical privacy refusal."""
+    _deep_require_bounded_depth(value)
     try:
         guard._require_safe_packet(value)
     except RecursionError:

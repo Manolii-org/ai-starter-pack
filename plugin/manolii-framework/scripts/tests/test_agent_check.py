@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import concurrent.futures
-from contextlib import nullcontext
+import errno
+from contextlib import contextmanager, nullcontext
 import importlib.util
 import json
 import os
@@ -1222,6 +1223,287 @@ class AgentCheckTests(unittest.TestCase):
         self.save_config()
         self.run_check(expected=2)
 
+
+    @contextmanager
+    def _frozen_dependency_metadata(self, runner, target):
+        """Reproduce same-stat rewrites independently of filesystem precision."""
+        before = target.stat()
+        real = {name: getattr(runner.os, name) for name in ("stat", "lstat", "fstat")}
+
+        def freeze(function):
+            def read(*args, **kwargs):
+                details = function(*args, **kwargs)
+                return before if (details.st_dev, details.st_ino) == (before.st_dev, before.st_ino) else details
+            return read
+
+        with mock.patch.object(runner.os, "stat", side_effect=freeze(real["stat"])), \
+                mock.patch.object(runner.os, "lstat", side_effect=freeze(real["lstat"])), \
+                mock.patch.object(runner.os, "fstat", side_effect=freeze(real["fstat"])):
+            yield
+
+    def test_same_stat_dependency_rewrite_changes_ready_identity(self):
+        runner = load("agent-check")
+        target = self.root / "node_modules/tool.js"
+        target.parent.mkdir()
+        target.write_text("ok")
+        with self._frozen_dependency_metadata(runner, target):
+            first = runner.ready_identity(self.root, {"ready_paths": ["node_modules"]})
+            target.write_text("ko")
+            self.assertNotEqual(first, runner.ready_identity(self.root, {"ready_paths": ["node_modules"]}))
+
+    def test_same_stat_linked_file_rewrite_changes_ready_identity(self):
+        runner = load("agent-check")
+        target = self.root / "owned-package.js"
+        target.write_text("ok")
+        (self.root / "node_modules").mkdir()
+        (self.root / "node_modules/package.js").symlink_to(target)
+        with self._frozen_dependency_metadata(runner, target):
+            first = runner.ready_identity(self.root, {"ready_paths": ["node_modules"]})
+            target.write_text("ko")
+            self.assertNotEqual(first, runner.ready_identity(self.root, {"ready_paths": ["node_modules"]}))
+
+    def test_same_stat_linked_directory_rewrite_changes_ready_identity(self):
+        runner = load("agent-check")
+        package = self.root / "packages/shared"
+        package.mkdir(parents=True)
+        target = package / "index.js"
+        target.write_text("ok")
+        (self.root / "node_modules").mkdir()
+        (self.root / "node_modules/shared").symlink_to(package, target_is_directory=True)
+        with self._frozen_dependency_metadata(runner, target):
+            first = runner.ready_identity(self.root, {"ready_paths": ["node_modules"]})
+            target.write_text("ko")
+            self.assertNotEqual(first, runner.ready_identity(self.root, {"ready_paths": ["node_modules"]}))
+
+    def test_same_stat_rewrite_cannot_reuse_environment_or_candidate_pass(self):
+        runner = load("agent-check")
+        self._dependency_environment()
+        self.change_source()
+        args = ["--repo-root", str(self.root), "--provider", "codex"]
+        self.assertEqual(runner.main([*args, "--provision"]), 0)
+        target = self.root / "node_modules/tool/bin.js"
+        with self._frozen_dependency_metadata(runner, target):
+            target.write_text("ko")
+            self.assertEqual(runner.main(args), 1)
+            self.assertFalse(self.receipt()["cached"])
+            self.assertTrue(any(item["id"] == "dependencies" and item["status"] == "unavailable"
+                                for item in self.receipt()["results"]))
+
+    def test_external_dependency_links_do_not_read_content_or_reuse_pass(self):
+        runner = load("agent-check")
+        self._dependency_environment()
+        self.change_source()
+        with tempfile.TemporaryDirectory() as directory:
+            outside = Path(directory) / "package.js"
+            outside.write_text("owner fixture")
+            self.config["environments"][0]["commands"][0][-1] += (
+                "; link=Path('node_modules/linked.js'); "
+                "link.unlink(missing_ok=True); link.symlink_to(" + repr(str(outside)) + ")")
+            self.save_config()
+            args = ["--repo-root", str(self.root), "--provider", "codex", "--provision"]
+            real_open = runner.os.open
+
+            def refuse_outside(path, *rest, **kwargs):
+                if not isinstance(path, int) and Path(path).is_absolute() and Path(path) == outside:
+                    self.fail("readiness hashing opened external file contents")
+                return real_open(path, *rest, **kwargs)
+
+            with mock.patch.object(runner.os, "open", side_effect=refuse_outside) as guarded_open, \
+                    mock.patch.object(runner.os, "supports_dir_fd", runner.os.supports_dir_fd | {guarded_open}):
+                self.assertEqual(runner.main(args), 0)
+                self.assertFalse(self.receipt()["cache_reusable"])
+                self.assertIsNone(runner.ready_identity(self.root, {"ready_paths": ["node_modules"]}))
+                self.assertEqual(runner.main(args), 0)
+            self.assertFalse(self.receipt()["cached"])
+            self.assertEqual((self.root / "node_modules/installs").read_text(), "11")
+
+    def test_top_level_external_ready_link_allows_fresh_checks(self):
+        runner = load("agent-check")
+        self.change_source()
+        with tempfile.TemporaryDirectory() as directory:
+            outside = Path(directory) / "interpreter"
+            outside.write_text("fixture")
+            setup = ("from pathlib import Path; p=Path('node_modules/python'); "
+                     "p.parent.mkdir(exist_ok=True); p.unlink(missing_ok=True); "
+                     "p.symlink_to(" + repr(str(outside)) + ")")
+            self.config["environments"] = [{"id": "tool", "ready_paths": ["node_modules/python"],
+                                           "commands": [[sys.executable, "-c", setup]]}]
+            self.config["checks"][0]["environment"] = "tool"
+            self.save_config()
+            self.assertEqual(runner.main(["--repo-root", str(self.root), "--provider", "codex", "--provision"]), 0)
+            self.assertFalse(self.receipt()["cache_reusable"])
+            self.assertIsNone(runner.ready_identity(self.root, {"ready_paths": ["node_modules/python"]}))
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "requires POSIX FIFO fixture")
+    def test_special_ready_file_is_nonreusable_without_opening_it(self):
+        runner = load("agent-check")
+        (self.root / "node_modules").mkdir()
+        os.mkfifo(self.root / "node_modules/pipe")
+        self.assertIsNone(runner.ready_identity(self.root, {"ready_paths": ["node_modules"]}))
+
+    def test_readiness_scan_budgets_disable_reuse(self):
+        runner = load("agent-check")
+        (self.root / "node_modules").mkdir()
+        (self.root / "node_modules/tool.js").write_text("owned fixture")
+        with mock.patch.object(runner, "READY_IDENTITY_MAX_ENTRIES", 1):
+            self.assertIsNone(runner.ready_identity(self.root, {"ready_paths": ["node_modules"]}))
+        with mock.patch.object(runner, "READY_IDENTITY_MAX_BYTES", 1):
+            self.assertIsNone(runner.ready_identity(self.root, {"ready_paths": ["node_modules"]}))
+
+    def test_unsupported_safe_directory_reads_disable_reuse(self):
+        runner = load("agent-check")
+        with mock.patch.object(runner.os, "supports_fd", set()):
+            self.assertIsNone(runner.ready_identity(self.root, {"ready_paths": []}))
+
+    def test_parent_replaced_with_external_link_is_not_enumerated(self):
+        runner = load("agent-check")
+        package = self.root / "node_modules/pkg"
+        package.mkdir(parents=True)
+        (package / "index.js").write_text("owned fixture")
+        with tempfile.TemporaryDirectory() as directory:
+            outside = Path(directory)
+            (outside / "index.js").write_text("external fixture")
+            outside_identity = (outside.stat().st_dev, outside.stat().st_ino)
+            real_open, real_scandir = runner.os.open, runner.os.scandir
+            swapped = False
+
+            def swap_parent(path, *args, **kwargs):
+                nonlocal swapped
+                if path == "pkg" and kwargs.get("dir_fd") is not None and not swapped:
+                    package.rename(package.with_name("pkg-original"))
+                    package.symlink_to(outside, target_is_directory=True)
+                    swapped = True
+                return real_open(path, *args, **kwargs)
+
+            def owned_scandir(descriptor):
+                details = runner.os.fstat(descriptor)
+                self.assertNotEqual((details.st_dev, details.st_ino), outside_identity,
+                                    "readiness walker enumerated an external directory")
+                return real_scandir(descriptor)
+
+            with mock.patch.object(runner.os, "open", side_effect=swap_parent) as guarded_open, \
+                    mock.patch.object(runner.os, "scandir", side_effect=owned_scandir) as guarded_scandir, \
+                    mock.patch.object(runner.os, "supports_dir_fd", runner.os.supports_dir_fd | {guarded_open}), \
+                    mock.patch.object(runner.os, "supports_fd", runner.os.supports_fd | {guarded_scandir}):
+                self.assertIsNone(runner.ready_identity(self.root, {"ready_paths": ["node_modules"]}))
+            self.assertTrue(swapped)
+
+    def test_dependency_mutation_during_checks_cannot_create_a_cached_pass(self):
+        runner = load("agent-check")
+        self._dependency_environment()
+        self.change_source()
+        self.config["checks"][0]["commands"] = [[sys.executable, "-c",
+            "from pathlib import Path; p=Path('node_modules/tool/bin.js'); "
+            "assert p.read_text() == 'ok'; p.write_text('ko')"]]
+        self.save_config()
+        self.assertEqual(runner.main(["--repo-root", str(self.root), "--provider", "codex", "--provision"]), 1)
+        self.assertFalse(self.receipt()["cached"])
+        self.assertTrue(any(item["id"] == "dependency-stability" and item["status"] == "failed"
+                            for item in self.receipt()["results"]))
+
+    def test_ready_name_preserves_parent_traversal_through_a_link(self):
+        runner = load("agent-check")
+        (self.root / "node_modules").mkdir()
+        (self.root / "node_modules/tool").write_text("inside")
+        with tempfile.TemporaryDirectory() as directory:
+            outside = Path(directory)
+            (outside / "package").mkdir()
+            (self.root / "node_modules/alias").symlink_to(outside / "package", target_is_directory=True)
+            name = "node_modules/alias/../tool"
+            self.assertEqual(runner.missing_ready_paths(self.root, {"ready_paths": [name]}), [name])
+            (outside / "tool").write_text("outside")
+            self.assertEqual(runner.missing_ready_paths(self.root, {"ready_paths": [name]}), [])
+            self.assertIsNone(runner.ready_identity(self.root, {"ready_paths": [name]}))
+
+    def test_persisted_readiness_identity_binds_the_private_key(self):
+        runner = load("agent-check")
+        (self.root / "node_modules").mkdir()
+        (self.root / "node_modules/tool.js").write_text("synthetic input")
+        item = {"ready_paths": ["node_modules"]}
+        first = runner.ready_identity(self.root, item, key=b"a" * 32)
+        self.assertIsNotNone(first)
+        self.assertNotEqual(first, runner.ready_identity(self.root, item, key=b"b" * 32))
+        self.assertNotEqual(first, runner.ready_identity(self.root, item))
+
+    def test_unsupported_root_descriptor_keeps_fresh_provision_and_checks(self):
+        runner = load("agent-check")
+        self._dependency_environment()
+        self.change_source()
+        real_open = runner.os.open
+
+        def unsupported_root(path, *args, **kwargs):
+            if not isinstance(path, int) and Path(path) == self.root:
+                raise OSError(errno.EOPNOTSUPP, "synthetic unsupported root descriptor")
+            return real_open(path, *args, **kwargs)
+
+        args = ["--repo-root", str(self.root), "--provider", "codex", "--provision"]
+        with mock.patch.object(runner.os, "open", side_effect=unsupported_root) as guarded_open, \
+                mock.patch.object(runner.os, "supports_dir_fd", runner.os.supports_dir_fd | {guarded_open}):
+            self.assertIsNone(runner.ready_identity(self.root, {"ready_paths": ["node_modules"]}))
+            self.assertEqual(runner.main(args), 0)
+            self.assertFalse(self.receipt()["cache_reusable"])
+            self.assertEqual(runner.main(args), 0)
+        self.assertFalse(self.receipt()["cached"])
+        self.assertEqual((self.root / "node_modules/installs").read_text(), "11")
+
+    def _interacting_dependency_environments(self):
+        setup_a = ("from pathlib import Path; p=Path('node_modules/a'); p.mkdir(parents=True, exist_ok=True); "
+                   "(p/'value').write_text('ok'); c=Path('.ai/agent-checks/a-installs'); "
+                   "c.write_text(c.read_text()+'1' if c.exists() else '1')")
+        setup_b = ("from pathlib import Path; p=Path('node_modules/b'); p.mkdir(parents=True, exist_ok=True); "
+                   "(p/'value').write_text('ready'); c=Path('.ai/agent-checks/b-installs'); "
+                   "c.write_text(c.read_text()+'1' if c.exists() else '1'); "
+                   "Path('node_modules/a/value').write_text('ko') if Path('b.lock').read_text()=='break' else None")
+        self.config["environments"] = [
+            {"id": "a", "ready_paths": ["node_modules/a"], "commands": [[sys.executable, "-c", setup_a]]},
+            {"id": "b", "inputs": ["b.lock"], "ready_paths": ["node_modules/b"],
+             "commands": [[sys.executable, "-c", setup_b]]},
+        ]
+        self.config["checks"][0].update(environment="a", commands=[[sys.executable, "-c",
+            "from pathlib import Path; c=Path('.ai/agent-checks/check-executions'); "
+            "c.write_text(c.read_text()+'1' if c.exists() else '1'); "
+            "assert Path('node_modules/a/value').read_text()=='ok'"]])
+        self.config["checks"].append({"id": "b-test", "paths": ["src/*", "b.lock", "config/agent-checks.json"],
+                                      "environment": "b", "commands": [[sys.executable, "-c",
+                "from pathlib import Path; assert Path('node_modules/b/value').read_text()=='ready'"]]})
+        self.save_config()
+        self.change_source()
+
+    def test_later_provision_revokes_reused_dependency_identity(self):
+        runner = load("agent-check")
+        self._interacting_dependency_environments()
+        (self.root / "b.lock").write_text("safe")
+        args = ["--repo-root", str(self.root), "--provider", "codex", "--provision"]
+        self.assertEqual(runner.main(args), 0)
+        (self.root / "b.lock").write_text("break")
+        self.assertEqual(runner.main(args), 1)
+        record = self.root / ".ai/agent-checks/environments" / (
+            "environment-" + runner.sha(runner.encoded("a")) + ".json")
+        self.assertFalse(record.exists(), "later setup left stale A readiness evidence")
+        self.assertTrue(any(item["id"] == "a" and "cached environment invalidated" in item.get("reason", "")
+                            for item in self.receipt()["results"]))
+        self.assertEqual((self.root / ".ai/agent-checks/check-executions").read_text(), "1")
+        self.assertEqual(runner.main(args), 0)
+        self.assertEqual((self.root / ".ai/agent-checks/a-installs").read_text(), "11")
+        self.assertEqual((self.root / ".ai/agent-checks/b-installs").read_text(), "11")
+        self.assertEqual((self.root / ".ai/agent-checks/check-executions").read_text(), "11")
+
+    def test_later_provision_cannot_rekey_new_dependency_identity(self):
+        runner = load("agent-check")
+        self._interacting_dependency_environments()
+        (self.root / "b.lock").write_text("break")
+        args = ["--repo-root", str(self.root), "--provider", "codex", "--provision"]
+        self.assertEqual(runner.main(args), 1)
+        record = self.root / ".ai/agent-checks/environments" / (
+            "environment-" + runner.sha(runner.encoded("a")) + ".json")
+        self.assertFalse(record.exists(), "new A setup was re-keyed to B's unvalidated dependency bytes")
+        self.assertTrue(any(item["id"] == "a" and "provisioned environment invalidated" in item.get("reason", "")
+                            for item in self.receipt()["results"]))
+        self.assertFalse((self.root / ".ai/agent-checks/check-executions").exists())
+        self.assertEqual(runner.main(args), 0)
+        self.assertEqual((self.root / ".ai/agent-checks/a-installs").read_text(), "11")
+        self.assertEqual((self.root / ".ai/agent-checks/b-installs").read_text(), "1")
+        self.assertEqual((self.root / ".ai/agent-checks/check-executions").read_text(), "1")
 
     def _dependency_environment(self):
         setup = ("from pathlib import Path; p=Path('node_modules/tool'); p.mkdir(parents=True, exist_ok=True); "
