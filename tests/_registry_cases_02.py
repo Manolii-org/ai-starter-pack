@@ -956,7 +956,8 @@ def test_bootstrap_mirror_fails_closed(tmp_path):
     assert "filter" in r.stderr
     assert not (fg / "registry").exists()
 
-def test_bootstrap_mirror_push_target_pass(tmp_path):
+@pytest.mark.parametrize("inherited_trust", ["", "/synthetic/existing:/synthetic/other"])
+def test_bootstrap_mirror_push_target_pass(tmp_path, monkeypatch, inherited_trust):
     """Push-target validation must not over-refuse: (a) an explicit
     pushurl pinned to the verified slug stays valid even when a
     pushInsteadOf rule exists — git ignores pushInsteadOf for remotes
@@ -965,6 +966,7 @@ def test_bootstrap_mirror_push_target_pass(tmp_path):
     the verified github.com slug."""
     import subprocess as sp
     pack = Path(__file__).resolve().parent.parent
+    monkeypatch.setenv("MIRROR_TRUST_DIRS", inherited_trust)
     env = _bootstrap_env(tmp_path)
 
     def run(root, e=None):
@@ -1165,7 +1167,8 @@ def test_bootstrap_mirror_push_target_pass(tmp_path):
     sp.run(["git", "config", "core.fsmonitor", "true"],
            cwd=fm0, capture_output=True)
     real_git = os.path.realpath(shutil.which("git") or "/usr/bin/git")
-    gitstub = Path(env["MIRROR_TRUST_DIRS"]) / "git"
+    gitstub = tmp_path / "bin" / "git"
+    gitstub.parent.mkdir(exist_ok=True)
     gitstub.write_text(
         "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n"
         "  echo \"git version 2.35.0\"\n  exit 0\nfi\n"

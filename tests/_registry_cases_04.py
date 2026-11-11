@@ -713,7 +713,37 @@ def test_mini_yaml_plain_key_charset():
         "rollout/phase": True}
     assert mod._mini_yaml("x: {a:b: v}") == {"x": {"a:b": "v"}}
 
-def test_apply_rollback_on_lock_failure(tmp_path):
+def _run_resolver_failing_lock(monkeypatch, manifest, registry_root, repo_root,
+                               observe, *flags):
+    """Fail the real lock commit after checking actual intermediate outputs."""
+    import contextlib
+    import io
+
+    mod = load_resolve_module()
+    original = mod.atomic_replace
+    attempts = []
+
+    def fail_lock(path, *args, **kwargs):
+        if path == repo_root / mod.LOCK_PATH:
+            observe()
+            attempts.append(path)
+            raise PermissionError("injected lock commit failure")
+        return original(path, *args, **kwargs)
+
+    stdout, stderr = io.StringIO(), io.StringIO()
+    argv = [str(RESOLVE), "--manifest", str(manifest), "--registry",
+            str(registry_root), "--repo-root", str(repo_root), *flags]
+    with monkeypatch.context() as patch:
+        patch.setattr(mod, "atomic_replace", fail_lock)
+        patch.setattr(sys, "argv", argv)
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            code = mod.main()
+    assert attempts == [repo_root / mod.LOCK_PATH], stdout.getvalue() + stderr.getvalue()
+    assert "injected lock commit failure" in stderr.getvalue()
+    return subprocess.CompletedProcess(argv, code, stdout.getvalue(), stderr.getvalue())
+
+
+def test_apply_rollback_on_lock_failure(tmp_path, monkeypatch):
     """If the lock write fails after outputs were materialised, the
     resolver must restore the prior state — files written this run are
     removed and pre-existing tracked files get their old bytes back.
@@ -730,22 +760,25 @@ def test_apply_rollback_on_lock_failure(tmp_path):
     assert run_resolver(m, reg_root, consumer, "--apply").returncode == 0
     skill = consumer / ".claude" / "skills" / "demo" / "SKILL.md"
     assert skill.read_text().endswith("v1")
-    # registry drifts to v2; break the lock path so apply fails at the
-    # lock write after rewriting SKILL.md
+    # Fail at the actual lock commit, after v2 was installed. Directory
+    # permission failures stop during preflight and cannot prove rollback.
     (reg_root / "registry" / "platform" / "framework" / "skills" / "demo"
      / "SKILL.md").write_text(
         "---\nname: demo\ndescription: d\n---\nv2")
-    ai_dir = consumer / ".ai"
-    os.chmod(ai_dir, 0o555)
-    try:
-        r = run_resolver(m, reg_root, consumer, "--apply")
-    finally:
-        os.chmod(ai_dir, 0o755)
+    lock = consumer / ".ai" / "capability-lock.json"
+    old_lock = lock.read_bytes()
+
+    def observe():
+        assert skill.read_text().endswith("v2")
+        assert lock.read_bytes() == old_lock
+
+    r = _run_resolver_failing_lock(monkeypatch, m, reg_root, consumer, observe, "--apply")
     assert r.returncode == 2, r.stdout + r.stderr
     # rolled back: v1 content restored, not half-applied v2
     assert skill.read_text().endswith("v1"), skill.read_text()
+    assert lock.read_bytes() == old_lock
 
-def test_apply_rollback_removes_new_outputs(tmp_path):
+def test_apply_rollback_removes_new_outputs(tmp_path, monkeypatch):
     """A FIRST apply that fails at the lock write must leave no
     materialised outputs behind."""
     reg_root = make_registry(tmp_path / "src", {
@@ -755,27 +788,28 @@ def test_apply_rollback_removes_new_outputs(tmp_path):
     })
     consumer = tmp_path / "consumer"
     consumer.mkdir()
-    # A git checkout routes the apply mutex under .git — without it the
-    # mutex lands in the read-only .ai and the resolver refuses at rc=1
-    # before materialising anything, never exercising the rollback path
-    # this test exists to verify (CodeRabbit on #9, round-9 review).
+    # Exercise the Git-checkout mutex route as well as the fresh install.
     subprocess.run(["git", "-C", str(consumer), "init", "-q"],
                    check=True)
-    ai_dir = consumer / ".ai"
-    ai_dir.mkdir()
-    os.chmod(ai_dir, 0o555)
     m = write_manifest(consumer, "manolii",
                        [{"plugin": "platform/framework", "ref": "1.0.0"}])
-    try:
-        r = run_resolver(m, reg_root, consumer, "--apply")
-    finally:
-        os.chmod(ai_dir, 0o755)
+    skill = consumer / ".claude" / "skills" / "demo" / "SKILL.md"
+    command = consumer / ".claude" / "commands" / "run.md"
+    lock = consumer / ".ai" / "capability-lock.json"
+
+    def observe():
+        assert skill.read_text().endswith("v1")
+        assert command.read_text() == "run"
+        assert not lock.exists()
+
+    r = _run_resolver_failing_lock(monkeypatch, m, reg_root, consumer, observe, "--apply")
     assert r.returncode == 2, r.stdout + r.stderr
     assert not (consumer / ".claude" / "skills" / "demo"
                 / "SKILL.md").exists()
     assert not (consumer / ".claude" / "commands" / "run.md").exists()
+    assert not lock.exists()
 
-def test_apply_rollback_restores_file_timestamps(tmp_path):
+def test_apply_rollback_restores_file_timestamps(tmp_path, monkeypatch):
     """Rollback must put back the prior file's mtimes, not a fresh
     `now` — a resolver-owned file restored byte-identically should be
     indistinguishable from the pre-failure state (Codex on #123)."""
@@ -795,17 +829,22 @@ def test_apply_rollback_restores_file_timestamps(tmp_path):
     reg_file = (reg_root / "registry" / "platform" / "framework"
                 / "skills" / "demo" / "SKILL.md")
     reg_file.write_text("---\nname: demo\ndescription: d\n---\nv2")
-    os.chmod(consumer / ".ai", 0o555)
-    try:
-        r = run_resolver(m, reg_root, consumer, "--apply")
-    finally:
-        os.chmod(consumer / ".ai", 0o755)
+    lock = consumer / ".ai" / "capability-lock.json"
+    old_lock = lock.read_bytes()
+
+    def observe():
+        assert skill.read_text().endswith("v2")
+        assert skill.stat().st_mtime_ns != times[1]
+        assert lock.read_bytes() == old_lock
+
+    r = _run_resolver_failing_lock(monkeypatch, m, reg_root, consumer, observe, "--apply")
     assert r.returncode == 2, r.stdout + r.stderr
     assert skill.read_bytes() == b"---\nname: demo\ndescription: d\n---\nv1"
     # mtime survives the round-trip. atime is NOT asserted — the resolver
     # reads the file during planning, which refreshes it before the
     # snapshot is taken, so the recorded atime is legitimately ~now.
     assert skill.stat().st_mtime_ns == times[1]
+    assert lock.read_bytes() == old_lock
 
 def test_apply_restores_deleted_installed_file(tmp_path):
     """An installed file the consumer deleted is a planned RESTORE, not
@@ -909,7 +948,7 @@ def test_script_dep_block_second_arg(tmp_path):
              b"bash scripts/first.sh # see scripts/notes.sh\n")
     assert not mod.script_dep_block(pdir, body3)
 
-def test_prune_dir_cleanup_after_lock_write(tmp_path):
+def test_prune_dir_cleanup_after_lock_write(tmp_path, monkeypatch):
     """--prune removes a dir's last file; if the lock write then fails,
     rollback must restore the file — so empty-dir cleanup may only run
     AFTER the lock commit (Devin Review + Codex on #1953)."""
@@ -926,15 +965,20 @@ def test_prune_dir_cleanup_after_lock_write(tmp_path):
     # drop the requirement so --prune removes the file AND its now-empty
     # dir; then break the lock write
     m.write_text("version: 1\nuniverse: manolii\nrequires: []\n")
-    ai_dir = consumer / ".ai"
-    os.chmod(ai_dir, 0o555)
-    try:
-        r = run_resolver(m, reg_root, consumer, "--apply", "--prune")
-    finally:
-        os.chmod(ai_dir, 0o755)
+    lock = consumer / ".ai" / "capability-lock.json"
+    old_lock = lock.read_bytes()
+
+    def observe():
+        assert not skill.exists(), "prune must have staged removal before lock failure"
+        assert skill.parent.is_dir(), "directory cleanup must wait for the lock commit"
+        assert lock.read_bytes() == old_lock
+
+    r = _run_resolver_failing_lock(monkeypatch, m, reg_root, consumer, observe,
+                                  "--apply", "--prune")
     assert r.returncode == 2, r.stdout + r.stderr
     # rollback restored the file — its parent dir survived cleanup
     assert skill.read_text().endswith("v1")
+    assert lock.read_bytes() == old_lock
 
 def test_pinned_mode_normalised_to_tree(tmp_path):
     """Under a tag:/sha: pin a worktree chmod on the r/w bits (0644 ->

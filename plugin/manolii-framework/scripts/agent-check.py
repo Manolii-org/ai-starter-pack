@@ -24,6 +24,8 @@ import time
 SCHEMA = "agent-check/v1"
 STATE = ".ai/agent-checks"
 GIT_TIMEOUT = 30
+# Owner check/environment names cannot shadow framework stability failures.
+INTERNAL_STABILITY_IDS = {"input-stability", "context-stability", "dependency-stability"}
 TOOLS = {
     "git": ["git", "--version"],
     "python": [sys.executable, "--version"],
@@ -282,6 +284,8 @@ def config_for(root: Path) -> dict:
             identifier = item.get("id", "")
             if not identifier or identifier in identifiers:
                 raise ValueError("check and environment ids must be nonempty and unique")
+            if identifier in INTERNAL_STABILITY_IDS:
+                raise ValueError(f"{identifier}: reserved validation result id; rename the owner check or environment")
             identifiers.add(identifier)
             inside(root, item.get("cwd", "."))
             if not item.get("commands") or not all(
@@ -831,6 +835,9 @@ def main(argv=None) -> int:
         results = []
         provisioned = []
         reused_environments = []
+        # Candidate authority starts at the readiness actually validated by
+        # setup/reuse. A later scan may compare it, never replace this baseline.
+        ready_identities: dict[str, str | None] = {}
         results.append(execute(root, {"id": "diff-check", "commands": [["git", "diff", "--check", plan["base"]]]}, inherited))
         for environment in plan["environments"]:
             env_digest = environment_digest(root, environment, tools, key, inherited, plan=plan)
@@ -849,6 +856,7 @@ def main(argv=None) -> int:
                     and isinstance(previous_environment.get("result"), dict)
                     and previous_environment["result"].get("status") == "passed" and ready
                     and current_ready is not None and previous_environment.get("ready") == current_ready):
+                ready_identities[environment["id"]] = current_ready
                 reused_environments.append((environment, env_receipt, env_digest, current_ready,
                     environment_tools(environment, tools, plan),
                     environment_fingerprint(key, execution_environment(environment, inherited))))
@@ -873,6 +881,7 @@ def main(argv=None) -> int:
                 tools = versions(root, plan, inherited)
                 validated_digest = environment_digest(root, environment, tools, key, inherited, plan=plan)
                 validated_ready = ready_identity(root, environment, key=key)
+                ready_identities[environment["id"]] = validated_ready
                 provisioned.append((environment, env_receipt, input_digest, validated_digest, validated_ready, result,
                     environment_tools(environment, tools, plan), setup_execution_context))
         # Provisioning may install tools. Missing tools must not be mistaken
@@ -941,7 +950,6 @@ def main(argv=None) -> int:
                 report_context_change(environment["id"], changed)
             else:
                 write_json(env_receipt, {"digest": validated_digest, "result": result, "ready": validated_ready})
-        ready_identities = {item["id"]: ready_identity(root, item, key=key) for item in plan["environments"]}
         identity = {"schema": SCHEMA, "source": sha(Path(__file__).read_bytes()),
                     "config": config, "plan": plan, "tools": tools, "snapshot": before,
                     "dotenv": dotenv_identity(root, plan, key),
@@ -952,7 +960,8 @@ def main(argv=None) -> int:
                         "default": execution_environment({}, inherited),
                         "checks": {item["id"]: execution_environment(item, inherited) for item in plan["checks"]},
                         "environments": {item["id"]: execution_environment(item, inherited) for item in plan["environments"]}})}
-        cache_reusable = cache_reusable and all(value is not None for value in ready_identities.values())
+        cache_reusable = (cache_reusable and len(ready_identities) == len(plan["environments"])
+                          and all(value is not None for value in ready_identities.values()))
         candidate_digest = sha(encoded(identity))
         cache = state / "cache" / f"{candidate_digest}.json"
         unavailable = [name for name, version in tools.items() if version == "unavailable"]
@@ -977,8 +986,15 @@ def main(argv=None) -> int:
                 changed_context = changed_tool_contexts(tools, current_tools)
             current_ready_identities = {
                 item["id"]: ready_identity(root, item, key=key) for item in plan["environments"]}
-            dependency_statuses = [readiness_status(previous, current_ready_identities[identifier])
-                                   for identifier, previous in ready_identities.items()]
+            dependency_statuses = []
+            for identifier, previous in ready_identities.items():
+                current = current_ready_identities[identifier]
+                comparison = readiness_status(previous, current)
+                dependency_statuses.append(comparison)
+                if comparison != "passed" or current is None:
+                    # No setup receipt may outlive a changed or unqualified
+                    # observation. Two unknowns may still run fresh, uncached.
+                    (state / "environments" / f"environment-{sha(encoded(identifier))}.json").unlink(missing_ok=True)
             # An observed change remains a defect even if another scan is
             # unavailable; uncertainty must not conceal a known changed input.
             dependency_status = ("failed" if "failed" in dependency_statuses else

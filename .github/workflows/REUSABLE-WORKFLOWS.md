@@ -234,6 +234,14 @@ jobs:
 
 ### Proxy Mode
 
+The deterministic draft/skip-label scan behavior described below is pending a
+reviewed release containing that implementation. The caller example remains
+pinned to v1.25.1, whose classifier skips drafts and `skip-ai-review` PRs; its
+dependent SAST job therefore skips too. Copying that historical example does
+not provide the newer scan guarantee. After publication, update both the
+workflow `uses` pin and matching `pack_ref` to the same supporting immutable
+release before relying on the behavior below.
+
 Callers of `pr-assessment-reusable` must include `ready_for_review`,
 `converted_to_draft` and `edited` in `on.pull_request.types`. Deterministic
 `classify` runs on `pull_request`, including drafts, without model credentials.

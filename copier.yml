@@ -335,6 +335,7 @@ _exclude:
   - scripts/tests/test_release_manifest.py
   - scripts/tests/test_release_admission_git.py
   - scripts/tests/test_release_vector.py
+  - scripts/tests/test_release_validation_gate.py
   - scripts/tests/fixtures/release-manifest.v1.json
   - scripts/tests/fixtures/release-manifest.v2.json
   - .github/workflows/registry-lint.yml
