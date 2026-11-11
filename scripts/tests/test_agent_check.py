@@ -1241,6 +1241,206 @@ class AgentCheckTests(unittest.TestCase):
                 mock.patch.object(runner.os, "fstat", side_effect=freeze(real["fstat"])):
             yield
 
+    def test_directory_addition_during_content_walk_disables_reuse(self):
+        runner = load("agent-check")
+        for case, filename in (("direct", "index.js"), ("ancestor", "pkg/index.js")):
+            with self.subTest(case=case):
+                directory = self.root / "node_modules" / case
+                target = directory / filename
+                target.parent.mkdir(parents=True)
+                target.write_text("ok")
+                real_read = runner.os.read
+                target_identity = (target.stat().st_dev, target.stat().st_ino)
+                mutated = False
+
+                def add_after_enumeration(descriptor, count):
+                    nonlocal mutated
+                    details = runner.os.fstat(descriptor)
+                    if (details.st_dev, details.st_ino) == target_identity and not mutated:
+                        (directory / "new.js").write_text("new input")
+                        mutated = True
+                    return real_read(descriptor, count)
+
+                with mock.patch.object(runner.os, "read", side_effect=add_after_enumeration):
+                    self.assertIsNone(runner.ready_identity(
+                        self.root, {"ready_paths": [directory.relative_to(self.root).as_posix()]}))
+                self.assertTrue(mutated)
+
+    def test_entry_replacement_during_read_disables_reuse(self):
+        runner = load("agent-check")
+        directory = self.root / "node_modules"
+        directory.mkdir()
+        target = directory / "index.js"
+        target.write_text("ok")
+        real_read = runner.os.read
+        target_identity = (target.stat().st_dev, target.stat().st_ino)
+        replaced = False
+
+        def replace_opened_entry(descriptor, count):
+            nonlocal replaced
+            details = runner.os.fstat(descriptor)
+            if (details.st_dev, details.st_ino) == target_identity and not replaced:
+                target.unlink()
+                target.write_text("ko")
+                replaced = True
+            return real_read(descriptor, count)
+
+        with mock.patch.object(runner.os, "read", side_effect=replace_opened_entry):
+            self.assertIsNone(runner.ready_identity(self.root, {"ready_paths": ["node_modules"]}))
+        self.assertTrue(replaced)
+
+    def test_owner_root_replacement_during_walk_disables_reuse(self):
+        runner = load("agent-check")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve() / "owner"
+            target = root / "node_modules/index.js"
+            target.parent.mkdir(parents=True)
+            target.write_text("ok")
+            target_identity = (target.stat().st_dev, target.stat().st_ino)
+            real_read = runner.os.read
+            replaced = False
+
+            def replace_owner(descriptor, count):
+                nonlocal replaced
+                details = runner.os.fstat(descriptor)
+                if (details.st_dev, details.st_ino) == target_identity and not replaced:
+                    root.rename(root.with_name("original-owner"))
+                    (root / "node_modules").mkdir(parents=True)
+                    (root / "node_modules/index.js").write_text("ko")
+                    replaced = True
+                return real_read(descriptor, count)
+
+            with mock.patch.object(runner.os, "read", side_effect=replace_owner):
+                self.assertIsNone(runner.ready_identity(root, {"ready_paths": ["node_modules"]}))
+            self.assertTrue(replaced)
+
+    def test_changed_dependencies_after_planned_identity_cannot_return_cached_pass(self):
+        runner = load("agent-check")
+        self._dependency_environment()
+        self.change_source()
+        args = ["--repo-root", str(self.root), "--provider", "codex"]
+        real_dotenv = runner.dotenv_identity
+        real_snapshot = runner.snapshot
+        real_read = Path.read_text
+        for window in ("dotenv", "snapshot", "cache-read"):
+            with self.subTest(window=window):
+                self.assertEqual(runner.main([*args, "--provision"]), 0)
+                changed = False
+                snapshot_calls = 0
+
+                def mutate():
+                    nonlocal changed
+                    if not changed:
+                        (self.root / "node_modules/tool/bin.js").write_text("ko")
+                        changed = True
+
+                def dotenv(*pos, **kwargs):
+                    value = real_dotenv(*pos, **kwargs)
+                    mutate()
+                    return value
+
+                def snapshot(*pos, **kwargs):
+                    nonlocal snapshot_calls
+                    value = real_snapshot(*pos, **kwargs)
+                    snapshot_calls += 1
+                    if snapshot_calls == 2:
+                        mutate()
+                    return value
+
+                def read(path, *pos, **kwargs):
+                    value = real_read(path, *pos, **kwargs)
+                    if path.parent.name == "cache":
+                        mutate()
+                    return value
+
+                patched = {"dotenv": mock.patch.object(runner, "dotenv_identity", side_effect=dotenv),
+                           "snapshot": mock.patch.object(runner, "snapshot", side_effect=snapshot),
+                           "cache-read": mock.patch.object(Path, "read_text", read)}[window]
+                with patched:
+                    self.assertEqual(runner.main(args), 1)
+                self.assertTrue(changed)
+                self.assertFalse(self.receipt()["cached"])
+                self.assertTrue(any(item["id"] == "dependency-stability" and item["status"] == "failed"
+                                    for item in self.receipt()["results"]))
+
+    def test_changed_dotenv_after_context_capture_cannot_return_cached_pass(self):
+        runner = load("agent-check")
+        (self.root / ".gitignore").write_text(".ai/agent-checks/\nnode_modules/\n.env\n")
+        dotenv = self.root / ".env"
+        dotenv.write_text("FIXTURE_MODE=ok\n")
+        self.change_source()
+        args = ["--repo-root", str(self.root), "--provider", "codex"]
+        self.assertEqual(runner.main(args), 0)
+        real_dotenv = runner.dotenv_identity
+        changed = False
+
+        def replace_after_capture(*pos, **kwargs):
+            nonlocal changed
+            value = real_dotenv(*pos, **kwargs)
+            if not changed:
+                dotenv.write_text("FIXTURE_MODE=ko\n")
+                changed = True
+            return value
+
+        with mock.patch.object(runner, "dotenv_identity", side_effect=replace_after_capture):
+            self.assertEqual(runner.main(args), 1)
+        self.assertFalse(self.receipt()["cached"])
+        self.assertTrue(any(item["id"] == "context-stability" for item in self.receipt()["results"]))
+
+    def test_changed_tool_after_context_capture_cannot_return_cached_pass(self):
+        runner = load("agent-check")
+        directory = self.root / "node_modules"
+        directory.mkdir()
+        version = directory / "version"
+        version.write_text("1")
+        self.change_source()
+        args = ["--repo-root", str(self.root), "--provider", "codex"]
+        probe = [sys.executable, "-c", "from pathlib import Path; print(Path('node_modules/version').read_text())"]
+        real_dotenv = runner.dotenv_identity
+        changed = False
+
+        def change_tool(*pos, **kwargs):
+            nonlocal changed
+            value = real_dotenv(*pos, **kwargs)
+            if not changed:
+                version.write_text("2")
+                changed = True
+            return value
+
+        with mock.patch.dict(runner.TOOLS, {"python": probe}):
+            self.assertEqual(runner.main(args), 0)
+            with mock.patch.object(runner, "dotenv_identity", side_effect=change_tool):
+                self.assertEqual(runner.main(args), 1)
+        self.assertFalse(self.receipt()["cached"])
+        self.assertTrue(any(item["id"] == "context-stability" for item in self.receipt()["results"]))
+
+    def test_dotenv_mutation_during_fresh_checks_cannot_save_pass(self):
+        runner = load("agent-check")
+        (self.root / ".gitignore").write_text(".ai/agent-checks/\nnode_modules/\n.env\n")
+        (self.root / ".env").write_text("FIXTURE_MODE=ok\n")
+        self.change_source()
+        self.config["checks"][0]["commands"] = [[sys.executable, "-c",
+            "from pathlib import Path; p=Path('.env'); assert 'ok' in p.read_text(); "
+            "p.write_text('FIXTURE_MODE=ko\\n')"]]
+        self.save_config()
+        self.assertEqual(runner.main(["--repo-root", str(self.root), "--provider", "codex"]), 1)
+        self.assertTrue(any(item["id"] == "context-stability" for item in self.receipt()["results"]))
+        self.assertFalse(any((self.root / ".ai/agent-checks/cache").glob("*.json")))
+
+    def test_readiness_contract_v3_partitions_previous_cache_identities(self):
+        runner = load("agent-check")
+        self.assertEqual(runner.READY_IDENTITY_CONTRACT, "agent-ready-content/v3")
+        directory = self.root / "node_modules"
+        directory.mkdir()
+        (directory / "index.js").write_text("synthetic fixture")
+        item = {"ready_paths": ["node_modules"]}
+        current = runner.ready_identity(self.root, item, key=b"synthetic-key")
+        self.assertIsNotNone(current)
+        with mock.patch.object(runner, "READY_IDENTITY_CONTRACT", "agent-ready-content/v2"):
+            previous = runner.ready_identity(self.root, item, key=b"synthetic-key")
+        self.assertIsNotNone(previous)
+        self.assertNotEqual(current, previous)
+
     def test_same_stat_dependency_rewrite_changes_ready_identity(self):
         runner = load("agent-check")
         target = self.root / "node_modules/tool.js"
@@ -1303,10 +1503,15 @@ class AgentCheckTests(unittest.TestCase):
             args = ["--repo-root", str(self.root), "--provider", "codex", "--provision"]
             real_open = runner.os.open
 
+            outside_identity = (outside.stat().st_dev, outside.stat().st_ino)
+
             def refuse_outside(path, *rest, **kwargs):
-                if not isinstance(path, int) and Path(path).is_absolute() and Path(path) == outside:
+                descriptor = real_open(path, *rest, **kwargs)
+                details = runner.os.fstat(descriptor)
+                if (details.st_dev, details.st_ino) == outside_identity:
+                    runner.os.close(descriptor)
                     self.fail("readiness hashing opened external file contents")
-                return real_open(path, *rest, **kwargs)
+                return descriptor
 
             with mock.patch.object(runner.os, "open", side_effect=refuse_outside) as guarded_open, \
                     mock.patch.object(runner.os, "supports_dir_fd", runner.os.supports_dir_fd | {guarded_open}):
