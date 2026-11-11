@@ -11,6 +11,7 @@ import argparse
 import base64
 import fnmatch
 import hashlib
+import io
 import importlib.machinery
 import importlib.util
 import json
@@ -191,6 +192,36 @@ def state(path: Path):
     return ("file", identity, info.st_mtime_ns, info.st_ctime_ns, data)
 
 
+
+def cleanup_owned_temporary(name: str, handle: int, parent: int, primary_error):
+    """Privatise an owned orphan; check its name before removing it."""
+    privacy_error = None
+    try:
+        owned = os.fstat(handle)
+        named = os.stat(name, follow_symlinks=False, dir_fd=parent)
+        if (not stat.S_ISREG(named.st_mode)
+                or (named.st_dev, named.st_ino) != (owned.st_dev, owned.st_ino)):
+            raise ValueError("temporary path no longer names the owned file")
+        # A completed-but-errored rename has no temporary name. Do not chmod
+        # its already-published output while handling an ambiguous outcome.
+        try:
+            os.fchmod(handle, 0o600)
+        except OSError as error:
+            privacy_error = error
+            print(f"AGENT-VALIDATION-CLEANUP: {error}", file=sys.stderr)
+        named = os.stat(name, follow_symlinks=False, dir_fd=parent)
+        if (not stat.S_ISREG(named.st_mode)
+                or (named.st_dev, named.st_ino) != (owned.st_dev, owned.st_ino)):
+            raise ValueError("temporary path no longer names the owned file")
+        os.unlink(name, dir_fd=parent)
+    except (OSError, ValueError) as cleanup_error:
+        if primary_error is None:
+            raise
+        print(f"AGENT-VALIDATION-CLEANUP: {cleanup_error}", file=sys.stderr)
+    if privacy_error is not None and primary_error is None:
+        raise privacy_error
+
+
 def require_exact_case(path: Path, root: Path):
     """Check repository-internal casing without enumerating caller ancestors."""
     if path == root or not path.is_relative_to(root):
@@ -217,9 +248,44 @@ class OutputPlan:
         mask = os.umask(0)
         os.umask(mask)
         self.new_mode = 0o666 & ~mask
+        self._link_handles: dict[Path, io.FileIO] = {}
+
+    def close(self):
+        while self._link_handles:
+            _, handle = self._link_handles.popitem()
+            handle.close()
+
+    def pin_link(self, path: Path, current):
+        """Retain the original link inode, including on coarse-clock filesystems."""
+        if hasattr(os, "O_PATH") and hasattr(os, "O_NOFOLLOW"):
+            flags = os.O_PATH | os.O_NOFOLLOW
+        elif hasattr(os, "O_SYMLINK"):
+            flags = os.O_RDONLY | getattr(os, "O_SYMLINK")
+        else:
+            raise ValueError("platform cannot retain symlink installation identity")
+        handle = io.FileIO(os.open(path, flags), "rb")
+        retained = False
+        try:
+            info = os.fstat(handle.fileno())
+            identity = (info.st_dev, info.st_ino, info.st_mode)
+            previous = self._link_handles.get(path)
+            if (identity != current[1] or state(path) != current
+                    or (previous is not None and identity != (
+                        os.fstat(previous.fileno()).st_dev,
+                        os.fstat(previous.fileno()).st_ino,
+                        os.fstat(previous.fileno()).st_mode))):
+                raise ValueError(f"link identity changed during planning: {path}")
+            if previous is None:
+                self._link_handles[path] = handle
+                retained = True
+        finally:
+            if not retained:
+                handle.close()
 
     def watch(self, path: Path):
         current = state(path)
+        if current is not None and current[0] == "link":
+            self.pin_link(path, current)
         if path in self.watched and self.watched[path] != current:
             raise ValueError(f"input changed during planning: {path}")
         self.watched[path] = current
@@ -257,7 +323,10 @@ class OutputPlan:
             validate()
         for path, expected in self.watched.items():
             require_exact_case(path, self.root)
-            if state(path) != expected:
+            current = state(path)
+            if current is not None and current[0] == "link":
+                self.pin_link(path, current)
+            if current != expected:
                 raise ValueError(f"input changed; reconcile before retry: {path}")
 
     def mkdirs(self, parent: Path):
@@ -277,6 +346,7 @@ class OutputPlan:
         self.mkdirs(path.parent)
         descriptor = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         temporary = None
+        handle = None
         try:
             parent = os.fstat(descriptor)
             if (parent.st_dev, parent.st_ino, parent.st_mode) != self.watched[path.parent][1]:
@@ -285,7 +355,8 @@ class OutputPlan:
             handle = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
                              0o600, dir_fd=descriptor)
             temporary = name
-            with os.fdopen(handle, "wb") as stream:
+            # Keep our original descriptor through rename and failure cleanup.
+            with os.fdopen(os.dup(handle), "wb") as stream:
                 stream.write(data)
                 os.fchmod(stream.fileno(), mode)
                 stream.flush()
@@ -301,15 +372,14 @@ class OutputPlan:
         finally:
             primary_error = sys.exc_info()[1]
             try:
-                if temporary is not None:
-                    try:
-                        os.unlink(temporary, dir_fd=descriptor)
-                    except OSError as cleanup_error:
-                        if primary_error is None:
-                            raise
-                        print(f"AGENT-VALIDATION-CLEANUP: {cleanup_error}", file=sys.stderr)
+                if temporary is not None and handle is not None:
+                    cleanup_owned_temporary(temporary, handle, descriptor, primary_error)
             finally:
-                os.close(descriptor)
+                try:
+                    if handle is not None:
+                        os.close(handle)
+                finally:
+                    os.close(descriptor)
 
     def portable_replace(self, path: Path, data: bytes, mode: int):
         """Retain regular-layout support where directory descriptors are absent."""
@@ -583,7 +653,19 @@ def build_plan(args):
         raise ValueError("explicit layout requires no-follow directory-descriptor replacement support")
     root = args.repo_root.absolute() if explicit else args.repo_root.resolve()
     plan = OutputPlan(root, explicit)
-    context = None
+    complete = False
+    try:
+        result = _build_plan(args, plan)
+        complete = True
+        return result
+    finally:
+        if not complete:
+            plan.close()
+
+
+def _build_plan(args, plan: OutputPlan):
+    explicit, root = plan.layout, plan.root
+    context: dict = {}
     if explicit:
         _, context = layout_context(plan, args.layout)
     owned = plan.regular_path(safe(root, "config/agent-checks.json"))
@@ -709,6 +791,7 @@ def main(argv=None) -> int:
     parser.add_argument("--check", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
+    plan = None
     try:
         plan, config, owned = build_plan(args)
         # New pack versions can manage new files. The recipe stays the owner's,
@@ -734,6 +817,9 @@ def main(argv=None) -> int:
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
         print(f"AGENT-VALIDATION-INSTALL-BLOCKED: {exc}", file=sys.stderr)
         return 2
+    finally:
+        if plan is not None:
+            plan.close()
 
 
 if __name__ == "__main__":
