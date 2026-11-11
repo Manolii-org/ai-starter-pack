@@ -6,6 +6,7 @@ import concurrent.futures
 import errno
 from contextlib import contextmanager, nullcontext
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -1619,6 +1620,239 @@ class AgentCheckTests(unittest.TestCase):
                 self.assertTrue(any(item["id"] == "dependency-stability" and item["status"] == "failed"
                                     for item in self.receipt()["results"]))
 
+    def test_unknown_postscan_cannot_reuse_cached_pass_or_claim_source_failure(self):
+        runner = load("agent-check")
+        self._dependency_environment()
+        self.change_source()
+        args = ["--repo-root", str(self.root), "--provider", "codex"]
+        real_ready, real_snapshot, real_read = runner.ready_identity, runner.snapshot, Path.read_text
+        for window in ("snapshot", "cache-read"):
+            with self.subTest(window=window):
+                self.assertEqual(runner.main([*args, "--provision"]), 0)
+                before = real_snapshot(self.root)
+                lost, observations, snapshots = False, [], 0
+
+                def ready(*pos, **kwargs):
+                    with mock.patch.object(runner, "READY_IDENTITY_MAX_BYTES", 0) if lost else nullcontext():
+                        value = real_ready(*pos, **kwargs)
+                    observations.append(value)
+                    return value
+
+                def snapshot(*pos, **kwargs):
+                    nonlocal lost, snapshots
+                    value = real_snapshot(*pos, **kwargs)
+                    snapshots += 1
+                    if window == "snapshot" and snapshots == 2:
+                        lost = True
+                    return value
+
+                def read(path, *pos, **kwargs):
+                    nonlocal lost
+                    value = real_read(path, *pos, **kwargs)
+                    if window == "cache-read" and path.parent.name == "cache":
+                        lost = True
+                    return value
+
+                output = io.StringIO()
+                with mock.patch.object(runner, "ready_identity", side_effect=ready), \
+                        mock.patch.object(runner, "snapshot", side_effect=snapshot), \
+                        mock.patch.object(Path, "read_text", read), \
+                        mock.patch("sys.stdout", output):
+                    self.assertEqual(runner.main(args), 1)
+                self.assertTrue(lost)
+                self.assertTrue(any(value is not None for value in observations))
+                self.assertIn(None, observations)
+                receipt = self.receipt()
+                self.assertEqual(receipt["schema"], "agent-check/v1")
+                self.assertEqual(receipt["outcome"], "failed")
+                self.assertFalse(receipt["cached"])
+                failure = next(item for item in receipt["results"] if item["id"] == "dependency-stability")
+                self.assertEqual(failure["status"], "unavailable")
+                self.assertFalse(receipt["cache_reusable"])
+                self.assertNotIn("changed", failure["reason"])
+                self.assertFalse(any(item["id"] == "input-stability" for item in receipt["results"]))
+                self.assertEqual(real_snapshot(self.root), before)
+                self.assertFalse(any((self.root / ".ai/agent-checks/cache").glob("*.json")))
+                self.assertNotIn("AGENT-CHECK-CACHED", output.getvalue())
+                self.assert_failure_summary(SimpleNamespace(stdout=output.getvalue()))
+                # Existing v1 consumers must classify this actual failed receipt
+                # as infrastructure/incomplete, without inventing a source defect.
+                finalise = load("qa/finalise-gate")
+                with mock.patch.object(finalise.subprocess, "Popen", return_value=SimpleNamespace(wait=lambda **_: 1)):
+                    verdict = finalise.run_checks(self.root, "codex", 5)
+                self.assertEqual(verdict["outcome"], "incomplete")
+
+    def test_unknown_postscan_after_fresh_check_cannot_save_pass(self):
+        runner = load("agent-check")
+        self._dependency_environment()
+        self.change_source()
+        real_ready, real_execute = runner.ready_identity, runner.execute
+        lost, checked = False, False
+
+        def ready(*pos, **kwargs):
+            with mock.patch.object(runner, "READY_IDENTITY_MAX_BYTES", 0) if lost else nullcontext():
+                return real_ready(*pos, **kwargs)
+
+        def execute(root, item, inherited):
+            nonlocal lost, checked
+            value = real_execute(root, item, inherited)
+            if item["id"] == "test":
+                checked = lost = True
+            return value
+
+        before = runner.snapshot(self.root)
+        with mock.patch.object(runner, "ready_identity", side_effect=ready), \
+                mock.patch.object(runner, "execute", side_effect=execute):
+            self.assertEqual(runner.main(["--repo-root", str(self.root), "--provision"]), 1)
+        self.assertTrue(checked)
+        self.assertEqual(runner.snapshot(self.root), before)
+        self.assertFalse(self.receipt()["cached"])
+        self.assertFalse(self.receipt()["cache_reusable"])
+        failure = next(item for item in self.receipt()["results"] if item["id"] == "dependency-stability")
+        self.assertEqual(failure["status"], "unavailable")
+        self.assertFalse(any((self.root / ".ai/agent-checks/cache").glob("*.json")))
+
+    def test_unknown_setup_postscan_revokes_reused_and_fresh_setup_as_unavailable(self):
+        runner = load("agent-check")
+        self._dependency_environment()
+        self.change_source()
+        args = ["--repo-root", str(self.root), "--provider", "codex", "--provision"]
+        real_ready, real_versions = runner.ready_identity, runner.versions
+        for mode in ("fresh", "reused"):
+            with self.subTest(mode=mode):
+                if mode == "reused":
+                    self.assertEqual(runner.main(args), 0)
+                lost, probes = False, 0
+
+                def ready(*pos, **kwargs):
+                    with mock.patch.object(runner, "READY_IDENTITY_MAX_BYTES", 0) if lost else nullcontext():
+                        return real_ready(*pos, **kwargs)
+
+                def versions(*pos, **kwargs):
+                    nonlocal lost, probes
+                    value = real_versions(*pos, **kwargs)
+                    probes += 1
+                    if probes == (3 if mode == "fresh" else 2):
+                        lost = True
+                    return value
+
+                with mock.patch.object(runner, "ready_identity", side_effect=ready), \
+                        mock.patch.object(runner, "versions", side_effect=versions):
+                    self.assertEqual(runner.main(args), 1)
+                self.assertTrue(lost)
+                result = next(item for item in self.receipt()["results"] if item["id"] == "dependencies")
+                self.assertEqual(result["status"], "unavailable")
+                record = self.root / ".ai/agent-checks/environments" / (
+                    "environment-" + runner.sha(runner.encoded("dependencies")) + ".json")
+                self.assertFalse(record.exists())
+                self.assertFalse(self.receipt()["cached"])
+
+    def test_unknown_then_known_postscan_is_incomplete_without_asserting_changed_bytes(self):
+        runner = load("agent-check")
+        self._dependency_environment()
+        self.change_source()
+        real_ready, real_snapshot = runner.ready_identity, runner.snapshot
+        recovered, snapshots = False, 0
+
+        def ready(*pos, **kwargs):
+            with mock.patch.object(runner, "READY_IDENTITY_MAX_BYTES", 0) if not recovered else nullcontext():
+                return real_ready(*pos, **kwargs)
+
+        def snapshot(*pos, **kwargs):
+            nonlocal recovered, snapshots
+            value = real_snapshot(*pos, **kwargs)
+            snapshots += 1
+            if snapshots == 2:
+                recovered = True
+            return value
+
+        with mock.patch.object(runner, "ready_identity", side_effect=ready), \
+                mock.patch.object(runner, "snapshot", side_effect=snapshot):
+            self.assertEqual(runner.main(["--repo-root", str(self.root), "--provision"]), 1)
+        self.assertTrue(recovered)
+        result = next(item for item in self.receipt()["results"] if item["id"] == "dependency-stability")
+        self.assertEqual(result["status"], "unavailable")
+        self.assertNotIn("changed", result["reason"])
+        self.assertFalse(self.receipt()["cache_reusable"])
+
+    def test_both_unknown_postscans_preserve_uncached_fresh_execution(self):
+        runner = load("agent-check")
+        self._dependency_environment()
+        self.change_source()
+        args = ["--repo-root", str(self.root), "--provision"]
+        with mock.patch.object(runner, "READY_IDENTITY_MAX_BYTES", 0):
+            for _ in range(2):
+                self.assertEqual(runner.main(args), 0)
+                self.assertFalse(self.receipt()["cached"])
+                self.assertFalse(self.receipt()["cache_reusable"])
+        self.assertEqual((self.root / "node_modules/installs").read_text(), "11")
+
+    def test_known_dependency_change_is_not_hidden_by_another_unknown_postscan(self):
+        runner = load("agent-check")
+        self._interacting_dependency_environments()
+        (self.root / "b.lock").write_text("safe")
+        real_ready, real_execute = runner.ready_identity, runner.execute
+        checked = False
+
+        def ready(root, item, **kwargs):
+            with mock.patch.object(runner, "READY_IDENTITY_MAX_BYTES", 0) if checked and item["id"] == "b" else nullcontext():
+                return real_ready(root, item, **kwargs)
+
+        def execute(root, item, inherited):
+            nonlocal checked
+            result = real_execute(root, item, inherited)
+            if item["id"] == "b-test":
+                (self.root / "node_modules/a/value").write_text("ko")
+                checked = True
+            return result
+
+        with mock.patch.object(runner, "ready_identity", side_effect=ready), \
+                mock.patch.object(runner, "execute", side_effect=execute):
+            self.assertEqual(runner.main(["--repo-root", str(self.root), "--provision"]), 1)
+        self.assertTrue(checked)
+        result = next(item for item in self.receipt()["results"] if item["id"] == "dependency-stability")
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["reason"], "dependency inputs changed during validation; inspect setup and rerun")
+
+    def test_later_known_change_upgrades_an_unknown_postscan_to_source_failure(self):
+        runner = load("agent-check")
+        self._dependency_environment()
+        self.change_source()
+        args = ["--repo-root", str(self.root), "--provision"]
+        self.assertEqual(runner.main(args), 0)
+        real_ready, real_snapshot = runner.ready_identity, runner.snapshot
+        before = real_snapshot(self.root)
+        snapshots, uncertain = 0, False
+
+        def snapshot(*pos, **kwargs):
+            nonlocal snapshots
+            value = real_snapshot(*pos, **kwargs)
+            snapshots += 1
+            return value
+
+        def ready(*pos, **kwargs):
+            nonlocal uncertain
+            if snapshots >= 2 and not uncertain:
+                with mock.patch.object(runner, "READY_IDENTITY_MAX_BYTES", 0):
+                    value = real_ready(*pos, **kwargs)
+                self.assertIsNone(value)
+                uncertain = True
+                (self.root / "node_modules/tool/bin.js").write_text("ko")
+                return value
+            return real_ready(*pos, **kwargs)
+
+        with mock.patch.object(runner, "ready_identity", side_effect=ready), \
+                mock.patch.object(runner, "snapshot", side_effect=snapshot):
+            self.assertEqual(runner.main(args), 1)
+        self.assertTrue(uncertain)
+        self.assertEqual(real_snapshot(self.root), before)
+        failure = next(item for item in self.receipt()["results"] if item["id"] == "dependency-stability")
+        self.assertEqual(failure["status"], "failed")
+        self.assertEqual(failure["reason"], "dependency inputs changed during validation; inspect setup and rerun")
+        finalise = load("qa/finalise-gate")
+        with mock.patch.object(finalise.subprocess, "Popen", return_value=SimpleNamespace(wait=lambda **_: 1)):
+            self.assertEqual(finalise.run_checks(self.root, "codex", 5)["outcome"], "fail")
+
     def test_changed_dotenv_after_context_capture_cannot_return_cached_pass(self):
         runner = load("agent-check")
         (self.root / ".gitignore").write_text(".ai/agent-checks/\nnode_modules/\n.env\n")
@@ -2218,6 +2452,35 @@ class AgentCheckTests(unittest.TestCase):
         self.assertFalse(self.receipt()["cached"])
 
 class SurfaceTests(unittest.TestCase):
+    def test_pack_generated_runners_and_contracts_select_existing_validation(self):
+        installed = SCRIPTS.parent
+        if not (installed / "scripts/build-plugin.py").is_file():
+            self.skipTest("pack-maintainer generated surfaces are not installed consumer inputs")
+        runner = load("agent-check")
+        config = json.loads((installed / "config/agent-checks.json").read_text())
+        paths = [prefix + suffix
+                 for prefix in ("plugin/manolii-framework/", "registry/platform/framework/")
+                 for suffix in ("scripts/agent-check.py", "scripts/tests/test_agent_check.py")]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            for name in paths:
+                path = root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("unchanged synthetic runner input\n")
+            for args in (("init", "-q"), ("config", "user.name", "Fixture"),
+                         ("config", "user.email", "fixture@example.invalid"), ("add", "."),
+                         ("commit", "-qm", "synthetic generated validation baseline")):
+                subprocess.run(["git", *args], cwd=root, check=True, capture_output=True,
+                               env=runner.git_environment())
+            for name in paths:
+                with self.subTest(path=name):
+                    path = root / name
+                    path.write_text("changed synthetic runner input\n")
+                    plan = runner.plan_for(root, config, "HEAD")
+                    self.assertEqual(plan["paths"], [name])
+                    self.assertIn("agent-validation-contract", {item["id"] for item in plan["checks"]})
+                    path.write_text("unchanged synthetic runner input\n")
+
     def test_replacement_recipe_cannot_unguard_the_existing_owner_integration(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()
