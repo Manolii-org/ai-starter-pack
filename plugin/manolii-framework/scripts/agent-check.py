@@ -451,6 +451,7 @@ def missing_ready_paths(root: Path, item: dict) -> list[str]:
 READY_IDENTITY_SKIP = {".cache", ".vite", ".vite-temp", ".vitest", "__pycache__"}
 READY_IDENTITY_MAX_ENTRIES = 250_000
 READY_IDENTITY_MAX_BYTES = 2_000_000_000
+READY_IDENTITY_CONTRACT = "agent-ready-content/v3"
 
 
 def ready_identity(root: Path, item: dict, *, key: bytes | None = None) -> str | None:
@@ -465,15 +466,38 @@ def ready_identity(root: Path, item: dict, *, key: bytes | None = None) -> str |
     if (not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "O_DIRECTORY")
             or os.open not in os.supports_dir_fd or os.scandir not in os.supports_fd):
         return None
-    digest = (hmac.new(key, b"agent-ready-content/v2\0", hashlib.sha256) if key is not None else
-              hashlib.sha256(b"agent-ready-content/v2\0"))
+    domain = READY_IDENTITY_CONTRACT.encode("ascii") + b"\0"
+    digest = hmac.new(key, domain, hashlib.sha256) if key is not None else hashlib.sha256(domain)
     remaining_entries = READY_IDENTITY_MAX_ENTRIES
     remaining_bytes = READY_IDENTITY_MAX_BYTES
+    directory_states: dict[str, tuple[tuple[int, ...], tuple[int, ...], Path]] = {}
+    active_directories: set[int] = set()
+    missing_paths: list[Path] = []
     directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
     try:
         root_fd = os.open(root, directory_flags)
     except OSError:
         return None
+
+    def state(details: os.stat_result) -> tuple[int, ...]:
+        return (details.st_dev, details.st_ino, details.st_mode, details.st_size,
+                details.st_mtime_ns, details.st_ctime_ns)
+
+    def named_target(path: Path, entry: tuple[int, ...], target: tuple[int, ...], resolved: Path) -> bool:
+        return (state(path.lstat()) == entry and path.resolve(strict=True) == resolved
+                and state(path.stat()) == target)
+
+    def names(descriptor: int, *, count: bool) -> list[str]:
+        nonlocal remaining_entries
+        entries: list[str] = []
+        with os.scandir(descriptor) as stream:
+            for entry in stream:
+                if count:
+                    remaining_entries -= 1
+                if remaining_entries < 0 or len(entries) >= READY_IDENTITY_MAX_ENTRIES:
+                    raise ValueError("dependency directory exceeds bounded identity scan")
+                entries.append(entry.name)
+        return sorted(entries)
 
     def open_owned(path: Path) -> tuple[int, Path]:
         # Resolution only inspects link metadata. No file bytes or directory
@@ -499,13 +523,14 @@ def ready_identity(root: Path, item: dict, *, key: bytes | None = None) -> str |
                 or stat.S_ISLNK(details.st_mode)):
             return False
         link = os.readlink(path) if stat.S_ISLNK(details.st_mode) else None
-        descriptor, _resolved = open_owned(path)
+        descriptor, resolved = open_owned(path)
         try:
             target = os.fstat(descriptor)
             if stat.S_ISDIR(target.st_mode):
                 # Excluded tool-cache churn must not move the tree's identity.
                 row = [relative, "link", link, "dir", stat.S_IMODE(target.st_mode), target.st_ino] if link is not None else [
                     relative, "dir", stat.S_IMODE(target.st_mode), target.st_ino]
+                directory_states[relative] = (state(target), state(details), resolved)
             elif stat.S_ISREG(target.st_mode):
                 if target.st_size > remaining_bytes:
                     return False
@@ -516,15 +541,13 @@ def ready_identity(root: Path, item: dict, *, key: bytes | None = None) -> str |
                         return False
                     content.update(block)
                 after = os.fstat(descriptor)
-                before_state = (target.st_dev, target.st_ino, target.st_mode, target.st_size,
-                                target.st_mtime_ns, target.st_ctime_ns)
-                after_state = (after.st_dev, after.st_ino, after.st_mode, after.st_size,
-                               after.st_mtime_ns, after.st_ctime_ns)
-                if before_state != after_state:
+                if state(target) != state(after):
                     return False
                 row = [relative, "file", link, stat.S_IMODE(target.st_mode), target.st_size,
                        target.st_mtime_ns, target.st_ino, target.st_ctime_ns, content.hexdigest()]
             else:
+                return False
+            if not named_target(path, state(details), state(target), resolved):
                 return False
             digest.update(encoded(row) + b"\n")
             return True
@@ -533,36 +556,54 @@ def ready_identity(root: Path, item: dict, *, key: bytes | None = None) -> str |
 
     visited: set[Path] = set()
     try:
+        root_identity = state(os.fstat(root_fd))[:3]
         for name in item.get("ready_paths", []):
             path = ready_path(root, name)
             try:
                 details = path.lstat()
             except FileNotFoundError:
                 digest.update(encoded([name, None]) + b"\n")
+                missing_paths.append(path)
                 continue
             remaining_entries -= 1
             if remaining_entries < 0 or not add(name, path, details):
                 return None
-            stack = [(path, name)] if path.is_dir() else []
+            # Exit frames keep each ancestor descriptor live until its whole
+            # subtree has been inspected. A buffered listing alone is not proof
+            # that new or replaced inputs were absent during the content walk.
+            stack: list[tuple[Path, str, int | None, tuple[int, ...] | None, list[str] | None]] = (
+                [(path, name, None, None, None)] if path.is_dir() else [])
             while stack:
-                directory, logical = stack.pop()
-                descriptor, real = open_owned(directory)
-                try:
-                    if real in visited:
-                        digest.update(encoded([logical, "seen", str(real)]) + b"\n")
-                        continue
-                    visited.add(real)
-                    entries = []
-                    with os.scandir(descriptor) as stream:
-                        for enumerated in stream:
-                            remaining_entries -= 1
-                            if remaining_entries < 0:
-                                return None
-                            entries.append(enumerated.name)
-                finally:
+                directory, logical, descriptor, before_state, entries = stack.pop()
+                if descriptor is not None:
+                    assert before_state is not None and entries is not None
+                    target_state, entry_state, real = directory_states[logical]
+                    if (state(os.fstat(descriptor)) != before_state
+                            or names(descriptor, count=False) != entries
+                            or not named_target(directory, entry_state, target_state, real)):
+                        return None
+                    active_directories.remove(descriptor)
                     os.close(descriptor)
+                    continue
+                descriptor, real = open_owned(directory)
+                active_directories.add(descriptor)
+                target_state, entry_state, expected_real = directory_states[logical]
+                before_state = state(os.fstat(descriptor))
+                if (before_state != target_state or real != expected_real
+                        or not named_target(directory, entry_state, target_state, real)):
+                    return None
+                if real in visited:
+                    digest.update(encoded([logical, "seen", str(real)]) + b"\n")
+                    active_directories.remove(descriptor)
+                    os.close(descriptor)
+                    continue
+                visited.add(real)
+                entries = names(descriptor, count=True)
+                if state(os.fstat(descriptor)) != before_state:
+                    return None
+                stack.append((directory, logical, descriptor, before_state, entries))
                 children = []
-                for entry in sorted(entries):
+                for entry in entries:
                     full = directory / entry
                     entry_details = full.lstat()
                     if entry in READY_IDENTITY_SKIP and (stat.S_ISDIR(entry_details.st_mode)
@@ -572,13 +613,17 @@ def ready_identity(root: Path, item: dict, *, key: bytes | None = None) -> str |
                     if not add(relative, full, entry_details):
                         return None
                     if full.is_dir():
-                        children.append((full, relative))
+                        children.append((full, relative, None, None, None))
                 stack.extend(reversed(children))
+        if state(root.lstat())[:3] != root_identity or any(os.path.lexists(path) for path in missing_paths):
+            return None
         return digest.hexdigest()
     except (OSError, RuntimeError, ValueError):
         # Unknown identity is not missing readiness and is never a cache key.
         return None
     finally:
+        for descriptor in active_directories:
+            os.close(descriptor)
         os.close(root_fd)
 
 
@@ -821,26 +866,36 @@ def main(argv=None) -> int:
                 if context.partition("@")[0] == name and not version.startswith(prefix):
                     results.append({"id": f"toolchain-{context}", "status": "unavailable",
                                     "reason": f"requires {prefix}; provision the CI toolchain before validation"})
-        # Setup scripts can change tracked inputs (for example lifecycle
-        # generators). Never return an earlier PASS for that changed tree.
-        if snapshot(root) != before:
-            results.append({"id": "input-stability", "status": "failed",
-                            "reason": "inputs changed during provisioning; inspect diff and rerun"})
+        def require_stable_inputs() -> None:
+            # These are repeated observations, not an atomic filesystem snapshot.
+            # Recheck after reading a cache entry as well as after fresh checks.
+            checks = [
+                ("input-stability", snapshot(root) == before,
+                 "inputs changed during validation; inspect diff and rerun"),
+                ("context-stability", dotenv_identity(root, plan, key) == identity["dotenv"]
+                 and versions(root, plan, inherited) == tools,
+                 "dotenv or tool context changed during validation; inspect setup and rerun"),
+                ("dependency-stability", ready_identities == {
+                    item["id"]: ready_identity(root, item, key=key) for item in plan["environments"]},
+                 "dependency inputs changed during validation; inspect setup and rerun"),
+            ]
+            for identifier, stable, reason in checks:
+                if not stable and not any(r["id"] == identifier for r in results):
+                    results.append({"id": identifier, "status": "failed", "reason": reason})
+
+        require_stable_inputs()
         if cache_reusable and all(r["status"] == "passed" for r in results) and cache.is_file() and not args.no_cache:
             previous = json.loads(cache.read_text(encoding="utf-8"))
             if previous.get("digest") == candidate_digest and previous.get("outcome") == "passed":
-                previous = {**previous, "provider": args.provider, "cached": True}
-                write_json(state / "receipt.json", previous)
-                print(f"AGENT-CHECK-CACHED {candidate_digest[:12]}")
-                return 0
+                require_stable_inputs()
+                if all(r["status"] == "passed" for r in results):
+                    previous = {**previous, "provider": args.provider, "cached": True}
+                    write_json(state / "receipt.json", previous)
+                    print(f"AGENT-CHECK-CACHED {candidate_digest[:12]}")
+                    return 0
         if all(r["status"] == "passed" for r in results):
             results.extend(execute(root, check, inherited) for check in plan["checks"])
-        # Formatters, generators or concurrent edits invalidate the result.
-        if snapshot(root) != before and not any(r["id"] == "input-stability" for r in results):
-            results.append({"id": "input-stability", "status": "failed", "reason": "inputs changed while checks ran; inspect diff and rerun"})
-        if ready_identities != {item["id"]: ready_identity(root, item, key=key) for item in plan["environments"]}:
-            results.append({"id": "dependency-stability", "status": "failed",
-                            "reason": "dependency inputs changed while checks ran; inspect setup and rerun"})
+        require_stable_inputs()
         outcome = "passed" if all(r["status"] == "passed" for r in results) else "failed"
         receipt = {"schema": SCHEMA, "digest": candidate_digest, "provider": args.provider, "cached": False,
                    "cache_reusable": cache_reusable,
