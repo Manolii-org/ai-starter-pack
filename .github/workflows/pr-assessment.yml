@@ -53,16 +53,16 @@ jobs:
               && '["ubuntu-latest"]' || '["self-hosted","fly"]'))
           || 'ubuntu-latest' }}
     timeout-minutes: 10
-    if: |
-      github.event.pull_request.draft != true &&
-      !contains(github.event.pull_request.labels.*.name, 'skip-ai-review') &&
-      !startsWith(github.event.pull_request.title, 'chore(sync):')
+    if: github.event_name == 'pull_request'
     outputs:
       invoke_skills: ${{ steps.classify.outputs.invoke_skills }}
       invoke_agents: ${{ steps.classify.outputs.invoke_agents }}
       depth: ${{ steps.classify.outputs.depth }}
       merge_danger: ${{ steps.classify.outputs.merge_danger }}
       diff_files: ${{ steps.diff.outputs.files }}
+      sast_required: ${{ steps.classify.outputs.sast_required }}
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
@@ -114,9 +114,156 @@ jobs:
         env:
           PR_BASE_REF: ${{ github.base_ref }}
         run: |
+          set -euo pipefail
           git diff "origin/${PR_BASE_REF}...HEAD" > /tmp/pr.diff
-          echo "lines=$(wc -l < /tmp/pr.diff)" >> $GITHUB_OUTPUT
-          echo "files=$(git diff --name-only "origin/${PR_BASE_REF}...HEAD" | wc -l)" >> $GITHUB_OUTPUT
+          DIFF_LINE_COUNT=$(wc -l < /tmp/pr.diff)
+          DIFF_FILE_COUNT=$(git diff --name-only "origin/${PR_BASE_REF}...HEAD" | wc -l)
+          {
+            echo "lines=$DIFF_LINE_COUNT"
+            echo "files=$DIFF_FILE_COUNT"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Classify source inputs without a model
+        id: classify
+        env:
+          DIFF_FILES: ${{ steps.diff.outputs.files }}
+        run: |
+          python3 -I <<'PY'
+          import ast, json, os, re
+          from pathlib import Path
+
+          # Read the trusted existing manifest literals; never import/execute model code.
+          source = ast.parse(Path('scripts/run-pr-classifier.py').read_text(encoding='utf-8'))
+          required = {'_FALLBACK_MANIFEST', '_EMPTY_DIFF_MANIFEST'}
+          definitions = {}
+          for node in source.body:
+              if not isinstance(node, ast.Assign):
+                  continue
+              names = [target.id for target in node.targets if isinstance(target, ast.Name)]
+              selected = required.intersection(names)
+              if not selected:
+                  continue
+              if len(node.targets) != 1 or len(selected) != 1:
+                  raise ValueError('ambiguous trusted classification definition')
+              name = selected.pop()
+              if name in definitions:
+                  raise ValueError('duplicate trusted classification definition')
+              definitions[name] = ast.literal_eval(node.value)
+          if set(definitions) != required:
+              raise ValueError('trusted classification manifests unavailable')
+          diff = Path('/tmp/pr.diff').read_bytes()
+          count_text = os.environ['DIFF_FILES'].strip()
+          if not re.fullmatch(r'[0-9]+', count_text):
+              raise ValueError('missing or invalid changed-file inventory')
+          changed = bool(diff.strip())
+          if bool(int(count_text)) != changed:
+              raise ValueError('inconsistent changed-file inventory')
+          manifest = dict(definitions['_FALLBACK_MANIFEST' if changed else '_EMPTY_DIFF_MANIFEST'])
+          if manifest.get('depth') != ('broad' if changed else 'narrow'):
+              raise ValueError('unsupported conservative classification')
+          for key in ('invoke_skills', 'invoke_agents'):
+              values = manifest.get(key)
+              if (not isinstance(values, list)
+                      or any(not isinstance(value, str) or not re.fullmatch(r'[a-z0-9][a-z0-9-]*', value)
+                             for value in values)):
+                  raise ValueError('invalid conservative review inventory')
+          danger = {'door': 'unknown', 'blast_radius': 'unknown', 'danger_reason': ''}
+          values = {
+              'invoke_skills': ','.join(manifest['invoke_skills']),
+              'invoke_agents': ','.join(manifest['invoke_agents']),
+              'depth': manifest['depth'],
+              'merge_danger': json.dumps(danger),
+              'sast_required': 'true' if changed else 'false',
+          }
+          with Path(os.environ['GITHUB_OUTPUT']).open('a', encoding='utf-8') as output:
+              for name, value in values.items():
+                  output.write(f'{name}={value}\n')
+          print('Deterministic source classification; optional model review is separate.')
+          PY
+
+  review-routing:
+    name: Review routing
+    runs-on: >-
+      ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+          && fromJSON(vars.CI_RUNNER_OVERRIDE || (
+              github.repository_id == '1268261727'
+              && github.repository == 'Manolii-org/ai-starter-pack'
+              && github.event.repository.visibility == 'public'
+              && '["ubuntu-latest"]' || '["self-hosted","fly"]'))
+          || 'ubuntu-latest' }}
+    timeout-minutes: 10
+    if: |
+      needs.classify.result == 'success' &&
+      github.event.pull_request.draft != true &&
+      !contains(github.event.pull_request.labels.*.name, 'skip-ai-review') &&
+      !startsWith(github.event.pull_request.title, 'chore(sync):')
+    outputs:
+      invoke_skills: ${{ steps.classify.outputs.invoke_skills }}
+      invoke_agents: ${{ steps.classify.outputs.invoke_agents }}
+      depth: ${{ steps.classify.outputs.depth }}
+      merge_danger: ${{ steps.classify.outputs.merge_danger }}
+      diff_files: ${{ steps.diff.outputs.files }}
+    needs: [classify]
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      # The checkout is the PR merge commit — scripts/ and the instruction
+      # surface under .claude/, CLAUDE.md and AGENTS.md are PR-controlled but
+      # get executed/read by the runners below while secrets are in the
+      # environment. Restore them from the PR base; paths the PR adds are
+      # dropped, never run.
+      - name: Restore trusted runtime from PR base
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          [ -n "$BASE_SHA" ] || { echo "No pull_request base context — nothing to restore"; exit 0; }
+          # A PR-owned .ai symlink would redirect the nested catalog deletion.
+          if [ -L .ai ] || { [ -e .ai ] && [ ! -d .ai ]; }; then
+            echo "::error::Assessment state root must be a real directory" >&2
+            exit 1
+          fi
+          git fetch --depth=1 origin "$BASE_SHA"
+          # rm first: `git checkout BASE -- dir` overwrites base content but
+          # leaves PR-added files (e.g. scripts/json.py shadowing stdlib) live
+          # in lanes that carry secrets.
+          for p in .claude scripts .ai/security CLAUDE.md AGENTS.md; do
+            rm -rf "$p"
+            if git cat-file -e "${BASE_SHA}:${p}" 2>/dev/null; then
+              git checkout "$BASE_SHA" -- "$p"
+            fi
+          done
+          # Nested instruction files outside the restored trees (e.g.
+          # docs/CLAUDE.md) auto-load when an agent descends into their
+          # directory — restore from base or drop them.
+          find . -path ./.git -prune -o -path ./.claude -prune -o \
+              -path ./scripts -prune -o \
+              \( -name CLAUDE.md -o -name AGENTS.md \) -type f -print0 |
+          while IFS= read -r -d '' f; do
+            rel="${f#./}"
+            rm -f "$rel"
+            if git cat-file -e "${BASE_SHA}:${rel}" 2>/dev/null; then
+              git checkout "$BASE_SHA" -- "$rel"
+            fi
+          done
+
+      - name: Get PR diff
+        id: diff
+        env:
+          PR_BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+          git diff "origin/${PR_BASE_REF}...HEAD" > /tmp/pr.diff
+          DIFF_LINE_COUNT=$(wc -l < /tmp/pr.diff)
+          DIFF_FILE_COUNT=$(git diff --name-only "origin/${PR_BASE_REF}...HEAD" | wc -l)
+          {
+            echo "lines=$DIFF_LINE_COUNT"
+            echo "files=$DIFF_FILE_COUNT"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Run pr-classifier
         id: classify
@@ -150,10 +297,12 @@ jobs:
 
           MERGE_DANGER=$(python3 -c "import json; d=json.load(open('/tmp/classifier-output.json')); print(json.dumps({'door': d.get('door','unknown'), 'blast_radius': d.get('blast_radius','unknown'), 'danger_reason': d.get('danger_reason','')}))")
 
-          echo "invoke_skills=$SKILLS" >> $GITHUB_OUTPUT
-          echo "invoke_agents=$AGENTS" >> $GITHUB_OUTPUT
-          echo "depth=$DEPTH" >> $GITHUB_OUTPUT
-          echo "merge_danger=$MERGE_DANGER" >> $GITHUB_OUTPUT
+          {
+            echo "invoke_skills=$SKILLS"
+            echo "invoke_agents=$AGENTS"
+            echo "depth=$DEPTH"
+            echo "merge_danger=$MERGE_DANGER"
+          } >> "$GITHUB_OUTPUT"
           echo "Classification: depth=$DEPTH skills=$SKILLS agents=$AGENTS danger=$MERGE_DANGER"
 
       # depth=none skips judge entirely — post the merge-danger verdict
@@ -328,12 +477,14 @@ jobs:
 
   sast:
     name: SAST (Semgrep + Bandit)
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     timeout-minutes: 15
     needs: [classify]
-    # diff_files == '0' = empty-diff manifest route (scope-adherence only) —
-    # a whole-repo Semgrep+Bandit pass on zero changed lines is pure spend.
-    if: needs.classify.result == 'success' && needs.classify.outputs.depth != 'none' && needs.classify.outputs.diff_files != '0'
+    # Every observed nonempty diff selects the existing full repository scan.
+    # Optional model routing and draft state cannot suppress source qualification.
+    if: needs.classify.result == 'success' && needs.classify.outputs.sast_required == 'true'
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
@@ -466,16 +617,8 @@ jobs:
               && '["ubuntu-latest"]' || '["self-hosted","fly"]'))
           || 'ubuntu-latest' }}
     timeout-minutes: 15
-    needs: [classify, sast]
-    # !cancelled(): sast is skipped on empty-diff, but the manifest's metadata
-    # lane (scope-adherence) must still run. Gate on sast success OR the
-    # designed empty-diff case — a failed sast makes the judge refuse anyway,
-    # so running model calls on it is pure waste.
-    if: >-
-      !cancelled()
-      && needs.classify.result == 'success'
-      && needs.classify.outputs.invoke_skills != ''
-      && (needs.sast.result == 'success' || needs.classify.outputs.diff_files == '0')
+    needs: [classify, review-routing, sast]
+    if: github.event.pull_request.draft != true && needs.review-routing.result == 'success' && !cancelled() && needs.classify.result == 'success' && needs.review-routing.outputs.invoke_skills != '' && (needs.sast.result == 'success' || (needs.classify.outputs.sast_required == 'false' && needs.classify.outputs.diff_files == '0' && needs.review-routing.outputs.diff_files == '0' && needs.sast.result == 'skipped'))
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
@@ -540,7 +683,7 @@ jobs:
           ANTHROPIC_DIRECT_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           # CLIENT_AI_POLICY engagements route EVERY specialist direct.
           CLIENT_AI_POLICY: ${{ vars.CLIENT_AI_POLICY }}
-          SKILLS: ${{ needs.classify.outputs.invoke_skills }}
+          SKILLS: ${{ needs.review-routing.outputs.invoke_skills }}
           PR_TITLE: ${{ github.event.pull_request.title }}
           PR_BODY: ${{ github.event.pull_request.body }}
           PR_BASE_REF: ${{ github.base_ref }}
@@ -568,11 +711,8 @@ jobs:
               && '["ubuntu-latest"]' || '["self-hosted","fly"]'))
           || 'ubuntu-latest' }}
     timeout-minutes: 20
-    needs: [classify, sast]
-    # No always() here: empty-diff manifests are always narrow, so broad agents
-    # never have a metadata-lane reason to outrun a skipped/failed sast — the
-    # judge would reject the verdict anyway after burning up to 3 model calls.
-    if: needs.classify.result == 'success' && needs.classify.outputs.depth == 'broad'
+    needs: [classify, review-routing, sast]
+    if: github.event.pull_request.draft != true && needs.review-routing.result == 'success' && needs.classify.result == 'success' && needs.review-routing.outputs.depth == 'broad'
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
@@ -634,7 +774,7 @@ jobs:
           # (the transport slot above carries the proxy token in proxy mode).
           CLIENT_AI_POLICY: ${{ vars.CLIENT_AI_POLICY }}
           ANTHROPIC_DIRECT_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          AGENTS: ${{ needs.classify.outputs.invoke_agents }}
+          AGENTS: ${{ needs.review-routing.outputs.invoke_agents }}
           PR_BASE_REF: ${{ github.base_ref }}
         run: |
           rm -rf .ai/candidates && mkdir -p .ai/candidates
@@ -660,8 +800,8 @@ jobs:
               && '["ubuntu-latest"]' || '["self-hosted","fly"]'))
           || 'ubuntu-latest' }}
     timeout-minutes: 30
-    needs: [classify, sast, specialists, broad-agents]
-    if: always() && needs.classify.result == 'success' && needs.classify.outputs.depth != 'none'
+    needs: [classify, review-routing, sast, specialists, broad-agents]
+    if: github.event.pull_request.draft != true && needs.review-routing.result == 'success' && always() && needs.classify.result == 'success' && needs.review-routing.outputs.depth != 'none'
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
@@ -711,11 +851,12 @@ jobs:
         # A specialists/broad-agents job that fails before uploading its
         # candidates artifact must not let the judge post a clean verdict.
         if: |
+          !(needs.sast.result == 'success' || (needs.classify.outputs.sast_required == 'false' && needs.classify.outputs.diff_files == '0' && needs.review-routing.outputs.diff_files == '0' && needs.sast.result == 'skipped')) ||
           needs.sast.result == 'failure' || needs.sast.result == 'cancelled' ||
           needs.specialists.result == 'failure' || needs.specialists.result == 'cancelled' ||
-          (needs.specialists.result == 'skipped' && needs.classify.outputs.invoke_skills != '') ||
+          (needs.specialists.result == 'skipped' && needs.review-routing.outputs.invoke_skills != '') ||
           needs['broad-agents'].result == 'failure' || needs['broad-agents'].result == 'cancelled' ||
-          (needs['broad-agents'].result == 'skipped' && needs.classify.outputs.depth == 'broad')
+          (needs['broad-agents'].result == 'skipped' && needs.review-routing.outputs.depth == 'broad')
         run: |
           echo "::error::upstream review stage failed — refusing to judge missing candidates"
           exit 1
@@ -736,8 +877,8 @@ jobs:
 
       - name: Run judge
         env:
-          REVIEW_SKILLS: ${{ needs.classify.outputs.invoke_skills }}
-          REVIEW_AGENTS: ${{ needs.classify.outputs.invoke_agents }}
+          REVIEW_SKILLS: ${{ needs.review-routing.outputs.invoke_skills }}
+          REVIEW_AGENTS: ${{ needs.review-routing.outputs.invoke_agents }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           # The runners parse ANTHROPIC_BASE_URL's hostname and pick the
           # credential themselves — export every name, never coalesce here
@@ -751,7 +892,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           REPO: ${{ github.repository }}
-          MERGE_DANGER: ${{ needs.classify.outputs.merge_danger }}
+          MERGE_DANGER: ${{ needs.review-routing.outputs.merge_danger }}
           PR_TITLE: ${{ github.event.pull_request.title }}
           PR_BODY: ${{ github.event.pull_request.body }}
           # Base SHA feeds the dedup digest — a base update changes the diff

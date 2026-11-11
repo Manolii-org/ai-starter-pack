@@ -6,18 +6,26 @@ the product repo. Do not copy those into pack workflows.
 
 ## 1. Skip drafts on expensive PR automation
 
-`pull_request`-triggered LLM jobs (PR Assessment) skip
-`github.event.pull_request.draft`. Always list `ready_for_review` and
-`converted_to_draft` in `on.pull_request.types`. Without `ready_for_review`,
-marking ready never starts the job. `converted_to_draft` starts a skip run;
-pair it with workflow-level `concurrency` and `cancel-in-progress: true` so
-an in-flight LLM/SAST run is cancelled. Do **not** add `paths` /
-`paths-ignore` on that workflow: GitHub evaluates those filters for
-`converted_to_draft` too, so a revert to ignored-only files plus convert-to-
-draft never occupies the concurrency group. Put the draft skip on the
-**job** `if:` so no runner starts (`$0`). Reusable callers must also require
-`github.event_name == 'pull_request'` on `classify` — a missing PR payload
-is not a supported assessment path.
+`Classify PR` performs deterministic source classification on every
+`pull_request`, including drafts, without model or deployment credentials. It
+reads the trusted classifier's existing literal manifests without executing
+model code. Every observed nonempty diff, including unknown paths, selects the
+existing full SAST scan; an empty diff does not. Optional `review-routing`,
+specialist, broad-agent and Judge jobs each require a non-draft PR. Provider
+validation and model credentials remain in those optional jobs. AI-review skip
+labels, mechanical titles and trusted sync exclusions apply to model routing,
+not deterministic source qualification.
+
+Always list `ready_for_review`, `converted_to_draft` and `edited` in
+`on.pull_request.types`. Ready events enable optional model review; converting
+to draft keeps source qualification automatic while disabling model jobs. Pair
+these events with workflow-level `concurrency` and `cancel-in-progress: true`
+so older assessment runs are superseded. Do **not** add `paths` /
+`paths-ignore`: those filters also apply to `converted_to_draft` and can prevent
+the latest event from occupying the concurrency group. Put model draft guards
+on the **job** `if:` so no model runner starts. Reusable callers must require
+`github.event_name == 'pull_request'` on `classify`; a missing PR payload is not
+a supported assessment path.
 
 Autofix (`pr-autofix-loop.yml`) is **not** draft-gated. It runs on
 `issue_comment`, `pull_request_review`, `pull_request_review_comment`, and
@@ -25,10 +33,15 @@ failing `workflow_run`. Review payloads can include `pull_request.draft`;
 the shipped job `if:` still does not inspect it. Do not tell consumers
 Autofix is `$0` on drafts.
 
-When classify can be skipped, every downstream job must also require
-`needs.classify.result == 'success'`. An empty output is **not** the string
-`'none'`, so `outputs.depth != 'none'` alone still starts Semgrep/Bandit on
-drafts.
+SAST and every optional model job require `needs.classify.result == 'success'`.
+SAST additionally requires the explicit deterministic `sast_required == 'true'`
+output, so skipped, failed or incomplete classification cannot start it.
+Specialists, broad agents and Judge also require optional review-routing
+success. A routing failure blocks model review without suppressing source scans.
+
+Reusing an unchanged verdict on `ready_for_review` is not implemented here.
+That needs source, runtime, tool and configuration provenance before it can
+avoid another billable run; this eligibility repair makes no savings claim.
 
 Required fast-tier names and secret-scan stay unconditional on drafts.
 
