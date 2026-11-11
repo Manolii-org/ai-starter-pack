@@ -444,6 +444,48 @@
           "contains": "python3 -m pytest tests/test_registry.py tests/test_native_guidance.py -q"
         }
       ]
+    },
+    {
+      "id": "source-qualification-contract",
+      "paths": [
+        "scripts/ci/source_qualification.py",
+        "tests/test_source_qualification.py",
+        ".github/actions/source-qualification-receipt/**",
+        ".github/workflows/source-qualification-reusable.yml",
+        "schemas/source-qualification.schema.json",
+        "config/source-qualification.example.json",
+        "docs/contracts/source-qualification.md",
+        "scripts/ci/review_evidence.py",
+        "config/agent-checks.json",
+        "scripts/ci/source_qualification_transport.py",
+        ".github/workflows/source-qualification-producer-proof.yml",
+        "config/source-qualification-producer.json",
+        "config/agent-checks.json.jinja",
+        "tests/test_copier_render.py",
+        "README-STARTER-PACK.md.jinja"
+      ],
+      "tools": [
+        "uv"
+      ],
+      "environment": "release-contract-python",
+      "commands": [
+        [
+          ".ai/agent-checks/release-venv/bin/python",
+          "-B",
+          "-m",
+          "pytest",
+          "-q",
+          "tests/test_source_qualification.py",
+          "scripts/tests/test_review_evidence.py"
+        ]
+      ],
+      "timeout_seconds": 120,
+      "ci_sources": [
+        {
+          "path": ".github/workflows/plugin-eval-gate.yml",
+          "contains": "python3 -m pytest tests/ -q"
+        }
+      ]
     }
   ]
 }
