@@ -71,6 +71,23 @@ refresh owner, and the same account/capacity/expiry checks. It creates no new
 credential chain, host, consent file or runner registration. Shipping this API
 does not establish deployed selected-workflow restrictions or owner consent.
 
+## Durable execution custody
+
+`codex_automation_custody.claim` checks complete native commit-status history
+before admitting a new execution. The default-source controller must serialize
+that check-and-append transaction per repository/PR/operation; this API is not a
+distributed compare-and-swap or a lease. It validates the actual running
+default-branch `workflow_run` controller identity, appends a pending status and
+reads back its acknowledged ID before model work may begin.
+
+Any prior claim for the operation/head holds automatic re-execution. A purported
+success, another source policy, artifact expiry, cancellation, missing response,
+or rollback cannot clear custody. Completed-result reuse and terminal publication
+require their own authenticated proof; this helper supplies neither a clean
+review nor permission to rerun. It writes no automatic success or release. This
+keeps the execution fence durable while the full controller and reconciler are
+being implemented. A lost acknowledgement or competing claim never admits work.
+
 ## Completion of the train
 
 Before a default-branch landing or consumer activation, implement and independently
