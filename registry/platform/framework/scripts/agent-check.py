@@ -25,6 +25,7 @@ SCHEMA = "agent-check/v1"
 STATE = ".ai/agent-checks"
 GIT_TIMEOUT = 30
 TOOLS = {
+    "git": ["git", "--version"],
     "python": [sys.executable, "--version"],
     "node": ["node", "--version"],
     "npm": ["npm", "--version"],
@@ -436,6 +437,32 @@ def execute(root: Path, item: dict, inherited: dict | None = None) -> dict:
             "duration_ms": round((time.monotonic() - start) * 1000)}
 
 
+def changed_tool_contexts(previous: dict, current: dict) -> list[str]:
+    # Classify observed availability/output changes; never disclose raw values.
+    changed = []
+    for name in sorted(previous.keys() | current.keys()):
+        if name in previous and name in current and previous[name] == current[name]:
+            continue
+        if name not in previous:
+            transition = "context-added"
+        elif name not in current:
+            transition = "context-removed"
+        elif previous[name] == "unavailable":
+            transition = "unavailable-to-available"
+        elif current[name] == "unavailable":
+            transition = "available-to-unavailable"
+        else:
+            transition = "available-output-changed"
+        context = "platform" if name == "platform" else "tool:" + name
+        changed.append(context + "[" + transition + "]")
+    return changed
+
+
+def report_context_change(identifier: str, changed: list[str]) -> None:
+    # Optional stderr evidence preserves receipt schemas and old reason strings.
+    print("AGENT-CHECK-DIAGNOSTIC " + json.dumps({"id": identifier, "changed": changed}), file=sys.stderr)
+
+
 def environment_tools(item: dict, tools: dict, plan: dict) -> dict:
     consumers = [check for check in plan["checks"] if check.get("environment") == item["id"]]
     required = plan.get("tool_requirements", {})
@@ -811,7 +838,9 @@ def main(argv=None) -> int:
                     and isinstance(previous_environment.get("result"), dict)
                     and previous_environment["result"].get("status") == "passed" and ready
                     and current_ready is not None and previous_environment.get("ready") == current_ready):
-                reused_environments.append((environment, env_receipt, env_digest, current_ready))
+                reused_environments.append((environment, env_receipt, env_digest, current_ready,
+                    environment_tools(environment, tools, plan),
+                    environment_fingerprint(key, execution_environment(environment, inherited))))
                 continue
             if not args.provision:
                 results.append({"id": environment["id"], "status": "unavailable",
@@ -820,6 +849,7 @@ def main(argv=None) -> int:
             # An interrupted/failed reinstall must revoke the old success
             # before it can leave a partially populated dependency directory.
             env_receipt.unlink(missing_ok=True)
+            setup_execution_context = environment_fingerprint(key, execution_environment(environment, inherited))
             input_digest = environment_digest(root, environment, {}, key, inherited, plan=plan)
             result = execute(root, environment, inherited)
             missing = missing_ready_paths(root, environment)
@@ -832,7 +862,8 @@ def main(argv=None) -> int:
                 tools = versions(root, plan, inherited)
                 validated_digest = environment_digest(root, environment, tools, key, inherited, plan=plan)
                 validated_ready = ready_identity(root, environment, key=key)
-                provisioned.append((environment, env_receipt, input_digest, validated_digest, validated_ready, result))
+                provisioned.append((environment, env_receipt, input_digest, validated_digest, validated_ready, result,
+                    environment_tools(environment, tools, plan), setup_execution_context))
         # Provisioning may install tools. Missing tools must not be mistaken
         # for a source failure, or cached as a successful old fingerprint.
         tools = versions(root, plan, inherited)
@@ -851,23 +882,44 @@ def main(argv=None) -> int:
         # A cache hit was proved against the initial tools. Later setup can
         # change a shared tool, so it must still match before checks can run.
         # Revoke stale setup evidence and require a bounded fresh invocation.
-        for environment, env_receipt, reused_digest, reused_ready in reused_environments:
-            if (environment_digest(root, environment, tools, key, inherited, plan=plan) != reused_digest
-                    or ready_identity(root, environment, key=key) != reused_ready):
+        for environment, env_receipt, reused_digest, reused_ready, reused_tools, reused_context in reused_environments:
+            invalidated = False
+            changed = []
+            if environment_digest(root, environment, tools, key, inherited, plan=plan) != reused_digest:
+                invalidated = True
+                changed = changed_tool_contexts(reused_tools, environment_tools(environment, tools, plan))
+                if not changed:
+                    changed = ["execution-environment" if environment_fingerprint(
+                        key, execution_environment(environment, inherited)) != reused_context else "setup-context"]
+            elif ready_identity(root, environment, key=key) != reused_ready:
+                invalidated, changed = True, ["dependency-readiness"]
+            if invalidated:
                 env_receipt.unlink(missing_ok=True)
                 results.append({"id": environment["id"], "status": "failed",
                                 "reason": "cached environment invalidated by later provisioning; rerun with --provision"})
-        # New setups also keep their actual validated context. Never re-key an
-        # earlier setup as compatible with a tool installed by a later one.
-        for environment, env_receipt, input_digest, validated_digest, validated_ready, result in provisioned:
+                report_context_change(environment["id"], changed)
+        # Diagnostic observations are captured in this invocation; old receipts
+        # do not supply missing historical tool or execution-context vectors.
+        for (environment, env_receipt, input_digest, validated_digest, validated_ready, result,
+             validated_tools, setup_context) in provisioned:
             if result["status"] != "passed":
                 continue
-            if (environment_digest(root, environment, {}, key, inherited, plan=plan) != input_digest
-                    or environment_digest(root, environment, tools, key, inherited, plan=plan) != validated_digest
-                    or ready_identity(root, environment, key=key) != validated_ready):
+            invalidated = False
+            changed = []
+            if environment_digest(root, environment, {}, key, inherited, plan=plan) != input_digest:
+                invalidated = True
+                changed = ["execution-environment" if environment_fingerprint(
+                    key, execution_environment(environment, inherited)) != setup_context else "setup-inputs"]
+            elif environment_digest(root, environment, tools, key, inherited, plan=plan) != validated_digest:
+                invalidated = True
+                changed = changed_tool_contexts(validated_tools, environment_tools(environment, tools, plan)) or ["setup-context"]
+            elif ready_identity(root, environment, key=key) != validated_ready:
+                invalidated, changed = True, ["dependency-readiness"]
+            if invalidated:
                 env_receipt.unlink(missing_ok=True)
                 result.update(status="failed",
                               reason="provisioned environment invalidated by later provisioning or changed inputs; rerun with --provision")
+                report_context_change(environment["id"], changed)
             else:
                 write_json(env_receipt, {"digest": validated_digest, "result": result, "ready": validated_ready})
         ready_identities = {item["id"]: ready_identity(root, item, key=key) for item in plan["environments"]}
@@ -895,19 +947,28 @@ def main(argv=None) -> int:
         def require_stable_inputs() -> None:
             # These are repeated observations, not an atomic filesystem snapshot.
             # Recheck after reading a cache entry as well as after fresh checks.
+            source_stable = snapshot(root) == before
+            current_dotenv = dotenv_identity(root, plan, key)
+            if current_dotenv != identity["dotenv"]:
+                context_stable, changed_context = False, ["dotenv"]
+            else:
+                current_tools = versions(root, plan, inherited)
+                context_stable = current_tools == tools
+                changed_context = changed_tool_contexts(tools, current_tools)
+            dependency_stable = ready_identities == {
+                item["id"]: ready_identity(root, item, key=key) for item in plan["environments"]}
             checks = [
-                ("input-stability", snapshot(root) == before,
-                 "inputs changed during validation; inspect diff and rerun"),
-                ("context-stability", dotenv_identity(root, plan, key) == identity["dotenv"]
-                 and versions(root, plan, inherited) == tools,
-                 "dotenv or tool context changed during validation; inspect setup and rerun"),
-                ("dependency-stability", ready_identities == {
-                    item["id"]: ready_identity(root, item, key=key) for item in plan["environments"]},
-                 "dependency inputs changed during validation; inspect setup and rerun"),
+                ("input-stability", source_stable,
+                 "inputs changed during validation; inspect diff and rerun", ["source-inputs"]),
+                ("context-stability", context_stable,
+                 "dotenv or tool context changed during validation; inspect setup and rerun", changed_context),
+                ("dependency-stability", dependency_stable,
+                 "dependency inputs changed during validation; inspect setup and rerun", ["dependency-readiness"]),
             ]
-            for identifier, stable, reason in checks:
+            for identifier, stable, reason, changed in checks:
                 if not stable and not any(r["id"] == identifier for r in results):
                     results.append({"id": identifier, "status": "failed", "reason": reason})
+                    report_context_change(identifier, changed)
 
         require_stable_inputs()
         if cache_reusable and all(r["status"] == "passed" for r in results) and cache.is_file() and not args.no_cache:

@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -986,6 +987,151 @@ class AgentCheckTests(unittest.TestCase):
         path.write_text(json.dumps(prior))
         self.run_check('--provision', env=env)
         self.assertEqual((self.root / 'node_modules/first/installs').read_text(), '11')
+        self.assertFalse(self.receipt()['cached'])
+
+    def test_real_git_version_is_fingerprinted_and_changed_probe_invalidates_receipt(self):
+        real_git = shutil.which('git')
+        self.assertIsNotNone(real_git)
+        actual_version = self.git('--version').decode().strip()
+        state = self.root / '.ai/agent-checks'
+        binaries = state / 'bin'
+        binaries.mkdir(parents=True)
+        suffix = state / 'git-version-suffix'
+        suffix.write_text('')
+        binary = binaries / 'git'
+        # All Git operations use the real engine. Only the version response gets
+        # a synthetic suffix to exercise an upgrade without installing software.
+        binary.write_text('#!/bin/sh\n'
+                          'if [ "$#" -eq 1 ] && [ "$1" = "--version" ]; then\n'
+                          f'  version=$({shlex.quote(real_git)} --version) || exit "$?"\n'
+                          f'  suffix=$(cat {shlex.quote(str(suffix))}) || exit "$?"\n'
+                          '  printf "%s%s\\n" "$version" "$suffix"\n'
+                          'else\n'
+                          f'  exec {shlex.quote(real_git)} "$@"\n'
+                          'fi\n')
+        binary.chmod(0o755)
+        self.config['checks'][0].update(tools=['git'], commands=[[sys.executable, '-c',
+            "from pathlib import Path; p=Path('.ai/agent-checks/check-runs'); "
+            "p.write_text(p.read_text()+'1' if p.exists() else '1')"]])
+        self.save_config()
+        env = {**load('agent-check').git_environment(),
+               'PATH': str(binaries) + os.pathsep + os.environ['PATH']}
+        self.run_check(env=env)
+        first = self.receipt()
+        self.assertEqual(first['tool_versions']['git'], actual_version)
+        self.run_check(env=env)
+        self.assertTrue(self.receipt()['cached'])
+        self.assertEqual((state / 'check-runs').read_text(), '1')
+        suffix.write_text(' fixture-upgrade')
+        self.run_check(env=env)
+        changed = self.receipt()
+        self.assertEqual(changed['tool_versions']['git'], actual_version + ' fixture-upgrade')
+        self.assertEqual(first['snapshot'], changed['snapshot'])
+        self.assertNotEqual(first['digest'], changed['digest'])
+        self.assertFalse(changed['cached'])
+        self.assertEqual((state / 'check-runs').read_text(), '11')
+
+    def test_real_git_context_and_required_prefix_use_the_selected_directory(self):
+        (self.root / 'app').mkdir()
+        declared = {'TOOL_SCOPE': 'nested-fixture'}
+        self.config['checks'][0].update(tools=['git'], cwd='app', env=declared,
+            commands=[[sys.executable, '-c',
+                       "from pathlib import Path; assert 'value = 1' in Path('../src/value.py').read_text()"]])
+        version = self.git('--version').decode().strip()
+        self.config['tool_requirements'] = {'git': version}
+        self.save_config()
+        self.run_check()
+        runner = load('agent-check')
+        context = runner.tool_context_key('git', 'app', runner.encoded(declared).decode())
+        self.assertEqual(self.receipt()['tool_versions'][context], version)
+        self.assertNotIn('git', self.receipt()['tool_versions'])
+        self.config['tool_requirements']['git'] = 'git version impossible-fixture'
+        self.save_config()
+        self.run_check(expected=1)
+        self.assertTrue(any(r['id'] == 'toolchain-' + context and r['status'] == 'unavailable'
+                            for r in self.receipt()['results']))
+
+    def test_unregistered_tool_still_revokes_prior_receipt_before_checks(self):
+        self.change_source()
+        self.run_check()
+        self.assertEqual(self.receipt()['outcome'], 'passed')
+        self.config['checks'][0]['tools'] = ['unregistered-fixture-tool']
+        self.save_config()
+        result = self.run_check(expected=2)
+        self.assertIn('unknown tool fingerprint: unregistered-fixture-tool', result.stderr)
+        self.assertNotIn('AGENT-CHECK test:', result.stdout)
+        self.assertFalse((self.root / '.ai/agent-checks/receipt.json').exists())
+
+    def test_cli_preparation_reports_changed_tool_context_without_secret_values(self):
+        env = self.independent_tool_fixture(consumer_tools=['node'])
+        secret = 'synthetic-private-value-never-emit-42'
+        declared = {'PRIVATE_FIXTURE_SECRET': secret}
+        self.config['checks'][0]['env'] = declared
+        self.save_config()
+        result = self.run_check('--provision', expected=1, env=env)
+        runner = load('agent-check')
+        context = runner.tool_context_key('node', '.', runner.encoded(declared).decode())
+        first = next(r for r in self.receipt()['results'] if r['id'] == 'first')
+        self.assertEqual(first['reason'], 'provisioned environment invalidated by later provisioning or changed inputs; rerun with --provision')
+        details = [json.loads(line.removeprefix('AGENT-CHECK-DIAGNOSTIC '))
+                   for line in result.stderr.splitlines() if line.startswith('AGENT-CHECK-DIAGNOSTIC ')]
+        self.assertIn({'id': 'first', 'changed': ['tool:' + context + '[unavailable-to-available]']}, details)
+        self.assertFalse(any(r['id'].startswith('check-') for r in self.receipt()['results']))
+        for text in (result.stdout, result.stderr, json.dumps(self.receipt())):
+            self.assertNotIn(secret, text)
+            self.assertNotIn('PRIVATE_FIXTURE_SECRET', text)
+
+    def test_cli_final_context_reports_changed_tool_without_secret_values(self):
+        state = self.root / '.ai/agent-checks'
+        binaries = state / 'bin'
+        binaries.mkdir(parents=True)
+        version = state / 'tool-version'
+        version.write_text('vfixture-1')
+        binary = binaries / 'node'
+        binary.write_text(f'#!{sys.executable}\nfrom pathlib import Path\n'
+                          f'print(Path({str(version)!r}).read_text())\n')
+        binary.chmod(0o755)
+        secret = 'synthetic-private-value-never-emit-73'
+        declared = {'PRIVATE_FIXTURE_SECRET': secret}
+        self.config['checks'][0].update(tools=['node'], env=declared, commands=[
+            [sys.executable, '-c', "from pathlib import Path; Path('.ai/agent-checks/tool-version').write_text('vfixture-2')"]])
+        self.save_config()
+        result = self.run_check(expected=1, env={**load('agent-check').git_environment(),
+            'PATH': str(binaries) + os.pathsep + os.environ['PATH']})
+        runner = load('agent-check')
+        context = runner.tool_context_key('node', '.', runner.encoded(declared).decode())
+        failure = next(r for r in self.receipt()['results'] if r['id'] == 'context-stability')
+        self.assertEqual(failure['reason'], 'dotenv or tool context changed during validation; inspect setup and rerun')
+        details = [json.loads(line.removeprefix('AGENT-CHECK-DIAGNOSTIC '))
+                   for line in result.stderr.splitlines() if line.startswith('AGENT-CHECK-DIAGNOSTIC ')]
+        self.assertIn({'id': 'context-stability', 'changed': ['tool:' + context + '[available-output-changed]']}, details)
+        self.assertFalse(self.receipt()['cached'])
+        for text in (result.stdout, result.stderr, json.dumps(self.receipt())):
+            self.assertNotIn(secret, text)
+            self.assertNotIn('PRIVATE_FIXTURE_SECRET', text)
+
+    def test_cli_final_tool_unavailability_is_reported_without_raw_output(self):
+        state = self.root / '.ai/agent-checks'
+        binaries = state / 'bin'
+        binaries.mkdir(parents=True)
+        version = state / 'tool-version'
+        version.write_text('vfixture-1')
+        binary = binaries / 'node'
+        binary.write_text(f'#!{sys.executable}\nfrom pathlib import Path\nimport sys\n'
+                          f'value=Path({str(version)!r}).read_text()\n'
+                          "sys.exit(7) if value=='down' else print(value)\n")
+        binary.chmod(0o755)
+        self.config['checks'][0].update(tools=['node'], commands=[[sys.executable, '-c',
+            "from pathlib import Path; Path('.ai/agent-checks/tool-version').write_text('down')"]])
+        self.save_config()
+        result = self.run_check(expected=1, env={**load('agent-check').git_environment(),
+            'PATH': str(binaries) + os.pathsep + os.environ['PATH']})
+        failure = next(r for r in self.receipt()['results'] if r['id'] == 'context-stability')
+        self.assertEqual(failure['reason'], 'dotenv or tool context changed during validation; inspect setup and rerun')
+        details = [json.loads(line.removeprefix('AGENT-CHECK-DIAGNOSTIC '))
+                   for line in result.stderr.splitlines() if line.startswith('AGENT-CHECK-DIAGNOSTIC ')]
+        self.assertIn({'id': 'context-stability', 'changed': ['tool:node[available-to-unavailable]']}, details)
+        self.assertNotIn('vfixture-1', result.stderr)
         self.assertFalse(self.receipt()['cached'])
 
     def test_all_environment_receipts_use_final_provisioned_tool_versions(self):
