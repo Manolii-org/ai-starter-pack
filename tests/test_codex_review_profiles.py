@@ -89,6 +89,85 @@ def test_repo_pin_overrides_org_and_case_is_canonical(policy, monkeypatch):
     assert profiles.select("example/special", "security")["profile"] == "bob"
 
 
+def automation_grant(policy, monkeypatch):
+    data, consents = policy
+    workflow = "example/project/.github/workflows/codex-automation-worker.yml@refs/heads/main"
+    data["runner_access"]["workflows"].append(workflow)
+    grant = copy.deepcopy(consents["alice"])
+    grant["schema"] = "codex-automation-consent/v1"
+    grant["roles"] = sorted(profiles.AUTOMATION_ROLES)
+    del grant["lanes"]
+    original = profiles.protected_json
+
+    def protected(path):
+        if path.parent.name == "automation-consents":
+            return copy.deepcopy(grant)
+        return original(path)
+
+    monkeypatch.setattr(profiles, "protected_json", protected)
+    monkeypatch.setenv("GITHUB_WORKFLOW_REF", workflow)
+    return grant
+
+
+@pytest.mark.parametrize("role", sorted(profiles.AUTOMATION_ROLES))
+def test_automation_requires_explicit_role_and_exact_trusted_controller(policy, monkeypatch, role):
+    automation_grant(policy, monkeypatch)
+    result = profiles.select_automation("Example/Project", role)
+    assert result["account_sha256"] == ACCOUNT
+    assert result["role"] == role
+    assert result["controller_workflow"].endswith("codex-automation-worker.yml@refs/heads/main")
+    with pytest.raises(profiles.ProfileError, match="assignment_changed"):
+        profiles.select_automation("example/project", "judge" if role != "judge" else "critic", reserved=result)
+
+
+@pytest.mark.parametrize("role", sorted(profiles.AUTOMATION_ROLES))
+def test_legacy_review_consent_cannot_authorize_automation(policy, monkeypatch, role):
+    workflow = "example/project/.github/workflows/codex-automation-worker.yml@refs/heads/main"
+    policy[0]["runner_access"]["workflows"].append(workflow)
+    monkeypatch.setenv("GITHUB_WORKFLOW_REF", workflow)
+    with pytest.raises(profiles.ProfileError, match="consent_unavailable"):
+        profiles.select_automation("example/project", role)
+
+
+@pytest.mark.parametrize("change", ["missing_role", "revoked", "credits", "wrong_schema", "scope", "wrong_workflow"])
+def test_automation_grant_never_broadens_other_controls(policy, monkeypatch, change):
+    grant = automation_grant(policy, monkeypatch)
+    if change == "missing_role":
+        grant["roles"].remove("assessment")
+    elif change == "revoked":
+        grant["revoked"] = True
+    elif change == "credits":
+        grant["automatic_purchases_disabled"] = False
+    elif change == "wrong_schema":
+        grant["schema"] = "codex-review-consent/v1"
+    elif change == "scope":
+        grant["repositories"] = ["other/project"]
+    else:
+        monkeypatch.setenv("GITHUB_WORKFLOW_REF", "example/project/.github/workflows/codex-review-worker.yml@refs/heads/main")
+    with pytest.raises(profiles.ProfileError):
+        profiles.select_automation("example/project", "assessment")
+
+
+def test_review_and_automation_share_the_same_actual_os_account_lock(policy, monkeypatch, tmp_path):
+    automation_grant(policy, monkeypatch)
+    monkeypatch.setenv("GITHUB_WORKFLOW_REF", "example/project/.github/workflows/codex-review-worker.yml@refs/heads/main")
+    review = profiles.select("example/project", "code")
+    payload = base64.urlsafe_b64encode(json.dumps({"exp": int(time.time()) + 3600}).encode()).decode().rstrip("=")
+    synthetic = {"tokens": {"access_token": "fixture." + payload + ".signature"}}
+    monkeypatch.setattr(profiles, "private_home", lambda account: tmp_path)
+    monkeypatch.setattr(profiles, "read_auth", lambda *a: copy.deepcopy(synthetic))
+    monkeypatch.setattr(profiles, "account_probe", lambda *a: ({"account": {"type": "chatgpt"}}, limits()))
+    with profiles.session(review, "example/project", "code", wait_seconds=0):
+        monkeypatch.setenv("GITHUB_WORKFLOW_REF", "example/project/.github/workflows/codex-automation-worker.yml@refs/heads/main")
+        automation = profiles.select_automation("example/project", "assessment")
+        with pytest.raises(profiles.ProfileError, match="session_busy"):
+            with profiles.automation_session(automation, "example/project", "assessment", wait_seconds=0):
+                pytest.fail("automation started a competing refresh/session stream")
+    with profiles.automation_session(automation, "example/project", "assessment", wait_seconds=0) as (auth, snapshot):
+        assert auth == synthetic and snapshot["windows"]["primary"]["used_percent"] == 10
+    assert (tmp_path / "review.lock").exists()
+
+
 def test_unassigned_org_cannot_borrow_another_account(policy):
     with pytest.raises(profiles.ProfileError, match="host_access_unverified"):
         profiles.select("other/project", "code")
