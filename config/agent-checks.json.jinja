@@ -2,4 +2,18 @@
 {% set owner = canonical | from_json %}
 {% set checks = owner.checks | rejectattr('id', 'in', ['release-manifest-contract', 'feature-controls', 'feature-controls-distribution', 'assessment-sast-failure-contract', 'registry-bootstrap-contract']) | list %}
 {% set environments = owner.environments | rejectattr('id', 'in', ['release-contract-python', 'feature-controls-python']) | list %}
-{{ dict(owner, base=agent_validation_base, checks=checks, environments=environments) | tojson(indent=2) }}
+{# These exact Pack-maintenance commands require optional QA/projection code.
+   Preserve every portable command and the stable owner check identity. #}
+{% set pack_only_paths = ['scripts/tests/test_source_scope_boundary.py', 'scripts/tests/test_source_projection.py', 'scripts/lib/source_projection.py'] %}
+{% set pack_only_commands = [
+  ['python3', '-m', 'unittest', 'discover', '-s', 'scripts/tests', '-p', 'test_source_scope_boundary.py', '-v'],
+  ['python3', '-m', 'unittest', 'discover', '-s', 'scripts/tests', '-p', 'test_source_projection.py', '-v']
+] %}
+{% set portable = namespace(checks=[]) %}
+{% for check in checks %}
+  {% if check.id == 'agent-validation-contract' %}
+    {% set check = dict(check, paths=check.paths | reject('in', pack_only_paths) | list, commands=check.commands | reject('in', pack_only_commands) | list) %}
+  {% endif %}
+  {% set portable.checks = portable.checks + [check] %}
+{% endfor %}
+{{ dict(owner, base=agent_validation_base, checks=portable.checks, environments=environments) | tojson(indent=2) }}

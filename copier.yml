@@ -330,6 +330,11 @@ _exclude:
   - tests/test_native_guidance.py
   - tests/test_session_terminal_callers.py
   - scripts/tests/test_agent_validation_layout.py
+  # Source-scope control qualification and the non-executing projection
+  # foundation are Pack-owned; portable consumers keep their existing recipe.
+  - scripts/tests/test_source_scope_boundary.py
+  - scripts/tests/test_source_projection.py
+  - scripts/lib/source_projection.py
   # Release capability consumers use the portable action and their own product
   # qualification. These suites require the Pack-only registry/build machinery.
   - scripts/tests/test_release_manifest.py
