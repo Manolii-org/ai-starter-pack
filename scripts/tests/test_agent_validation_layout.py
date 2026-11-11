@@ -1087,3 +1087,116 @@ def test_consumer_skill_contract_rejects_missing_requirements(tmp_path, bad):
     path.write_text("---\n" + yaml.safe_dump(metadata) + "---\n" + body)
     with pytest.raises(AssertionError):
         consumer_skill_contract(path)
+
+
+def test_plan_link_replacement_refused_when_snapshot_metadata_repeats(tmp_path, monkeypatch):
+    """Inode pinning cannot rely on timestamp resolution or a reused snapshot."""
+    module = imported(ROOT)
+    root = tmp_path / "link-plan"
+    root.mkdir()
+    (root / "target").mkdir()
+    alias = root / "alias"
+    alias.symlink_to("target", target_is_directory=True)
+    original_open, original_state = module.os.open, module.state
+    opened = []
+
+    def observe_open(path, flags, *args, **kwargs):
+        descriptor = original_open(path, flags, *args, **kwargs)
+        if Path(path) == alias:
+            opened.append(descriptor)
+        return descriptor
+
+    monkeypatch.setattr(module.os, "open", observe_open)
+    plan = module.OutputPlan(root)
+    expected = plan.watch(alias)
+    alias.unlink()
+    alias.symlink_to("target", target_is_directory=True)
+    monkeypatch.setattr(module, "state", lambda path: expected if path == alias else original_state(path))
+    try:
+        with pytest.raises(ValueError, match="link identity changed"):
+            plan.revalidate()
+    finally:
+        close = getattr(plan, "close", None)
+        if close is not None:
+            close()
+    assert opened
+    for descriptor in opened:
+        with pytest.raises(OSError) as closed:
+            os.fstat(descriptor)
+        assert closed.value.errno == errno.EBADF
+
+
+@pytest.mark.parametrize("replacement", ["link", "regular"])
+def test_failed_cleanup_preserves_another_writers_temp_entry(
+        replacement_kernel, tmp_path, monkeypatch, capsys, replacement):
+    """Failure cleanup owns the original descriptor, never a replacement path."""
+    module = replacement_kernel
+    root = tmp_path / "changed-temp"
+    root.mkdir()
+    path = root / "owner.txt"
+    path.write_bytes(b"Owner bytes.\n")
+    outside = tmp_path / "outside.txt"
+    outside.write_bytes(b"Outside bytes.\n")
+    outside.chmod(0o644)
+    primary = OSError(errno.ENOSPC, "synthetic replacement failure")
+    names = []
+
+    def replace_after_other_writer(src, dst, **kwargs):
+        descriptor = kwargs["src_dir_fd"]
+        module.os.unlink(src, dir_fd=descriptor)
+        if replacement == "link":
+            module.os.symlink(str(outside), src, dir_fd=descriptor)
+        else:
+            handle = module.os.open(src, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644,
+                                    dir_fd=descriptor)
+            with os.fdopen(handle, "wb") as stream:
+                stream.write(b"Other writer bytes.\n")
+        names.append(root / src)
+        raise primary
+
+    monkeypatch.setattr(module.os, "replace", replace_after_other_writer)
+    plan = module.OutputPlan(root)
+    plan.add(path, b"Replacement.\n", "fixture")
+    with pytest.raises(OSError) as caught:
+        plan.apply([path])
+    assert caught.value is primary
+    assert path.read_bytes() == b"Owner bytes.\n"
+    assert outside.read_bytes() == b"Outside bytes.\n"
+    assert outside.stat().st_mode & 0o777 == 0o644
+    assert len(names) == 1
+    if replacement == "link":
+        assert names[0].is_symlink() and os.readlink(names[0]) == str(outside)
+    else:
+        assert names[0].read_bytes() == b"Other writer bytes.\n"
+        assert names[0].stat().st_mode & 0o777 == 0o644
+    assert "temporary path no longer names the owned file" in capsys.readouterr().err
+
+
+def test_completed_rename_error_keeps_published_output_mode(
+        replacement_kernel, tmp_path, monkeypatch, capsys):
+    """An ambiguous completed rename is not an unpublished private orphan."""
+    module = replacement_kernel
+    root = tmp_path / "ambiguous-rename"
+    root.mkdir()
+    path = root / "owner.txt"
+    path.write_bytes(b"Owner bytes.\n")
+    path.chmod(0o644)
+    plan = module.OutputPlan(root)
+    plan.add(path, b"Replacement.\n", "fixture")
+    original = module.os.replace
+    primary = OSError(errno.EIO, "synthetic error after completed rename")
+
+    def completed_then_error(*args, **kwargs):
+        original(*args, **kwargs)
+        raise primary
+
+    monkeypatch.setattr(module.os, "replace", completed_then_error)
+    with pytest.raises(OSError) as caught:
+        plan.apply([path])
+    assert caught.value is primary
+    assert path.read_bytes() == b"Replacement.\n"
+    assert path.stat().st_mode & 0o777 == 0o644
+    assert not list(root.glob(".agent-validation-*"))
+    assert plan.completed == []
+    report = capsys.readouterr().err.split("AGENT-VALIDATION-RECOVERY: ", 1)[1]
+    assert json.loads(report)["reason"] == str(primary)
