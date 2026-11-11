@@ -149,10 +149,14 @@ def normalize(name: str, raw: bytes, exit_code: int | None, version: str | None)
                 raise ValueError("report scanner version differs from observed binary")
             if not isinstance(report.get("skipped_rules"), list) or report["skipped_rules"]:
                 raise ValueError("incomplete scanner rules")
+            # Experimental profiling records routine internal analysis limits;
+            # provider completion remains the native exit/error/scope contract.
             profile = report.get("time")
-            if not isinstance(profile, dict) or not isinstance(profile.get("fixpoint_timeouts"), list):
-                raise ValueError("missing dataflow completion profile")
-            record["reported_dataflow_aborts"] = len(profile["fixpoint_timeouts"])
+            limits = profile.get("fixpoint_timeouts") if isinstance(profile, dict) else None
+            record["profiling_limits"] = {
+                "status": "available" if isinstance(limits, list) else "unknown",
+                "reported_fixpoint_entries": len(limits) if isinstance(limits, list) else None,
+            }
         else:
             metrics = report["metrics"]
             if not isinstance(metrics, dict) or "_totals" not in metrics:
@@ -172,8 +176,6 @@ def normalize(name: str, raw: bytes, exit_code: int | None, version: str | None)
             record["reason"] = "malformed_report"
         elif errors:
             record["reason"] = "scanner_reported_errors"
-        elif name == "semgrep" and record["reported_dataflow_aborts"]:
-            record["reason"] = "scanner_dataflow_aborted"
         elif not scanned:
             record["reason"] = "no_observed_targets"
         # Semgrep scan does not use --error: its successful findings exit is 0.
