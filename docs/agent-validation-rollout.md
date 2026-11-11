@@ -37,6 +37,13 @@ Recipe details that keep receipts honest:
   receipt continues to bind and recheck every selected tool context. Earlier
   global-tool setup digests are revalidated under `agent-environment-tools/v2`;
   receipt schema v1 and existing readers remain supported.
+  `git` is supported in `tools` and fingerprints `git --version` in the selected
+  working directory and declared environment. Optional stderr diagnostics name
+  observed component classes or tool-context identifiers and availability/output
+  transitions, never environment variable names/values, private cache keys or raw
+  tool-version output. Receipt fields and existing reason strings stay unchanged.
+  These observations belong to that invocation; missing historical vectors remain
+  unknown. Digest comparisons and fail-closed decisions remain authoritative.
 - `ready_paths` bind dependency names, modes and regular file bytes. The walker
   reads linked targets only inside the owning repository; unsafe/external links
   or bounded-scan limits disable setup/PASS reuse while fresh checks still run.
