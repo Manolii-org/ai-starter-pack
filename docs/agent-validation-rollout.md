@@ -27,12 +27,22 @@ Recipe details that keep receipts honest:
 - `tool_requirements` maps a tool to a required version prefix, for example
   `{"node": "v24"}`. A different version reports the toolchain unavailable
   instead of passing on an unsupported runtime. Mirror the CI toolchain.
-- `ready_paths` are fingerprinted (names, modes, sizes, mtimes, inodes and ctimes,
-  walking through symlinked directories; tool caches such as `.cache`,
-  `.vite-temp` and `__pycache__` excluded). A deleted or edited dependency needs
-  `--provision` again, and a cached PASS is bound to that fingerprint too. List
-  the dependency directory itself (`node_modules`, `.venv`), not only a sentinel
-  file inside it: a sentinel proves setup ran but fingerprints one file.
+  Root requirements are probed even when no selected command lists that tool.
+  Setup receipts bind platform and the root Python interpreter, explicit setup
+  tools, and the exact tool contexts of selected checks consuming that setup.
+  Declare every setup/check tool in `tools`; `cwd` and declared `env` select its
+  context. Global requirements bind every selected context of their tool.
+  An independent later setup may install an unrelated tool without invalidating
+  this setup; a shared tool change still invalidates it. The final candidate
+  receipt continues to bind and recheck every selected tool context. Earlier
+  global-tool setup digests are revalidated under `agent-environment-tools/v2`;
+  receipt schema v1 and existing readers remain supported.
+- `ready_paths` bind dependency names, modes and regular file bytes. The walker
+  reads linked targets only inside the owning repository; unsafe/external links
+  or bounded-scan limits disable setup/PASS reuse while fresh checks still run.
+  Tool caches such as `.cache`, `.vite-temp` and `__pycache__` stay excluded.
+  List the dependency directory itself (`node_modules`, `.venv`), not only a
+  sentinel file inside it: a sentinel proves setup ran but binds one file.
 - What a cached PASS is bound to: tracked and untracked files (contents and the
   executable bit; other permission bits are not bound), ignored `.env*` files in
   the repository root and in each selected check's or environment's `cwd`
