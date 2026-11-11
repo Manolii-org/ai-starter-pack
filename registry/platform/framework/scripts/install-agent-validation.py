@@ -4,6 +4,11 @@
 This reads the local branch to reject protected branches, performs no Git
 mutations or network operations, and never updates settings or secrets.
 Repository owners supply recipes once; later updates preserve those recipes.
+
+Failed descriptor-based writes leave their owned temporary inode in place and
+attempt to make it private (0600). Failure cleanup never unlinks a pathname.
+Recovery diagnostics describe the held inode and a historical name observation;
+they do not authorize deletion or claim that a missing/replaced name is private.
 """
 from __future__ import annotations
 
@@ -194,7 +199,7 @@ def state(path: Path):
 
 
 def cleanup_owned_temporary(name: str, handle: int, parent: int, primary_error):
-    """Privatise an owned orphan; check its name before removing it."""
+    """Privatise only our held inode; retain it without pathname deletion."""
     privacy_error = None
     try:
         owned = os.fstat(handle)
@@ -213,7 +218,16 @@ def cleanup_owned_temporary(name: str, handle: int, parent: int, primary_error):
         if (not stat.S_ISREG(named.st_mode)
                 or (named.st_dev, named.st_ino) != (owned.st_dev, owned.st_ino)):
             raise ValueError("temporary path no longer names the owned file")
-        os.unlink(name, dir_fd=parent)
+        held = os.fstat(handle)
+        mode = stat.S_IMODE(held.st_mode)
+        # POSIX has no inode-CAS unlink. A name can be replaced after stat,
+        # so keep this failed write rather than risk removing another writer.
+        record = {"name": name, "name_observation": "owned_at_check",
+                  "held_identity": {"device": held.st_dev, "inode": held.st_ino},
+                  "held_mode": f"{mode:04o}", "private": mode == 0o600,
+                  "held_links": held.st_nlink}
+        print("AGENT-VALIDATION-TEMPORARY-RECOVERY: " + json.dumps(record, sort_keys=True),
+              file=sys.stderr)
     except (OSError, ValueError) as cleanup_error:
         if primary_error is None:
             raise

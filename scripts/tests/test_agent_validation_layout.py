@@ -473,7 +473,7 @@ def test_changed_prose_during_render_is_not_clobbered(producers, consumer, monke
     assert snapshot(consumer) == observed["snapshot"]
 
 
-def test_atomic_replacement_failure_retains_original_and_recovery(producers, consumer, monkeypatch):
+def test_atomic_replacement_failure_retains_original_and_recovery(producers, consumer, monkeypatch, capsys):
     module = imported(producers["source"][0])
     original = module.os.replace
 
@@ -489,7 +489,17 @@ def test_atomic_replacement_failure_retains_original_and_recovery(producers, con
     record = json.loads((consumer / RECOVERY).read_text())
     assert record["status"] == "prepared"
     assert "scripts/agent-check.py" in record["completed"]
-    assert not list(consumer.rglob(".agent-validation-*"))
+    # Failed writes now retain their private owned inode instead of using
+    # a racy pathname unlink. Bind recovery evidence to this owned orphan.
+    leftovers = list(consumer.rglob(".agent-validation-*"))
+    assert len(leftovers) == 1 and leftovers[0].is_file() and not leftovers[0].is_symlink()
+    owned = leftovers[0].stat()
+    assert owned.st_mode & 0o777 == 0o600
+    error = capsys.readouterr().err
+    temporary_record = json.loads(error.split("AGENT-VALIDATION-TEMPORARY-RECOVERY: ", 1)[1].splitlines()[0])
+    assert temporary_record["held_identity"] == {"device": owned.st_dev, "inode": owned.st_ino}
+    assert temporary_record["held_mode"] == "0600" and temporary_record["private"] is True
+    assert temporary_record["name"] == leftovers[0].name
     git(consumer, "add", ".")
     assert not git(consumer, "ls-files", "--", RECOVERY)
 
@@ -560,7 +570,7 @@ def test_temp_name_collision_preserves_other_writer_file(
     assert plan.completed == []
 
 
-def test_cleanup_failure_retains_primary_error_and_closes_parent(
+def test_failed_replace_retains_owned_private_temp_and_closes_parent(
         replacement_kernel, tmp_path, monkeypatch, capsys):
     module = replacement_kernel
     root = tmp_path / "cleanup"
@@ -577,7 +587,7 @@ def test_cleanup_failure_retains_primary_error_and_closes_parent(
         raise primary
 
     def fail_unlink(*args, **kwargs):
-        raise PermissionError(errno.EACCES, "synthetic temporary cleanup denial")
+        raise AssertionError("failure cleanup must never unlink a pathname")
 
     monkeypatch.setattr(module.os, "replace", fail_replace)
     monkeypatch.setattr(module.os, "unlink", fail_unlink)
@@ -587,8 +597,10 @@ def test_cleanup_failure_retains_primary_error_and_closes_parent(
     assert path.read_bytes() == b"Owner bytes.\n"
     assert plan.completed == []
     error = capsys.readouterr().err
-    assert "AGENT-VALIDATION-CLEANUP:" in error
-    assert "synthetic temporary cleanup denial" in error
+    record = json.loads(error.split("AGENT-VALIDATION-TEMPORARY-RECOVERY: ", 1)[1].splitlines()[0])
+    assert record["private"] is True
+    assert record["held_mode"] == "0600"
+    assert record["held_links"] == 1
     assert json.loads(error.split("AGENT-VALIDATION-RECOVERY: ", 1)[1])["reason"] == str(primary)
     leftovers = list(root.glob(".agent-validation-*"))
     assert len(leftovers) == 1
@@ -1200,3 +1212,123 @@ def test_completed_rename_error_keeps_published_output_mode(
     assert plan.completed == []
     report = capsys.readouterr().err.split("AGENT-VALIDATION-RECOVERY: ", 1)[1]
     assert json.loads(report)["reason"] == str(primary)
+
+
+@pytest.mark.parametrize("replacement", ["link", "regular"])
+def test_failed_cleanup_preserves_replacement_after_final_name_snapshot(
+        replacement_kernel, tmp_path, monkeypatch, capsys, replacement):
+    """A checked basename never authorizes a later unlink of another inode."""
+    module = replacement_kernel
+    root = tmp_path / "cleanup-last-stat"
+    root.mkdir()
+    path = root / "owner.txt"
+    path.write_bytes(b"Owner bytes.\n")
+    outside = tmp_path / "outside.txt"
+    outside.write_bytes(b"Outside bytes.\n")
+    outside.chmod(0o644)
+    primary = OSError(errno.ENOSPC, "synthetic replacement failure")
+    original_stat, original_unlink, original_open = module.os.stat, module.os.unlink, module.os.open
+    checked = []
+
+    def replace_after_last_snapshot(name, *args, **kwargs):
+        observed = original_stat(name, *args, **kwargs)
+        if isinstance(name, str) and name.startswith(".agent-validation-") and "dir_fd" in kwargs:
+            checked.append(name)
+            if len(checked) == 2:
+                parent = kwargs["dir_fd"]
+                original_unlink(name, dir_fd=parent)
+                if replacement == "link":
+                    module.os.symlink(str(outside), name, dir_fd=parent)
+                else:
+                    handle = original_open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                                           0o644, dir_fd=parent)
+                    with os.fdopen(handle, "wb") as stream:
+                        stream.write(b"Other writer bytes.\n")
+        return observed
+
+    monkeypatch.setattr(module.os, "stat", replace_after_last_snapshot)
+    monkeypatch.setattr(module.os, "replace", lambda *args, **kwargs: (_ for _ in ()).throw(primary))
+    plan = module.OutputPlan(root)
+    plan.add(path, b"Replacement.\n", "fixture")
+    with pytest.raises(OSError) as caught:
+        plan.apply([path])
+    assert caught.value is primary
+    assert len(checked) == 2
+    other = root / checked[-1]
+    if replacement == "link":
+        assert other.is_symlink() and os.readlink(other) == str(outside)
+    else:
+        assert other.read_bytes() == b"Other writer bytes.\n"
+        assert other.stat().st_mode & 0o777 == 0o644
+    assert outside.read_bytes() == b"Outside bytes.\n"
+    assert outside.stat().st_mode & 0o777 == 0o644
+    assert path.read_bytes() == b"Owner bytes.\n"
+    assert plan.completed == []
+    error = capsys.readouterr().err
+    record = json.loads(error.split("AGENT-VALIDATION-TEMPORARY-RECOVERY: ", 1)[1].splitlines()[0])
+    assert record["held_mode"] == "0600"
+    assert record["name_observation"] == "owned_at_check"
+    assert record["name"] == checked[-1]
+
+
+def test_moved_temporary_is_not_claimed_private(
+        replacement_kernel, tmp_path, monkeypatch, capsys):
+    """A missing name can be an ambiguous completed move, so do not chmod it."""
+    module = replacement_kernel
+    root = tmp_path / "cleanup-moved"
+    root.mkdir()
+    path, moved = root / "owner.txt", root / "moved.txt"
+    path.write_bytes(b"Owner bytes.\n")
+    path.chmod(0o644)
+    primary = OSError(errno.EIO, "synthetic error after another move")
+    original = module.os.replace
+
+    def moved_then_error(src, dst, **kwargs):
+        original(src, "moved.txt", **kwargs)
+        raise primary
+
+    monkeypatch.setattr(module.os, "replace", moved_then_error)
+    plan = module.OutputPlan(root)
+    plan.add(path, b"Replacement.\n", "fixture")
+    with pytest.raises(OSError) as caught:
+        plan.apply([path])
+    assert caught.value is primary
+    assert path.read_bytes() == b"Owner bytes.\n"
+    assert moved.read_bytes() == b"Replacement.\n"
+    assert moved.stat().st_mode & 0o777 == 0o644
+    assert not list(root.glob(".agent-validation-*"))
+    assert "AGENT-VALIDATION-TEMPORARY-RECOVERY:" not in capsys.readouterr().err
+
+
+def test_failed_privacy_change_reports_actual_held_mode(
+        replacement_kernel, tmp_path, monkeypatch, capsys):
+    """A denied chmod preserves the primary failure without claiming privacy."""
+    module = replacement_kernel
+    root = tmp_path / "cleanup-privacy-denied"
+    root.mkdir()
+    path = root / "owner.txt"
+    path.write_bytes(b"Owner bytes.\n")
+    path.chmod(0o644)
+    primary = OSError(errno.ENOSPC, "synthetic replacement failure")
+    original_fchmod = module.os.fchmod
+
+    def deny_privacy(handle, mode):
+        if mode == 0o600:
+            raise PermissionError(errno.EACCES, "synthetic privacy denial")
+        return original_fchmod(handle, mode)
+
+    monkeypatch.setattr(module.os, "fchmod", deny_privacy)
+    monkeypatch.setattr(module.os, "replace", lambda *args, **kwargs: (_ for _ in ()).throw(primary))
+    plan = module.OutputPlan(root)
+    plan.add(path, b"Replacement.\n", "fixture")
+    with pytest.raises(OSError) as caught:
+        plan.apply([path])
+    assert caught.value is primary
+    leftovers = list(root.glob(".agent-validation-*"))
+    assert len(leftovers) == 1
+    assert leftovers[0].stat().st_mode & 0o777 == 0o644
+    error = capsys.readouterr().err
+    assert "synthetic privacy denial" in error
+    record = json.loads(error.split("AGENT-VALIDATION-TEMPORARY-RECOVERY: ", 1)[1].splitlines()[0])
+    assert record["held_mode"] == "0644"
+    assert record["private"] is False
