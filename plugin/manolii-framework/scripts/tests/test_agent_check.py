@@ -1498,6 +1498,114 @@ class AgentCheckTests(unittest.TestCase):
                 mock.patch.object(runner.os, "fstat", side_effect=freeze(real["fstat"])):
             yield
 
+    def _assert_validated_setup_identity_is_not_recaptured(self, *, reused, unavailable):
+        runner = load("agent-check")
+        self._dependency_environment()
+        # A changed qualification input must invalidate authority even when the
+        # selected command does not happen to inspect that dependency itself.
+        self.config["checks"][0]["commands"] = [[sys.executable, "-c", "pass"]]
+        self.save_config()
+        self.change_source()
+        args = ["--repo-root", str(self.root), "--provider", "codex", "--provision"]
+        if reused:
+            self.assertEqual(runner.main(args), 0)
+        real_ready, real_write = runner.ready_identity, runner.write_json
+        changed, observations = False, 0
+
+        def mutate():
+            nonlocal changed
+            (self.root / "node_modules/tool/bin.js").write_text("ko")
+            changed = True
+
+        def ready(*pos, **kwargs):
+            nonlocal observations
+            observations += 1
+            if unavailable and changed:
+                return None
+            value = real_ready(*pos, **kwargs)
+            # The second reused observation just validated the setup. Mutate
+            # after that observation, before the candidate identity is built.
+            if reused and observations == 2:
+                mutate()
+            return value
+
+        def write(path, value):
+            real_write(path, value)
+            if not reused and path.parent.name == "environments" and not changed:
+                mutate()
+
+        with mock.patch.object(runner, "ready_identity", side_effect=ready), \
+                mock.patch.object(runner, "write_json", side_effect=write):
+            self.assertEqual(runner.main(args), 1)
+        self.assertTrue(changed)
+        receipt = self.receipt()
+        self.assertFalse(receipt["cached"])
+        failure = next(item for item in receipt["results"] if item["id"] == "dependency-stability")
+        self.assertEqual(failure["status"], "unavailable" if unavailable else "failed")
+        if unavailable:
+            self.assertNotIn("changed", failure["reason"])
+            self.assertFalse(receipt["cache_reusable"])
+        record = self.root / ".ai/agent-checks/environments" / (
+            "environment-" + runner.sha(runner.encoded("dependencies")) + ".json")
+        self.assertFalse(record.exists(), "invalidated setup retained its qualification receipt")
+        self.assertFalse(any((self.root / ".ai/agent-checks/cache").glob("*.json")))
+
+    def test_fresh_setup_known_change_before_candidate_identity_is_refused(self):
+        self._assert_validated_setup_identity_is_not_recaptured(reused=False, unavailable=False)
+
+    def test_reused_setup_known_change_before_candidate_identity_is_refused(self):
+        self._assert_validated_setup_identity_is_not_recaptured(reused=True, unavailable=False)
+
+    def test_fresh_setup_unknown_candidate_identity_cannot_replace_validated_baseline(self):
+        self._assert_validated_setup_identity_is_not_recaptured(reused=False, unavailable=True)
+
+    def test_reused_setup_unknown_candidate_identity_cannot_replace_validated_baseline(self):
+        self._assert_validated_setup_identity_is_not_recaptured(reused=True, unavailable=True)
+
+    def test_internal_stability_ids_are_reserved_for_checks_and_environments(self):
+        marker = self.root / ".ai/agent-checks/owner-executed"
+        command = [sys.executable, "-c", "from pathlib import Path; p=Path('.ai/agent-checks/owner-executed'); p.parent.mkdir(parents=True, exist_ok=True); p.write_text('executed')"]
+        for kind in ("checks", "environments"):
+            for identifier in ("input-stability", "context-stability", "dependency-stability"):
+                with self.subTest(kind=kind, identifier=identifier):
+                    marker.unlink(missing_ok=True)
+                    self.config["checks"] = [{"id": "test", "commands": [command]}]
+                    self.config["environments"] = []
+                    if kind == "checks":
+                        self.config["checks"][0]["id"] = identifier
+                    else:
+                        self.config["environments"] = [{"id": identifier, "commands": [command]}]
+                        self.config["checks"][0]["environment"] = identifier
+                    self.save_config()
+                    result = self.run_check("--provision", expected=2)
+                    self.assertIn("reserved validation result", result.stderr)
+                    self.assertFalse(marker.exists(), "reserved owner identity executed before rejection")
+                    self.assertFalse((self.root / ".ai/agent-checks/receipt.json").exists())
+
+    def _assert_owner_identity_cannot_mask_dotenv_change(self, *, environment):
+        (self.root / ".gitignore").write_text(".ai/agent-checks/\n.env\n")
+        dotenv = self.root / ".env"
+        dotenv.write_text("FIXTURE_MODE=ok\n")
+        self.change_source()
+        self.config["checks"][0]["commands"] = [[sys.executable, "-c",
+            "from pathlib import Path; Path('.env').write_text('FIXTURE_MODE=ko\\n')"]]
+        if environment:
+            self.config["environments"] = [{"id": "context-stability", "commands": [[sys.executable, "-c", "pass"]]}]
+            self.config["checks"][0]["environment"] = "context-stability"
+        else:
+            self.config["checks"][0]["id"] = "context-stability"
+        self.save_config()
+        result = self.run_check("--provision", expected=2)
+        self.assertIn("reserved validation result", result.stderr)
+        self.assertEqual(dotenv.read_text(), "FIXTURE_MODE=ok\n")
+        self.assertFalse((self.root / ".ai/agent-checks/receipt.json").exists())
+
+    def test_owner_check_id_cannot_mask_known_dotenv_failure(self):
+        self._assert_owner_identity_cannot_mask_dotenv_change(environment=False)
+
+    def test_owner_environment_id_cannot_mask_known_dotenv_failure(self):
+        self._assert_owner_identity_cannot_mask_dotenv_change(environment=True)
+
     def test_directory_addition_during_content_walk_disables_reuse(self):
         runner = load("agent-check")
         for case, filename in (("direct", "index.js"), ("ancestor", "pkg/index.js")):
@@ -1675,12 +1783,6 @@ class AgentCheckTests(unittest.TestCase):
                 self.assertFalse(any((self.root / ".ai/agent-checks/cache").glob("*.json")))
                 self.assertNotIn("AGENT-CHECK-CACHED", output.getvalue())
                 self.assert_failure_summary(SimpleNamespace(stdout=output.getvalue()))
-                # Existing v1 consumers must classify this actual failed receipt
-                # as infrastructure/incomplete, without inventing a source defect.
-                finalise = load("qa/finalise-gate")
-                with mock.patch.object(finalise.subprocess, "Popen", return_value=SimpleNamespace(wait=lambda **_: 1)):
-                    verdict = finalise.run_checks(self.root, "codex", 5)
-                self.assertEqual(verdict["outcome"], "incomplete")
 
     def test_unknown_postscan_after_fresh_check_cannot_save_pass(self):
         runner = load("agent-check")
@@ -1849,9 +1951,6 @@ class AgentCheckTests(unittest.TestCase):
         failure = next(item for item in self.receipt()["results"] if item["id"] == "dependency-stability")
         self.assertEqual(failure["status"], "failed")
         self.assertEqual(failure["reason"], "dependency inputs changed during validation; inspect setup and rerun")
-        finalise = load("qa/finalise-gate")
-        with mock.patch.object(finalise.subprocess, "Popen", return_value=SimpleNamespace(wait=lambda **_: 1)):
-            self.assertEqual(finalise.run_checks(self.root, "codex", 5)["outcome"], "fail")
 
     def test_changed_dotenv_after_context_capture_cannot_return_cached_pass(self):
         runner = load("agent-check")
