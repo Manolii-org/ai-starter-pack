@@ -32,6 +32,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+from lib import delivery_component
+
 REPO = Path(__file__).resolve().parent.parent
 PLUGIN_NAME = "manolii-framework"  # kebab-case (plugin name constraint)
 PLUGIN_COMPONENTS = ("agents", "commands", "skills")
@@ -344,6 +346,18 @@ def assemble_hooks_and_scripts(rendered: Path, out: Path) -> dict:
         json.dumps(build_hooks_config(), indent=2) + "\n"
     )
     return counts
+
+
+def assemble_delivery_component(rendered: Path, out: Path) -> dict:
+    """Preserve the existing action/module layout and root-relative schemas."""
+    observed = delivery_component.verify(rendered)
+    for name in (*delivery_component.FILES, delivery_component.INPUTS):
+        source = rendered / name
+        destination = out / name
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, destination)
+    delivery_component.verify(out, expected_digest=observed["input_digest"])
+    return {"delivery_component": len(delivery_component.FILES)}
 
 
 def assemble_data(rendered: Path, out: Path) -> dict:
@@ -679,6 +693,13 @@ def main() -> None:
     build_framework = args.plugin in ("all", PLUGIN_NAME)
     build_om = args.plugin in ("all", OM_PLUGIN_NAME)
 
+    if build_framework:
+        if args.out:
+            # Fresh/drift builds must detect stale canonical provenance rather
+            # than silently repairing the source while reporting a clean build.
+            delivery_component.verify(REPO)
+        else:
+            delivery_component.write_inputs(REPO)
     rendered = render_template(args.install_mode)
     try:
         if build_framework:
@@ -686,6 +707,7 @@ def main() -> None:
                 else REPO / "plugin" / PLUGIN_NAME
             counts = assemble_plugin(rendered, out)
             counts.update(assemble_hooks_and_scripts(rendered, out))
+            counts.update(assemble_delivery_component(rendered, out))
             counts.update(assemble_data(rendered, out))
             counts.update(assemble_telemetry(out))
             verify(out, counts, rendered)

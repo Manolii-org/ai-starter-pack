@@ -222,7 +222,16 @@
         "plugin/manolii-framework/schemas/release-source-policy.v1.schema.json",
         "registry/platform/framework/schemas/release-source-policy.v1.schema.json",
         "scripts/tests/test_release_source_policy.py",
-        "scripts/tests/fixtures/release-manifest.c435.py"
+        "scripts/tests/fixtures/release-manifest.c435.py",
+        "scripts/lib/delivery_component.py",
+        "scripts/build-plugin.py",
+        "scripts/build-registry.py",
+        "scripts/bootstrap-mirror.py",
+        "tests/test_delivery_component_distribution.py",
+        "plugin/manolii-framework/.github/actions/validate-release-manifest/**",
+        "registry/platform/framework/.github/actions/validate-release-manifest/**",
+        "plugin/manolii-framework/scripts/lib/delivery_component.py",
+        "registry/platform/framework/scripts/lib/delivery_component.py"
       ],
       "tools": [
         "uv"
@@ -256,6 +265,14 @@
           "tests/test_copier_render.py",
           "-k",
           "test_rendered_readme_counts_match_rendered_tree or test_release_capability_distribution_boundary or test_agent_validation_base_uses_owner_ref"
+        ],
+        [
+          ".ai/agent-checks/release-venv/bin/python",
+          "-B",
+          "-m",
+          "pytest",
+          "-q",
+          "tests/test_delivery_component_distribution.py"
         ]
       ],
       "timeout_seconds": 180,
@@ -460,7 +477,10 @@
         "tests/test_native_guidance.py",
         ".claude/skills/autonomy-follow-through/**",
         "plugin/manolii-framework/scripts/lib/native_guidance.py",
-        "registry/platform/framework/scripts/lib/native_guidance.py"
+        "registry/platform/framework/scripts/lib/native_guidance.py",
+        "scripts/bootstrap-mirror.py",
+        "scripts/build-plugin.py",
+        "scripts/lib/delivery_component.py"
       ],
       "tools": [
         "uv"
