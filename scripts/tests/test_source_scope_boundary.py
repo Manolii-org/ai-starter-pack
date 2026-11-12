@@ -174,6 +174,49 @@ raise SystemExit(code)
             with self.assertRaises(self.runner.SourceScopeError):
                 self.runner.file_digest(Path("/synthetic-outside/data"))
 
+    def test_nested_dotenv_file_links_hold_before_scoped_owner_payload_reads(self):
+        # An ordinary local link still contributes its target bytes. A link
+        # encountered inside the dotenv directory walk must apply the same
+        # lexical/resolved owner guard as a directly requested file.
+        dotenv = self.root / ".env.d"
+        dotenv.mkdir()
+        local = dotenv / "local"
+        local.symlink_to(self.root / "src/value.py")
+        self.assertTrue(self.runner.dotenv_bytes(dotenv).startswith(b"directory\0"))
+        local.unlink()
+        with tempfile.TemporaryDirectory() as directory:
+            other = Path(directory)
+            (other / ".ai").mkdir()
+            (other / self.runner.SOURCE_SCOPE_POLICY).write_bytes(self.raw)
+            payload = other / "synthetic-value"
+            payload.write_bytes(b"entirely synthetic separately owned payload\n")
+            real_path_open, real_open = Path.open, open
+            opened = []
+
+            def path_open(path, *args, **kwargs):
+                if path.resolve() == payload:
+                    opened.append("Path.open")
+                return real_path_open(path, *args, **kwargs)
+
+            def builtin_open(path, *args, **kwargs):
+                if isinstance(path, (str, bytes, os.PathLike)) and Path(os.fsdecode(path)).resolve() == payload:
+                    opened.append("builtins.open")
+                return real_open(path, *args, **kwargs)
+
+            for relative in ("linked", "nested/linked"):
+                link = dotenv / relative
+                link.parent.mkdir(parents=True, exist_ok=True)
+                link.symlink_to(payload)
+                try:
+                    with self.subTest(relative=relative), \
+                         patch.object(Path, "open", path_open), \
+                         patch("builtins.open", builtin_open):
+                        with self.assertRaises(self.runner.SourceScopeError):
+                            self.runner.dotenv_bytes(dotenv)
+                        self.assertEqual(opened, [], "cross-owner payload opened before the hold")
+                finally:
+                    link.unlink()
+
     def test_stale_pass_and_mode_bypass_never_materialize_or_authorize(self):
         self.declare()
         receipt = self.root / ".ai/agent-checks/receipt.json"
@@ -938,7 +981,8 @@ class ScopeControlCompatibility(unittest.TestCase):
         lexical = self.root / "src/linked-input"
         lexical.symlink_to(payload)
         self.assertEqual(self.runner.file_digest(lexical), hashlib.sha256(raw).hexdigest())
-        self.assertEqual(self.runner.dotenv_bytes(lexical), b"regular\0" + raw)
+        self.assertEqual(self.runner.dotenv_bytes(lexical),
+                         b"regular-sha256\0" + hashlib.sha256(raw).hexdigest().encode("ascii"))
         self.assertTrue(self.runner.unreadable_state(lexical).startswith(b"unreadable\0"))
         missing = self.root / "src/missing-link"
         missing.symlink_to(external / "missing.bin")
@@ -1249,7 +1293,8 @@ class ScopeControlCompatibility(unittest.TestCase):
                     self.assertFalse(self.finalise.source_scope_declared(root))
                     self.assertEqual(self.finalise.git_toplevel(root), owner)
                     self.assertEqual(self.runner.file_digest(payload), hashlib.sha256(b"synthetic physical owner input\n").hexdigest())
-                    self.assertEqual(self.runner.dotenv_bytes(payload), b"regular\0synthetic physical owner input\n")
+                    self.assertEqual(self.runner.dotenv_bytes(payload), b"regular-sha256\0"
+                                     + hashlib.sha256(b"synthetic physical owner input\n").hexdigest().encode("ascii"))
         finally:
             os.chdir(previous)
 

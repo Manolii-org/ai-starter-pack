@@ -732,6 +732,12 @@ def _build_plan(args, plan: OutputPlan, *, requested_root: Path, recipe_path: Pa
     config = strict_json(recipe)
     if not isinstance(config, dict) or config.get("schema_version") != 1 or not config.get("base") or "checks" not in config:
         raise ValueError("owner recipes require schema_version=1, base and checks")
+    if (not isinstance(config["checks"], list)
+            or any(not isinstance(check, dict)
+                   or not isinstance(check.get("paths", ["*"]), list)
+                   or any(not isinstance(path, str) for path in check.get("paths", ["*"]))
+                   for check in config["checks"])):
+        raise ValueError("owner recipe checks must be objects with paths arrays of strings")
     receipt_path = plan.regular_path(safe(root, PROVENANCE))
     previous = None
     if explicit and receipt_path.exists():

@@ -529,7 +529,7 @@ def inside(root: Path, value: str) -> Path:
     return path
 
 
-def require_unfiltered_tracked_inputs(root: Path) -> set[str]:
+def require_unfiltered_tracked_inputs(root: Path, *, text_checkout_lf: bool = False) -> set[str]:
     """Reject Git metadata that can conceal raw working-file changes."""
     require_source_scope(root)
     names = subprocess.run(["git", "ls-files", "-z"], cwd=root,
@@ -558,7 +558,11 @@ def require_unfiltered_tracked_inputs(root: Path) -> set[str]:
         if tag.islower() or (tag == b"S" and os.path.lexists(path)):
             raise ValueError("Git index flags hide tracked working-file changes; "
                              "clear assume-unchanged/skip-worktree on present paths")
-    conversions = {b"text", b"crlf", b"eol", b"ident", b"working-tree-encoding"}
+    conversions = {b"crlf", b"eol", b"ident", b"working-tree-encoding"}
+    # A text declaration alone cannot change canonical bytes on LF checkout.
+    # Explicit eol/ident/encoding and all global CRLF cases remain conservative.
+    if not text_checkout_lf:
+        conversions.add(b"text")
     return {os.fsdecode(attributes[i]) for i in range(0, len(attributes), 3)
             if attributes[i + 1] in conversions}
 
@@ -744,11 +748,13 @@ def working_tree_matches_base(root: Path, name: str, actual: tuple, baseline: tu
 
 def plan_for(root: Path, config: dict, base: str | None = None) -> dict:
     require_source_scope(root)
-    conversion_paths = require_unfiltered_tracked_inputs(root)
     # Include conservative potential conversions even when bytes equal the
     # canonical blob (e.g. an expanded ident replaced by literal $Id$).
     autocrlf = git(root, "config", "--default=false", "--get", "core.autocrlf").strip().lower()
     global_conversion = autocrlf not in {b"false", b"no", b"off", b"0", b"input"}
+    eol = git(root, "config", "--default=native", "--get", "core.eol").strip().lower()
+    lf_checkout = not global_conversion and (eol == b"lf" or (eol == b"native" and os.name != "nt"))
+    conversion_paths = require_unfiltered_tracked_inputs(root, text_checkout_lf=lf_checkout)
     ref = base or config["base"]
     base_sha = git(root, "merge-base", ref, "HEAD").decode().strip()
     changed: set[str] = set()
@@ -1106,7 +1112,7 @@ def readiness_status(previous: str | None, current: str | None) -> str:
     return "unavailable" if previous is None or current is None else "failed"
 
 
-def dotenv_identity(root: Path, plan: dict, key: bytes) -> dict:
+def dotenv_identity(root: Path, plan: dict, key: bytes) -> dict[str, str | None]:
     """Keyed digests of ignored .env* files where checks and setup run.
 
     Frameworks read them during builds and tests, but Git ignores them, so the
@@ -1114,22 +1120,42 @@ def dotenv_identity(root: Path, plan: dict, key: bytes) -> dict:
     """
     require_source_scope(root)
     directories = {"."} | {item.get("cwd", ".") for item in [*plan["checks"], *plan["environments"]]}
-    result = {}
+    result: dict[str, str | None] = {}
+    budget = [READY_IDENTITY_MAX_ENTRIES, READY_IDENTITY_MAX_BYTES]
     for directory in sorted(directories):
-        for path in sorted(inside(root, directory).glob(".env*")):
+        paths = []
+        try:
+            with os.scandir(inside(root, directory)) as entries:
+                for entry in entries:
+                    budget[0] -= 1
+                    if budget[0] < 0:
+                        result[f"{directory}/.env*"] = None
+                        return result
+                    if entry.name.startswith(".env"):
+                        paths.append(Path(entry.path))
+        except OSError:
+            result[f"{directory}/.env*"] = None
+            continue
+        for path in sorted(paths):
             name = path.relative_to(root).as_posix()
+            data: bytes | None
             if path.is_symlink():
+                budget[0] -= 1
+                if budget[0] < 0:
+                    result[name] = None
+                    continue
                 # Bind the link text and what the link resolves to: the
                 # framework reads the target's bytes, not the link.
                 try:
-                    data = b"symlink\0" + os.fsencode(os.readlink(path)) + b"\0"
+                    link_data = b"symlink\0" + os.fsencode(os.readlink(path)) + b"\0"
                 except OSError:
                     data = b"symlink\0" + unreadable_state(path)
                 else:
-                    data += dotenv_bytes(path) if path.exists() else b"dangling"
+                    target = dotenv_bytes(path, budget=budget) if path.exists() else b"dangling"
+                    data = link_data + target if target is not None else None
             else:
-                data = dotenv_bytes(path)
-            result[name] = hmac.new(key, data, hashlib.sha256).hexdigest()
+                data = dotenv_bytes(path, budget=budget)
+            result[name] = hmac.new(key, data, hashlib.sha256).hexdigest() if data is not None else None
     return result
 
 
@@ -1161,18 +1187,42 @@ def file_digest(path: Path) -> str:
         return unreadable_state(path).hex()
 
 
-def dotenv_bytes(path: Path) -> bytes:
+def dotenv_bytes(path: Path, *, budget: list[int] | None = None) -> bytes | None:
     """Contents of a .env* file, or of every file under a .env* directory.
 
     Unreadable entries bind their visible state rather than blocking the run.
     A link inside a directory binds its text and, when it resolves to a file,
     that file's contents; links to directories are not followed, so a link
-    cycle cannot loop.
+    cycle cannot loop. Shared entry/byte exhaustion returns None, never a
+    reusable identity; all payload reads are bounded before growth.
     """
     require_content_path_scope(path)
+    if budget is None:
+        budget = [READY_IDENTITY_MAX_ENTRIES, READY_IDENTITY_MAX_BYTES]
+
+    def digest_file(file: Path) -> str:
+        require_content_path_scope(file)
+        details = file.stat()
+        if details.st_size > budget[1]:
+            raise OverflowError("dotenv identity byte limit")
+        digest = hashlib.sha256()
+        try:
+            with file.open("rb") as stream:
+                while block := stream.read(min(1 << 20, budget[1] + 1)):
+                    budget[1] -= len(block)
+                    if budget[1] < 0:
+                        raise OverflowError("dotenv identity byte limit")
+                    digest.update(block)
+            return digest.hexdigest()
+        except OSError:
+            return unreadable_state(file).hex()
+
     try:
+        budget[0] -= 1
+        if budget[0] < 0:
+            return None
         if path.is_file():
-            return b"regular\0" + path.read_bytes()
+            return b"regular-sha256\0" + digest_file(path).encode("ascii")
         if not path.is_dir():
             return b"other\0"
         rows = []
@@ -1181,7 +1231,14 @@ def dotenv_bytes(path: Path) -> bytes:
             directory, prefix = stack.pop()
             require_content_path_scope(directory)
             try:
-                entries = sorted(directory.iterdir())
+                entries = []
+                with os.scandir(directory) as stream:
+                    for directory_entry in stream:
+                        budget[0] -= 1
+                        if budget[0] < 0:
+                            return None
+                        entries.append(Path(directory_entry.path))
+                entries.sort()
             except OSError:
                 rows.append([prefix, "dir", unreadable_state(directory).hex()])
                 continue
@@ -1194,16 +1251,18 @@ def dotenv_bytes(path: Path) -> bytes:
                         rows.append([relative, "link", unreadable_state(entry).hex()])
                         continue
                     if entry.is_file():
-                        row.append(file_digest(entry))
+                        row.append(digest_file(entry))
                     rows.append(row)
                 elif entry.is_dir():
                     rows.append([relative, "dir"])
                     stack.append((entry, relative + "/"))
                 elif entry.is_file():
-                    rows.append([relative, "file", file_digest(entry)])
+                    rows.append([relative, "file", digest_file(entry)])
                 else:
                     rows.append([relative, "other"])
         return b"directory\0" + encoded(sorted(rows))
+    except OverflowError:
+        return None
     except OSError:
         return unreadable_state(path)
 
@@ -1378,7 +1437,7 @@ def main(argv=None) -> int:
                 report_context_change(environment["id"], changed)
             else:
                 write_json(env_receipt, {"digest": validated_digest, "result": result, "ready": validated_ready})
-        identity = {"schema": SCHEMA, "source": sha(Path(__file__).read_bytes()),
+        identity: dict = {"schema": SCHEMA, "source": sha(Path(__file__).read_bytes()),
                     "config": config, "plan": plan, "tools": tools, "snapshot": before,
                     "dotenv": dotenv_identity(root, plan, key),
                     # A cached PASS is bound to the dependency trees it ran
@@ -1389,7 +1448,8 @@ def main(argv=None) -> int:
                         "checks": {item["id"]: execution_environment(item, inherited) for item in plan["checks"]},
                         "environments": {item["id"]: execution_environment(item, inherited) for item in plan["environments"]}})}
         cache_reusable = (cache_reusable and len(ready_identities) == len(plan["environments"])
-                          and all(value is not None for value in ready_identities.values()))
+                          and all(value is not None for value in ready_identities.values())
+                          and all(value is not None for value in identity["dotenv"].values()))
         candidate_digest = sha(encoded(identity))
         cache = state / "cache" / f"{candidate_digest}.json"
         unavailable = [name for name, version in tools.items() if version == "unavailable"]
@@ -1406,6 +1466,8 @@ def main(argv=None) -> int:
             # Recheck after reading a cache entry as well as after fresh checks.
             source_stable = snapshot(root) == before
             current_dotenv = dotenv_identity(root, plan, key)
+            if any(value is None for value in current_dotenv.values()):
+                cache_reusable = False
             if current_dotenv != identity["dotenv"]:
                 context_stable, changed_context = False, ["dotenv"]
             else:

@@ -8,6 +8,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import resource
 import socket
 import stat
 import subprocess
@@ -841,12 +842,46 @@ print('low-limit refusal before any admitted source payload or output')
             self.assertEqual(list(self.destination.iterdir()), [])
 
     def test_real_sealed_options_cross_host_arg_max_without_inherited_control_fd(self):
+        # A runner's ARG_MAX can exceed our independent byte/count ceilings.
+        # Lower only a dedicated child's stack limit so the real kernel argv
+        # boundary is exercised inside those unchanged admission ceilings.
+        limits = resource.getrlimit(resource.RLIMIT_STACK)
+        before = set(os.listdir("/proc/self/fd"))
+        driver = self.root / "bounded-arg-max.py"
+        driver.write_text("""import os,resource,sys,unittest
+sys.path.insert(0, sys.argv[1])
+import test_source_executor as tested
+old = resource.getrlimit(resource.RLIMIT_STACK)
+bounded = 512 * 1024
+assert old[0] == resource.RLIM_INFINITY or old[0] >= bounded
+assert old[1] == resource.RLIM_INFINITY or old[1] >= bounded
+resource.setrlimit(resource.RLIMIT_STACK, (bounded, old[1]))
+case = tested.ResourceAdmissionTests('_assert_real_sealed_options_cross_host_arg_max_without_inherited_control_fd')
+result = unittest.TextTestRunner(verbosity=2).run(unittest.TestSuite([case]))
+assert resource.getrlimit(resource.RLIMIT_STACK) == (bounded, old[1])
+raise SystemExit(0 if result.wasSuccessful() else 1)
+""")
+        result = subprocess.run([sys.executable, str(driver), str(Path(__file__).parent)],
+            env={"PATH": "/usr/bin:/bin", "PYTHONDONTWRITEBYTECODE": "1", "TMPDIR": str(self.root)},
+            capture_output=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        proof = json.loads(result.stdout)
+        self.assertGreater(proof["option_bytes"], proof["arg_max"])
+        self.assertLess(proof["option_bytes"], executor.MAX_ARGUMENT_BYTES)
+        self.assertLess(proof["option_count"], executor.MAX_ARGUMENT_COUNT)
+        self.assertEqual(proof["unsealed_errno"], errno.E2BIG)
+        self.assertEqual(proof["stack_soft"], 512 * 1024)
+        self.assertEqual(resource.getrlimit(resource.RLIMIT_STACK), limits)
+        self.assertEqual(set(os.listdir("/proc/self/fd")), before)
+
+    def _assert_real_sealed_options_cross_host_arg_max_without_inherited_control_fd(self):
         # Repeated valid directory options exceed execve's byte limit without
         # enlarging the command/environment or introducing an unpinned tool.
         directory = "/source/" + "/".join(["a" * 200] * 4)
         self.prepare()
         mount = executor._mount_arguments
         observed = []
+        counts = []
         def expanded(paths, descriptors):
             options = mount(paths, descriptors)
             before = options.index("--dev")
@@ -861,11 +896,18 @@ print('low-limit refusal before any admitted source payload or output')
                                      stderr=subprocess.STDOUT, close_fds=True)
                 self.assertEqual(old_shape.exception.errno, errno.E2BIG)
             observed.append(len(raw))
+            counts.append(len(options))
             return options
+        before = set(os.listdir("/proc/self/fd"))
         with patch.object(executor, "_mount_arguments", expanded):
             result = self.run_selected()
         self.assertEqual(result["outcome"], "passed", result)
         self.assertEqual(len(observed), 2)  # pre-capture upper bound and actual FD stream
+        self.assertEqual(set(os.listdir("/proc/self/fd")), before)
+        print(json.dumps({"arg_max": os.sysconf("SC_ARG_MAX"), "option_bytes": observed[-1],
+            "option_count": counts[-1],
+            "unsealed_errno": errno.E2BIG,
+            "stack_soft": resource.getrlimit(resource.RLIMIT_STACK)[0]}))
 
     def test_success_and_failure_expose_only_caller_owned_root_outside_json(self):
         self.prepare()
