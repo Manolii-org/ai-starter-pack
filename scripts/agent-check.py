@@ -701,14 +701,14 @@ def readiness_status(previous: str | None, current: str | None) -> str:
     return "unavailable" if previous is None or current is None else "failed"
 
 
-def dotenv_identity(root: Path, plan: dict, key: bytes) -> dict:
+def dotenv_identity(root: Path, plan: dict, key: bytes) -> dict[str, str | None]:
     """Keyed digests of ignored .env* files where checks and setup run.
 
     Frameworks read them during builds and tests, but Git ignores them, so the
     candidate snapshot does not. Keyed so cache files never hold a bare hash.
     """
     directories = {"."} | {item.get("cwd", ".") for item in [*plan["checks"], *plan["environments"]]}
-    result = {}
+    result: dict[str, str | None] = {}
     budget = [READY_IDENTITY_MAX_ENTRIES, READY_IDENTITY_MAX_BYTES]
     for directory in sorted(directories):
         paths = []
@@ -726,6 +726,7 @@ def dotenv_identity(root: Path, plan: dict, key: bytes) -> dict:
             continue
         for path in sorted(paths):
             name = path.relative_to(root).as_posix()
+            data: bytes | None
             if path.is_symlink():
                 budget[0] -= 1
                 if budget[0] < 0:
@@ -734,12 +735,12 @@ def dotenv_identity(root: Path, plan: dict, key: bytes) -> dict:
                 # Bind the link text and what the link resolves to: the
                 # framework reads the target's bytes, not the link.
                 try:
-                    data = b"symlink\0" + os.fsencode(os.readlink(path)) + b"\0"
+                    link_data = b"symlink\0" + os.fsencode(os.readlink(path)) + b"\0"
                 except OSError:
                     data = b"symlink\0" + unreadable_state(path)
                 else:
                     target = dotenv_bytes(path, budget=budget) if path.exists() else b"dangling"
-                    data = data + target if target is not None else None
+                    data = link_data + target if target is not None else None
             else:
                 data = dotenv_bytes(path, budget=budget)
             result[name] = hmac.new(key, data, hashlib.sha256).hexdigest() if data is not None else None
@@ -815,11 +816,11 @@ def dotenv_bytes(path: Path, *, budget: list[int] | None = None) -> bytes | None
             try:
                 entries = []
                 with os.scandir(directory) as stream:
-                    for entry in stream:
+                    for directory_entry in stream:
                         budget[0] -= 1
                         if budget[0] < 0:
                             return None
-                        entries.append(Path(entry.path))
+                        entries.append(Path(directory_entry.path))
                 entries.sort()
             except OSError:
                 rows.append([prefix, "dir", unreadable_state(directory).hex()])
@@ -1013,7 +1014,7 @@ def main(argv=None) -> int:
                 report_context_change(environment["id"], changed)
             else:
                 write_json(env_receipt, {"digest": validated_digest, "result": result, "ready": validated_ready})
-        identity = {"schema": SCHEMA, "source": sha(Path(__file__).read_bytes()),
+        identity: dict = {"schema": SCHEMA, "source": sha(Path(__file__).read_bytes()),
                     "config": config, "plan": plan, "tools": tools, "snapshot": before,
                     "dotenv": dotenv_identity(root, plan, key),
                     # A cached PASS is bound to the dependency trees it ran
