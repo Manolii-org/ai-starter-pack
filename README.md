@@ -19,13 +19,23 @@ uses: Manolii-org/ai-starter-pack/.github/workflows/ci-reusable.yml@321810f55846
 # /plugin install manolii-framework@v1.25.1
 ```
 
-Pin executable workflows and their `pack_ref` inputs to the same full
-40-character release commit SHA, with a `# v1.25.1` comment. Version tags are
-immutable release discovery and compatibility identities; they do not replace
-an exact executable source pin. The Renovate preset's `manolii-ai-starter-pack`
-group prepares updates to workflow SHA pins and version-commented `pack_ref`
-inputs together in one PR through the consumer's owning gates. Publication
-alone does not qualify or activate any consumer.
+For ordinary callers, pin executable workflows and their `pack_ref` inputs to
+the same full 40-character release commit SHA, with a `# v1.25.1` comment.
+Version tags are immutable release discovery and compatibility identities;
+executable workflow pins stay exact SHAs. Explicitly opted-in Jev shadow callers
+use the [full patch release-tag exception](.github/workflows/REUSABLE-WORKFLOWS.md#opt-in-jev-shadow-exception)
+for `pack_ref`; the shadow stays off by default.
+
+For ordinary SHA-form inputs, a preset revision containing the `pack_ref`
+manager groups workflow SHA and version-commented `pack_ref` updates in the
+`manolii-ai-starter-pack` PR through
+the consumer's owning gates. The older `#v1.25.1` preset does not include that
+manager: a workflow-pin update alone does not update its `pack_ref`. Until the
+consumer adopts a preset revision containing the manager, the owning adoption
+agent must automatically prepare both pins together in one adoption PR and
+verify that they select the same release commit. This is required adoption
+behaviour, not evidence that every consumer has installed it. Publication alone
+does not qualify or activate any consumer.
 
 Renovate preset: `extends: ["github>Manolii-org/ai-starter-pack"]` (optionally pin `#v1.25.1`).
 

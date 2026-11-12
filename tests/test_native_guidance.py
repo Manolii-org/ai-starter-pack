@@ -65,7 +65,7 @@ def continuation_consumer(consumer):
     root, source = consumer
     with (root / "ai-manifest.yaml").open("a") as handle:
         handle.write("feature_flags: {native_guidance_continuation: true}\n")
-    for leaf in ("SKILL.md", "evals/cases.json"):
+    for leaf in ("SKILL.md", "evals/cases.json", "review-evidence.md"):
         path = source / "registry/platform/framework/skills/autonomy-follow-through" / leaf
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes((REPO / ".claude/skills/autonomy-follow-through" / leaf).read_bytes())
@@ -85,6 +85,8 @@ def test_continuation_installs_and_cannot_be_silently_removed(consumer, entrypoi
     assert result.returncode == 0, result.stdout + result.stderr
     path = ".claude/skills/autonomy-follow-through/SKILL.md"
     assert (root / path).read_bytes() == (source / "registry/platform/framework/skills/autonomy-follow-through/SKILL.md").read_bytes()
+    companion = ".claude/skills/autonomy-follow-through/review-evidence.md"
+    assert (root / companion).read_bytes() == (source / "registry/platform/framework/skills/autonomy-follow-through/review-evidence.md").read_bytes()
     assert (root / "AGENTS.md").read_bytes().endswith(local)
     installed = files(root)
     assert run(consumer, "--check", entrypoint=entrypoint).returncode == 0
@@ -102,6 +104,14 @@ def test_missing_continuation_source_refuses_the_whole_install(consumer):
     (source / "registry/platform/framework/skills/autonomy-follow-through/evals/cases.json").unlink()
     before = files(root)
     assert run(consumer, "--apply").returncode == 1
+    assert files(root) == before
+
+
+def test_missing_review_companion_refuses_the_whole_install(consumer):
+    root, source = continuation_consumer(consumer)
+    (source/'registry/platform/framework/skills/autonomy-follow-through/review-evidence.md').unlink()
+    before = files(root)
+    assert run(consumer, '--apply').returncode == 1
     assert files(root) == before
 
 
@@ -130,6 +140,7 @@ def test_mirror_continuation_refresh_keeps_framework_version_and_private_assets(
     target = registry / "platform/framework/skills/autonomy-follow-through/SKILL.md"
     assert target.read_bytes() == (REPO / ".claude/skills/autonomy-follow-through/SKILL.md").read_bytes()
     assert builder.refresh_policy(registry, check=True, include_continuation=True) == 0
+    assert (registry/'platform/framework/scripts/lib/native_guidance.py').read_bytes() == (REPO/'scripts/lib/native_guidance.py').read_bytes()
 
 
 @pytest.mark.parametrize("entrypoint", [

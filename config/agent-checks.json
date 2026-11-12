@@ -400,7 +400,7 @@
         ".github/workflows/e2e-playwright-reusable.yml",
         ".github/workflows/email-capture-live-conformance.yml",
         ".github/workflows/integration-admission-reusable.yml",
-        ".github/workflows/pr-autofix-loop*.yml",
+        ".github/workflows/pr-autofix*.yml",
         ".github/workflows/setup-env-secret.yml",
         ".github/workflows/static-review.yml",
         "tests/test_autofix_hardening.py",
@@ -415,7 +415,23 @@
         "tests/test_tier_reusables.py",
         "tests/test_coverage_ratchet_activation.py",
         "tests/test_guard_check.py",
-        "tests/test_litellm_product_asset.py"
+        "tests/test_litellm_product_asset.py",
+        "scripts/ci/autofix-*",
+        "scripts/sync-autofix-control.py",
+        "tests/test_autofix_custody.py",
+        "tests/test_autofix_reusable_yaml.py",
+        "tests/test_reusable_matrix.py",
+        "tests/test_routine_ci_repair_policy.py",
+        "scripts/gen-reusable-matrix.py",
+        ".github/workflows/REUSABLE-WORKFLOWS.md",
+        ".claude/skills/autonomy-follow-through/**",
+        "scripts/check-pinned-uses.py",
+        ".github/workflows/workflow-security.yml",
+        ".github/workflows/workflow-security-reusable.yml",
+        "tests/test_workflow_security.py",
+        "tests/test_action_pins.py",
+        "scripts/ci/autofix-event-gate.sh",
+        "tests/fixtures/autofix/**"
       ],
       "tools": [
         "python"
@@ -441,7 +457,17 @@
           "tests/test_tier_reusables.py",
           "tests/test_coverage_ratchet_activation.py",
           "tests/test_guard_check.py",
-          "tests/test_litellm_product_asset.py"
+          "tests/test_litellm_product_asset.py",
+          "tests/test_autofix_custody.py",
+          "tests/test_autofix_reusable_yaml.py",
+          "tests/test_reusable_matrix.py",
+          "tests/test_routine_ci_repair_policy.py",
+          "tests/test_workflow_security.py",
+          "tests/test_action_pins.py"
+        ],
+        [
+          "python3",
+          "scripts/check-pinned-uses.py"
         ]
       ],
       "ci_sources": [
@@ -459,7 +485,13 @@
         "tests/test_registry.py",
         "tests/_registry_cases_*.py",
         "registry/pack-surface-allowlist.txt",
-        "config/agent-checks.json"
+        "config/agent-checks.json",
+        "scripts/lib/native_guidance.py",
+        "scripts/build-registry.py",
+        "tests/test_native_guidance.py",
+        ".claude/skills/autonomy-follow-through/**",
+        "plugin/manolii-framework/scripts/lib/native_guidance.py",
+        "registry/platform/framework/scripts/lib/native_guidance.py"
       ],
       "tools": [
         "uv"

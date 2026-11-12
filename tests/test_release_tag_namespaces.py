@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import json
 import importlib.util
 import subprocess
@@ -319,3 +320,57 @@ def test_tag_is_annotated_with_optional_notes() -> None:
     run = STEPS["Create tag ref"]["run"]
     assert "/git/tags" in run and "os.environ['NOTES'] or 'Release '" in run
     assert STEPS["Create tag ref"]["env"]["NOTES"] == "${{ inputs.notes }}"
+
+
+def test_documented_shadow_exception_matches_actual_tag_gate_and_paired_commit(tmp_path):
+    assessment = yaml.safe_load((ROOT / ".github/workflows/pr-assessment-reusable.yml").read_text())
+    inputs = assessment[True]["workflow_call"]["inputs"]
+    assert inputs["jev_judge_shadow"]["default"] == "off"
+    steps = [step for job in assessment["jobs"].values() for step in job.get("steps", [])]
+    gate = next(step for step in steps if step.get("id") == "jev_gate")
+    assert "inputs.jev_judge_shadow == 'on'" in gate["if"]
+    assert "vars.JEV_ENABLED_JUDGE_FINDING_SHADOW == 'true'" in gate["if"]
+    assert "env" in gate and gate["env"] == {"PACK_REF": "${{ inputs.pack_ref }}"}
+    for index, (ref, expected) in enumerate((("a" * 40, False), ("v1.25.1", True), ("main", False))):
+        output = tmp_path / ("shadow-gate-" + str(index))
+        result = subprocess.run(["bash", "-c", gate["run"]], capture_output=True, text=True, timeout=10,
+                                env={"PATH": os.defpath, "PACK_REF": ref, "GITHUB_OUTPUT": str(output)})
+        assert result.returncode == 0
+        assert (output.exists() and output.read_text() == "ok=true\n") is expected
+    # Real Git distinguishes a verified immutable tag/uses pair from an alias mismatch.
+    repo, retained, selected = _repository(tmp_path)
+    _git(repo, "tag", "-a", "v1.25.1", "-m", "Synthetic immutable patch release", selected)
+    assert _git(repo, "rev-parse", "v1.25.1^{}") == selected
+    assert _git(repo, "rev-parse", "v1^{}") == retained != selected
+    assert _validate("v1.25.1") == 0 and _validate("v1") != 0
+    guide = (ROOT / ".github/workflows/REUSABLE-WORKFLOWS.md").read_text()
+    exception = " ".join(guide.split("#### Opt-in Jev shadow exception", 1)[1].split("The hydration list", 1)[0].split())
+    for claim in ("`off` by default", "rejects a raw", "owning adoption agent must automatically",
+                  "full patch release tag", "same commit", "Hold a mismatched pair",
+                  "raw-SHA path is not implemented"):
+        assert claim in exception
+    assert "pack_ref: v1.25.1" in exception
+    assert "321810f558463b2363d3372d669efcd3ea8283ec" in exception
+    assert "legacy gate accepts their shape" in exception
+
+
+def test_legacy_preset_guidance_requires_automatic_paired_adoption_without_manager_promise():
+    preset = json.loads((ROOT / "default.json").read_text())
+    manager = next(manager for manager in preset["customManagers"]
+                   if "pack_ref" in manager["description"])
+    pattern = re.compile(re.sub(r"\(\?<([A-Za-z][A-Za-z0-9_]*)>", r"(?P<\1>", manager["matchStrings"][0]))
+    line = "pack_ref: " + "a" * 40 + " # v1.25.1"
+    assert pattern.search(line).groupdict() == {"currentDigest": "a" * 40, "currentValue": "v1.25.1"}
+    assert not pattern.search("pack_ref: v1.25.1")
+    # A preset without this manager cannot promise a paired hydration-pin update.
+    legacy_managers = [item for item in preset["customManagers"] if item is not manager]
+    assert not any("pack_ref" in item.get("description", "") for item in legacy_managers)
+    readme = (ROOT / "README.md").read_text()
+    pins = " ".join(readme.split("## Consumer pins", 1)[1].split("### Tag namespaces", 1)[0].split())
+    for claim in ("preset revision containing the `pack_ref` manager", "older `#v1.25.1` preset does not include",
+                  "a workflow-pin update alone does not update", "owning adoption agent must automatically",
+                  "both pins together in one adoption PR", "same release commit", "not evidence that every consumer"):
+        assert claim in pins
+    assert "full patch release-tag exception" in pins and "shadow stays off by default" in pins
+    assert "#opt-in-jev-shadow-exception" in pins and "For ordinary SHA-form inputs" in pins
+    assert not re.search(r"(?i)(?:must|need to|should) update[^.]*manually", pins)
