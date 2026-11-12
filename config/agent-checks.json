@@ -379,7 +379,10 @@
         "tests/test_tier_reusables.py",
         "tests/test_coverage_ratchet_activation.py",
         "tests/test_guard_check.py",
-        "tests/test_litellm_product_asset.py"
+        "tests/test_litellm_product_asset.py",
+        "scripts/ci/autofix-*",
+        "scripts/sync-autofix-control.py",
+        "tests/test_autofix_custody.py"
       ],
       "tools": [
         "python"
@@ -405,7 +408,8 @@
           "tests/test_tier_reusables.py",
           "tests/test_coverage_ratchet_activation.py",
           "tests/test_guard_check.py",
-          "tests/test_litellm_product_asset.py"
+          "tests/test_litellm_product_asset.py",
+          "tests/test_autofix_custody.py"
         ]
       ],
       "ci_sources": [

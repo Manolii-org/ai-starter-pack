@@ -146,14 +146,27 @@ Keep existing full-framework manifests, runtime pins, provider settings and loca
 release instructions. Report installed, loaded and behavior-verified independently.
 
 Enable `feature_flags.native_guidance_continuation: true` in the policy manifest
-to deliver the detailed continuation skill and its cases through the same checked
+to deliver the detailed continuation skill, review-evidence companion and cases through the same checked
 writer. The default three-skill mode remains supported. Preview private-mirror
 refresh with `build-registry.py --policy-only --include-continuation
 --registry-root <mirror>/registry --check`; omit `--check` to apply. This changes
-only eight public policy assets, preserving the mirror's framework version and
+only the selected public policy assets, preserving the mirror's framework version and
 universe content. A previously managed continuation asset cannot be silently
 removed by disabling the option or running an older installer.
 
 The manifest flag selects consumer installation; mirror refresh selects assets
 independently with `--include-continuation`. Select both for the detailed-skill
 rollout.
+
+This flag installs policy, not a running owner client, event broker or checkpoint
+runtime. Qualify those separately on the actual owning host. Missing transport
+holds future monitoring; it does not stop independent authorized implementation.
+The review companion is required and uses the same pin, atomic-write and managed
+ownership checks as the skill. Missing companion content fails the whole install
+before any consumer file changes.
+
+Continuation refresh also carries the matching native-policy writer. Adopt the
+resolver entrypoint, writer, skill and companion together: older installers copy
+only the skill/cases and cannot satisfy this contract. Review private-mirror and
+consumer changes before application; retain local provider/authority controls and
+existing owners. Installing these assets is not behavioral/runtime qualification.

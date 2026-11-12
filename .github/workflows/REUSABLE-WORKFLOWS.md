@@ -189,7 +189,7 @@ table.
 | **migration-run-gate-reusable** | `db_image` (req), `db_ports_json` (req), `db_env_json` (req), `db_options=''`, `migrations_env_json` (req), `workdir=.`, `adapter=alembic`, `python_version=3.12`, `runs_on=ubuntu-latest`, `install_command` (req), `setup_command=''`, `run_prefix=''`, `downgrade_steps=1`, `alembic_check=false: boolean`, `url_env_var=ALEMBIC_DATABASE_URL` | none | none |
 | **outcome-check-reusable** | `outcome` (req), `operation` (req), `summary` (req), `head_sha=''` | none | none |
 | **pr-assessment-reusable** | `provider_mode=anthropic`, `litellm_proxy_url=''`, `model=''`, `runs_on=ubuntu-latest`, `pack_ref=v1`, `trusted_sync_author_id=215220684: number`, `jev_judge_shadow=off`, `jev_entity=''` | `ANTHROPIC_API_KEY`, `LITELLM_MASTER_KEY`, `JEV_TYPESAFE_API_KEY` | none |
-| **pr-autofix-loop-reusable** | `provider_mode=anthropic`, `litellm_proxy_url=''`, `model=''`, `runs_on=ubuntu-latest`, `max_successful_fixes=1`, `trusted_agent_bots=''` | `ANTHROPIC_API_KEY`, `LITELLM_MASTER_KEY`, `GH_PAT` | `activation` |
+| **pr-autofix-loop-reusable** | `provider_mode=anthropic`, `litellm_proxy_url=''`, `model=''`, `runs_on=ubuntu-latest`, `max_successful_fixes=1`, `trusted_agent_bots=''` | `ANTHROPIC_API_KEY`, `LITELLM_MASTER_KEY`, `GH_PAT` | `activation`, `publication`, `published_sha` |
 | **pre-production-tier-reusable** | `gates` (req), `budget_minutes=45: number`, `job_timeout_minutes=60: number`, `runs_on=ubuntu-latest`, `max_parallel=4: number`, `environment=''`, `checkout_fetch_depth=0: number`, `open_issue_on_failure=false: boolean` | `GATE_SECRETS` | `verdict`, `breakdown` |
 | **restore-drill-reusable** | `resource_group` (req), `sql_server` (req), `source_database` (req), `sanity_queries=SELECT COUNT(*) AS table_count FROM INFORMATION_SCHEMA.TABLES`, `db_auth=sql-auth`, `sqlcmd_version=1.9.0`, `sqlcmd_sha256=b896bac71cf6ad8feca125bb42be61999116d8566a078ed475893372ccf8c0f2`, `timeout_minutes=45: number`, `runs_on=ubuntu-latest` | `DRILL_SQL_USER`, `DRILL_SQL_PASSWORD`, `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID` | none |
 | **secret-scan-reusable** | `runs_on=ubuntu-latest`, `node_version=24`, `python_version=3.12`, `require_gitleaks_license=false: boolean`, `npm_audit_omit_dev=false: boolean`, `gitleaks_version=8.30.0`, `fail_on_inert=false: boolean` | `GITLEAKS_LICENSE` | `npm_audit_activation`, `pip_audit_activation` |
@@ -633,7 +633,17 @@ jobs:
 Thin caller for review-comment Autofix. **Keep `runs_on` at `ubuntu-latest`**
 (hosted control-plane). See `docs/fly-runner-setup.md`.
 
-Caller owns triggers + concurrency. OSS / Buro universes use `provider_mode: proxy`.
+Caller owns triggers and concurrency, and selects its entity's approved provider.
+The existing anthropic/proxy executor is excluded when a verified retained-session
+claim is present. Never change provider just to resume a blocked native owner.
+
+`activation` remains the legacy execution-file signal, not successful handling. Additive
+`publication` and `published_sha` outputs report verified controller publication.
+The editor uses read-only code credentials; optional `GH_PAT` is available only
+to the trusted publisher. Without it, local repair can proceed and unpublished
+Git objects are retained for seven days, but publication remains unfinished.
+New-head CI/review/merge and the parent outcome require separate verification.
+See [custody and publication](../../docs/pr-autofix-loop-policy.md).
 
 **Optional `workflow_run`:** The reusable supports `workflow_run` triggers to retry
 failed CI (e.g., when Static Review, PR Assessment, or Secret Scan workflows fail).

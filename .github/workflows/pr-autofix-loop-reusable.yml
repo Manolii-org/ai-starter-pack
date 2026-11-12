@@ -27,18 +27,24 @@ on:
     secrets:
       ANTHROPIC_API_KEY: { required: false, description: 'Required when provider_mode=anthropic.' }
       LITELLM_MASTER_KEY: { required: false, description: 'Required when provider_mode=proxy.' }
-      GH_PAT: { required: false, description: 'Optional elevated token; falls back to GITHUB_TOKEN.' }
+      GH_PAT: { required: false, description: 'CI-triggering publication credential; absent permits local repair but holds publication.' }
     outputs:
+      published_sha:
+        description: Verified remote publication SHA; empty does not establish handling.
+        value: ${{ jobs.autofix.outputs.published_sha }}
+      publication:
+        description: Controller outcome, separate from editor execution.
+        value: ${{ jobs.autofix.outputs.publication }}
       activation:
         description: >-
-          active (the agent executed, verified by its execution file) | skipped (a gate declined this event:
+          active (legacy execution-file signal; not proof of a tool action) | skipped (a gate declined this event:
           loop-break, fix cap, actor, stale or closed PR). Empty when the job
           did not run or failed before reaching the agent. Never inert: missing
           credentials and an agent that produced no execution fail the job.
         value: ${{ jobs.autofix.outputs.activation }}
 
 permissions:
-  contents: write
+  contents: read
   pull-requests: write
   issues: write
 
@@ -48,6 +54,8 @@ jobs:
     runs-on: ${{ inputs.runs_on }}
     timeout-minutes: 30 # an autofix pass that has not finished in 30m is a runaway — kill it
     outputs:
+      publication: ${{ steps.publish.outputs.outcome }}
+      published_sha: ${{ steps.publish.outputs.published_sha }}
       activation: ${{ steps.verify_exec.outcome == 'success' && 'active' || ((steps.ref.outputs.skip == 'true' || steps.pr.outputs.skip == 'true' || steps.budget.outputs.skip == 'true') && 'skipped' || '') }}
     # Human collaborator reviews/comments, OR relayed bot review (**[@), OR CI workflow_run failure.
     # Do NOT blanket-exclude github-actions[bot] — that is the relay author.
@@ -90,20 +98,6 @@ jobs:
       ANTHROPIC_API_KEY: ${{ inputs.provider_mode == 'proxy' && secrets.LITELLM_MASTER_KEY || secrets.ANTHROPIC_API_KEY }}
       ANTHROPIC_BASE_URL: ${{ inputs.provider_mode == 'proxy' && inputs.litellm_proxy_url || '' }}
     steps:
-      - name: Validate provider secrets
-        env:
-          PM: ${{ inputs.provider_mode }}
-          AK: ${{ secrets.ANTHROPIC_API_KEY }}
-          LK: ${{ secrets.LITELLM_MASTER_KEY }}
-          PURL: ${{ inputs.litellm_proxy_url }}
-        run: |
-          if [[ "$PM" == "proxy" ]]; then
-            if [[ -z "$LK" ]]; then echo "::error::provider_mode=proxy requires LITELLM_MASTER_KEY"; exit 1; fi
-            if [[ -z "$PURL" ]]; then echo "::error::provider_mode=proxy requires litellm_proxy_url"; exit 1; fi
-          else
-            if [[ -z "$AK" ]]; then echo "::error::provider_mode=anthropic requires ANTHROPIC_API_KEY"; exit 1; fi
-          fi
-
       - name: Resolve PR number and head ref
         id: ref
         env:
@@ -200,17 +194,91 @@ jobs:
           echo "head_ref=$HEAD_REF" >> "$GITHUB_OUTPUT"
           echo "head_sha=$HEAD_SHA" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - name: Check retained execution owner
+        id: custody
         if: steps.ref.outputs.skip != 'true'
+        env:
+          REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ steps.ref.outputs.pr_number }}
+          EXPECTED_HEAD: ${{ steps.ref.outputs.head_sha }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # autofix-control:guard:begin
+          #!/usr/bin/env bash
+          # Embedded into the trusted workflow by sync-autofix-control.py. Never source a PR copy.
+          set -euo pipefail
+          autofix_custody() {
+            local pr author page comments count
+            [[ "${PR_NUMBER:-}" =~ ^[1-9][0-9]*$ && "${EXPECTED_HEAD:-}" =~ ^[0-9a-f]{40}$ ]] || return 1
+            if ! pr=$(timeout -k 5 30 gh api "repos/${REPOSITORY}/pulls/${PR_NUMBER}" 2>/dev/null); then
+              echo 'Ownership readback unavailable; no editor or publication admitted.'
+              return 1
+            fi
+            if ! jq -e --arg repo "$REPOSITORY" --arg head "$EXPECTED_HEAD" '
+              .state == "open" and .head.sha == $head and
+              (.head.repo.full_name | ascii_downcase) == ($repo | ascii_downcase) and
+              (.user.id | type) == "number" and
+              ([.labels[].name] | any(. == "skip-ai-review" or . == "human-merge" or . == "security-remediation") | not)
+            ' <<< "$pr" >/dev/null; then
+              echo 'Native PR state, head, fork or human hold prevents admission.'
+              return 1
+            fi
+            if jq -e '(.body // "") | gsub("(?s)```.*?```"; "") | test("(?m)^X-Follow-Through-Owner:")' <<< "$pr" >/dev/null; then
+              echo 'Existing session owner retained. No editor or publication admitted; GitHub facts remain with that owner.'
+              return 1
+            fi
+            author=$(jq -r '.user.id' <<< "$pr")
+            for page in 1 2 3 4 5; do
+              if ! comments=$(timeout -k 5 30 gh api "repos/${REPOSITORY}/issues/${PR_NUMBER}/comments?per_page=100&page=${page}" 2>/dev/null) ||
+                 ! jq -e 'type == "array"' <<< "$comments" >/dev/null; then
+                echo 'Owner registration readback incomplete; admission held.'
+                return 1
+              fi
+              if jq -e --argjson author "$author" 'any(.[];
+                (.user.id == $author or .user.id == 41898282) and
+                ((.body // "") | startswith("<!-- follow-through-owner:v1 -->")))' <<< "$comments" >/dev/null; then
+                echo 'Existing session owner retained by its registration. No editor or publication admitted.'
+                return 1
+              fi
+              count=$(jq 'length' <<< "$comments")
+              [[ "$count" -lt 100 ]] && return 0
+            done
+            echo 'Owner registration pagination bound reached; admission held.'
+            return 1
+          }
+          if autofix_custody; then
+            echo 'skip=false' >> "$GITHUB_OUTPUT"
+          else
+            echo 'skip=true' >> "$GITHUB_OUTPUT"
+          fi
+          # autofix-control:guard:end
+
+      - name: Validate provider secrets
+        if: steps.ref.outputs.skip != 'true' && steps.custody.outputs.skip != 'true'
+        env:
+          PM: ${{ inputs.provider_mode }}
+          AK: ${{ secrets.ANTHROPIC_API_KEY }}
+          LK: ${{ secrets.LITELLM_MASTER_KEY }}
+          PURL: ${{ inputs.litellm_proxy_url }}
+        run: |
+          if [[ "$PM" == "proxy" ]]; then
+            if [[ -z "$LK" ]]; then echo "::error::provider_mode=proxy requires LITELLM_MASTER_KEY"; exit 1; fi
+            if [[ -z "$PURL" ]]; then echo "::error::provider_mode=proxy requires litellm_proxy_url"; exit 1; fi
+          else
+            if [[ -z "$AK" ]]; then echo "::error::provider_mode=anthropic requires ANTHROPIC_API_KEY"; exit 1; fi
+          fi
+
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        if: steps.ref.outputs.skip != 'true' && steps.custody.outputs.skip != 'true'
         with:
           persist-credentials: false
           fetch-depth: 0
-          token: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
+          token: ${{ github.token }}
           ref: ${{ steps.ref.outputs.head_sha }}
 
       - name: Determine skip conditions
         id: pr
-        if: steps.ref.outputs.skip != 'true'
+        if: steps.ref.outputs.skip != 'true' && steps.custody.outputs.skip != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           EVENT_NAME: ${{ github.event_name }}
@@ -332,7 +400,7 @@ jobs:
 
       - name: Enforce per-PR successful-fix budget
         id: budget
-        if: steps.ref.outputs.skip != 'true' && steps.pr.outputs.skip != 'true'
+        if: steps.ref.outputs.skip != 'true' && steps.custody.outputs.skip != 'true' && steps.pr.outputs.skip != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUM: ${{ steps.pr.outputs.number }}
@@ -341,6 +409,7 @@ jobs:
         run: |
           set -euo pipefail
           MAX_FIXES="${MAX_FIXES:-1}"
+          if [[ ! "$MAX_FIXES" =~ ^[0-9]+$ ]]; then echo "skip=true" >> "$GITHUB_OUTPUT"; exit 0; fi
           # Count commits on this PR whose subject starts with [autofix].
           # --paginate runs the jq per page, so awk sums across pages. Fail
           # closed: a timed-out/failed enumeration must not read as 0, which
@@ -356,7 +425,22 @@ jobs:
           if [[ "$COUNT" -ge "$MAX_FIXES" ]]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
             echo "::notice::Per-PR autofix budget reached ($COUNT >= $MAX_FIXES successful [autofix] commits); skipping"
-            timeout -k 5 30 gh pr comment "$PR_NUM" --repo "${REPOSITORY}" --body "<!-- pack-autofix:budget-exhausted --> [autofix-budget] Skipping further Autofix — this PR already has ${COUNT} successful [autofix] commit(s) (cap ${MAX_FIXES}). Remove an autofix commit or raise max_successful_fixes if a further pass is intentional." || true
+            # autofix-control:budget-notice:begin
+            #!/usr/bin/env bash
+            # One material budget receipt; repeated exhausted-budget wakes stay quiet.
+            notice=unknown
+            for page in 1 2 3 4 5; do
+              if ! comments=$(timeout -k 5 30 gh api "repos/${REPOSITORY}/issues/${PR_NUM}/comments?per_page=100&page=${page}" 2>/dev/null); then break; fi
+              if ! jq -e 'type == "array"' <<< "$comments" >/dev/null; then break; fi
+              if jq -e 'any(.[]; .user.id == 41898282 and ((.body // "") | startswith("<!-- pack-autofix:budget-exhausted -->")))' <<< "$comments" >/dev/null; then
+                notice=seen; break
+              fi
+              if [[ $(jq 'length' <<< "$comments") -lt 100 ]]; then notice=absent; break; fi
+            done
+            if [[ "$notice" == absent ]]; then
+              timeout -k 5 30 gh pr comment "$PR_NUM" --repo "$REPOSITORY" --body "<!-- pack-autofix:budget-exhausted --> Autofix reached its configured successful-fix budget (${COUNT}/${MAX_FIXES}). The original owner retains unfinished commitments. Do not remove commits, reset counters or switch owners to evade this budget." || true
+            fi
+            # autofix-control:budget-notice:end
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
@@ -365,7 +449,7 @@ jobs:
       # PR branch would fail with "not currently on a branch". Re-attach a
       # local branch named after the PR head at the validated SHA.
       - name: Attach PR branch at validated SHA
-        if: steps.ref.outputs.skip != 'true' && steps.pr.outputs.skip != 'true' && steps.budget.outputs.skip != 'true'
+        if: steps.ref.outputs.skip != 'true' && steps.custody.outputs.skip != 'true' && steps.pr.outputs.skip != 'true' && steps.budget.outputs.skip != 'true'
         env:
           # head_ref is attacker-controlled metadata (a same-repo branch name
           # may embed shell substitutions). It must reach the shell only as a
@@ -383,7 +467,7 @@ jobs:
       # the PR's own tests and tools; every tool call is already gated by the
       # prompt's untrusted-data framing).
       - name: Restore trusted instruction surface from PR base
-        if: steps.ref.outputs.skip != 'true' && steps.pr.outputs.skip != 'true' && steps.budget.outputs.skip != 'true'
+        if: steps.ref.outputs.skip != 'true' && steps.custody.outputs.skip != 'true' && steps.pr.outputs.skip != 'true' && steps.budget.outputs.skip != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
@@ -464,7 +548,7 @@ jobs:
 
       - name: Resolve Autofix model
         id: model
-        if: steps.ref.outputs.skip != 'true' && steps.pr.outputs.skip != 'true' && steps.budget.outputs.skip != 'true'
+        if: steps.ref.outputs.skip != 'true' && steps.custody.outputs.skip != 'true' && steps.pr.outputs.skip != 'true' && steps.budget.outputs.skip != 'true'
         env:
           EXPLICIT: ${{ inputs.model }}
           SOURCE: ${{ inputs.provider_mode }}
@@ -487,9 +571,68 @@ jobs:
           fi
           echo "model=$model" >> "$GITHUB_OUTPUT"
 
+      - name: Check retained execution owner
+        id: custody_dispatch
+        if: steps.ref.outputs.skip != 'true' && steps.pr.outputs.skip != 'true' && steps.budget.outputs.skip != 'true' && steps.custody.outputs.skip != 'true'
+        env:
+          REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ steps.ref.outputs.pr_number }}
+          EXPECTED_HEAD: ${{ steps.ref.outputs.head_sha }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # autofix-control:guard:begin
+          #!/usr/bin/env bash
+          # Embedded into the trusted workflow by sync-autofix-control.py. Never source a PR copy.
+          set -euo pipefail
+          autofix_custody() {
+            local pr author page comments count
+            [[ "${PR_NUMBER:-}" =~ ^[1-9][0-9]*$ && "${EXPECTED_HEAD:-}" =~ ^[0-9a-f]{40}$ ]] || return 1
+            if ! pr=$(timeout -k 5 30 gh api "repos/${REPOSITORY}/pulls/${PR_NUMBER}" 2>/dev/null); then
+              echo 'Ownership readback unavailable; no editor or publication admitted.'
+              return 1
+            fi
+            if ! jq -e --arg repo "$REPOSITORY" --arg head "$EXPECTED_HEAD" '
+              .state == "open" and .head.sha == $head and
+              (.head.repo.full_name | ascii_downcase) == ($repo | ascii_downcase) and
+              (.user.id | type) == "number" and
+              ([.labels[].name] | any(. == "skip-ai-review" or . == "human-merge" or . == "security-remediation") | not)
+            ' <<< "$pr" >/dev/null; then
+              echo 'Native PR state, head, fork or human hold prevents admission.'
+              return 1
+            fi
+            if jq -e '(.body // "") | gsub("(?s)```.*?```"; "") | test("(?m)^X-Follow-Through-Owner:")' <<< "$pr" >/dev/null; then
+              echo 'Existing session owner retained. No editor or publication admitted; GitHub facts remain with that owner.'
+              return 1
+            fi
+            author=$(jq -r '.user.id' <<< "$pr")
+            for page in 1 2 3 4 5; do
+              if ! comments=$(timeout -k 5 30 gh api "repos/${REPOSITORY}/issues/${PR_NUMBER}/comments?per_page=100&page=${page}" 2>/dev/null) ||
+                 ! jq -e 'type == "array"' <<< "$comments" >/dev/null; then
+                echo 'Owner registration readback incomplete; admission held.'
+                return 1
+              fi
+              if jq -e --argjson author "$author" 'any(.[];
+                (.user.id == $author or .user.id == 41898282) and
+                ((.body // "") | startswith("<!-- follow-through-owner:v1 -->")))' <<< "$comments" >/dev/null; then
+                echo 'Existing session owner retained by its registration. No editor or publication admitted.'
+                return 1
+              fi
+              count=$(jq 'length' <<< "$comments")
+              [[ "$count" -lt 100 ]] && return 0
+            done
+            echo 'Owner registration pagination bound reached; admission held.'
+            return 1
+          }
+          if autofix_custody; then
+            echo 'skip=false' >> "$GITHUB_OUTPUT"
+          else
+            echo 'skip=true' >> "$GITHUB_OUTPUT"
+          fi
+          # autofix-control:guard:end
+
       - name: Run autofix with Claude Code
         id: claude
-        if: steps.ref.outputs.skip != 'true' && steps.pr.outputs.skip != 'true' && steps.budget.outputs.skip != 'true'
+        if: steps.ref.outputs.skip != 'true' && steps.custody.outputs.skip != 'true' && steps.pr.outputs.skip != 'true' && steps.budget.outputs.skip != 'true' && steps.custody_dispatch.outputs.skip != 'true'
         env:
           # The action passes ANTHROPIC_MODEL to the CLI and it wins over
           # --model, so both carry the resolved value.
@@ -515,7 +658,7 @@ jobs:
           # rejects non-human actors unless listed here. Opted-in agent bots
           # are appended; preflight already refused every other bot.
           allowed_bots: ${{ steps.pr.outputs.allowed_bots || 'github-actions' }}
-          github_token: ${{ secrets.GH_PAT || github.token }}
+          github_token: ${{ github.token }}
           claude_args: |
             --allowedTools "Bash,Edit,Write,Read,Glob,Grep"
             --model "${{ steps.model.outputs.model }}"
@@ -539,8 +682,8 @@ jobs:
             3. Otherwise read review comments: `gh api repos/${{ github.repository }}/pulls/${{ steps.pr.outputs.number }}/comments`
             4. Run `gh pr view ${{ steps.pr.outputs.number }} --json body` and honour "Context for Fix Agent" / SCOPE_BUDGET
             5. Make the minimal fix for each actionable finding
-            6. If architectural / ambiguous, post `gh pr comment` and STOP — do not guess
-            7. Commit with message "[autofix] <what was fixed>" and push to the PR branch
+            6. A genuine external or human dependency holds only its affected finding. Record its dependency, unblock condition and next action once; finish other already-authorized findings before yielding. Never retry unchanged denials, repeat wait notices or mark the parent task done from a partial result.
+            7. Commit with message "[autofix] <what was fixed>" locally; do not push. The trusted controller owns publication
             8. Do NOT push to main/master. Do NOT merge the PR. Never force-push or
                rewrite history; if the push is rejected, comment and STOP.
             9. Do not modify or commit .claude/, CLAUDE.md, AGENTS.md, .mcp.json or
@@ -566,6 +709,251 @@ jobs:
 
       # Detection backstop for the pre-commit hook: an [autofix] commit that
       # touches the instruction surface reverted the PR's own files.
+      - name: Check retained execution owner
+        id: custody_publish
+        if: steps.verify_exec.outcome == 'success'
+        env:
+          REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ steps.ref.outputs.pr_number }}
+          EXPECTED_HEAD: ${{ steps.ref.outputs.head_sha }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # autofix-control:guard:begin
+          #!/usr/bin/env bash
+          # Embedded into the trusted workflow by sync-autofix-control.py. Never source a PR copy.
+          set -euo pipefail
+          autofix_custody() {
+            local pr author page comments count
+            [[ "${PR_NUMBER:-}" =~ ^[1-9][0-9]*$ && "${EXPECTED_HEAD:-}" =~ ^[0-9a-f]{40}$ ]] || return 1
+            if ! pr=$(timeout -k 5 30 gh api "repos/${REPOSITORY}/pulls/${PR_NUMBER}" 2>/dev/null); then
+              echo 'Ownership readback unavailable; no editor or publication admitted.'
+              return 1
+            fi
+            if ! jq -e --arg repo "$REPOSITORY" --arg head "$EXPECTED_HEAD" '
+              .state == "open" and .head.sha == $head and
+              (.head.repo.full_name | ascii_downcase) == ($repo | ascii_downcase) and
+              (.user.id | type) == "number" and
+              ([.labels[].name] | any(. == "skip-ai-review" or . == "human-merge" or . == "security-remediation") | not)
+            ' <<< "$pr" >/dev/null; then
+              echo 'Native PR state, head, fork or human hold prevents admission.'
+              return 1
+            fi
+            if jq -e '(.body // "") | gsub("(?s)```.*?```"; "") | test("(?m)^X-Follow-Through-Owner:")' <<< "$pr" >/dev/null; then
+              echo 'Existing session owner retained. No editor or publication admitted; GitHub facts remain with that owner.'
+              return 1
+            fi
+            author=$(jq -r '.user.id' <<< "$pr")
+            for page in 1 2 3 4 5; do
+              if ! comments=$(timeout -k 5 30 gh api "repos/${REPOSITORY}/issues/${PR_NUMBER}/comments?per_page=100&page=${page}" 2>/dev/null) ||
+                 ! jq -e 'type == "array"' <<< "$comments" >/dev/null; then
+                echo 'Owner registration readback incomplete; admission held.'
+                return 1
+              fi
+              if jq -e --argjson author "$author" 'any(.[];
+                (.user.id == $author or .user.id == 41898282) and
+                ((.body // "") | startswith("<!-- follow-through-owner:v1 -->")))' <<< "$comments" >/dev/null; then
+                echo 'Existing session owner retained by its registration. No editor or publication admitted.'
+                return 1
+              fi
+              count=$(jq 'length' <<< "$comments")
+              [[ "$count" -lt 100 ]] && return 0
+            done
+            echo 'Owner registration pagination bound reached; admission held.'
+            return 1
+          }
+          if autofix_custody; then
+            echo 'skip=false' >> "$GITHUB_OUTPUT"
+          else
+            echo 'skip=true' >> "$GITHUB_OUTPUT"
+          fi
+          # autofix-control:guard:end
+
+      - name: Publish and verify the repair
+        id: publish
+        if: steps.verify_exec.outcome == 'success' && steps.custody_publish.outputs.skip == 'false'
+        env:
+          REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ steps.ref.outputs.pr_number }}
+          EXPECTED_HEAD: ${{ steps.ref.outputs.head_sha }}
+          HEAD_REF: ${{ steps.ref.outputs.head_ref }}
+          READ_TOKEN: ${{ github.token }}
+          PUBLISH_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          # autofix-control:publish:begin
+          /usr/bin/python3 -I - <<'AUTOFIX_PY'
+          #!/usr/bin/env python3
+          """Trusted workflow publisher. The editor receives no publication credential.
+
+          Embedded into workflow YAML, never imported or executed from the PR checkout.
+          The Git object transfer uses a fresh bare repository and never runs PR hooks.
+          """
+          import base64
+          import json
+          import os
+          from pathlib import Path
+          import re
+          import subprocess
+          import tempfile
+          import urllib.parse
+          import urllib.request
+
+          SHA = re.compile(r"[0-9a-f]{40}")
+          INSTRUCTIONS = re.compile(r"(^|/)(\.claude/|CLAUDE\.md$|CLAUDE\.local\.md$|AGENTS\.md$)|^(\.mcp\.json|\.claude\.json|\.gitmodules|\.ripgreprc)$|^\.husky/")
+
+
+          def git_env():
+              keep = {"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "http_proxy", "https_proxy",
+                      "SSL_CERT_FILE", "SSL_CERT_DIR", "GIT_SSL_CAINFO"}
+              return {**{k: v for k, v in os.environ.items() if k in keep},
+                      "PATH": "/usr/bin:/bin", "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null",
+                      "GIT_NO_REPLACE_OBJECTS": "1",
+                      "GIT_TERMINAL_PROMPT": "0", "GIT_ASKPASS": "/bin/false"}
+
+
+          def git(args, cwd, *, env=None, timeout=30):
+              return subprocess.run(["/usr/bin/git", "-c", "core.fsmonitor=false", *args], cwd=cwd, env=env or git_env(),
+                                    capture_output=True, timeout=timeout, check=True).stdout
+
+
+          def api(path, *, method="GET", body=None):
+              # Read/receipt operations always use the caller's built-in token. It is
+              # never replaced with the publication credential after a denied read.
+              request = urllib.request.Request(os.environ["GITHUB_API_URL"].rstrip('/')+'/'+path,
+                  headers={"Authorization": "Bearer "+os.environ["READ_TOKEN"],
+                           "Accept": "application/vnd.github+json", "Content-Type": "application/json"},
+                  data=json.dumps(body).encode() if body is not None else None, method=method)
+              with urllib.request.urlopen(request, timeout=20) as response:
+                  return json.load(response)
+
+
+          def publish(result=None):
+              workspace = Path(os.environ["GITHUB_WORKSPACE"])
+              expected, branch = os.environ["EXPECTED_HEAD"], os.environ["HEAD_REF"]
+              repo = os.environ["GITHUB_REPOSITORY"]
+              if result is None:
+                  result = {"outcome": "unverified", "published_sha": ""}
+              if not SHA.fullmatch(expected) or not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo):
+                  return result
+              git(["check-ref-format", "refs/heads/"+branch], workspace)
+              if branch in {"main", "master"}:
+                  return result
+              candidate = git(["rev-parse", "--verify", "HEAD^{commit}"], workspace).decode().strip()
+              if not SHA.fullmatch(candidate):
+                  return result
+              result["candidate_sha"] = candidate
+              if candidate == expected:
+                  result["outcome"] = "no_change"
+                  return result
+              git(["merge-base", "--is-ancestor", expected, candidate], workspace)
+              names = git(["diff", "--name-only", "--no-ext-diff", "--no-textconv", "--no-renames", "-z",
+                           expected, candidate], workspace).decode().split('\0')
+              if any(INSTRUCTIONS.search(name) for name in names):
+                  result["outcome"] = "instruction_surface_held"
+                  return result
+              # Inspect committed objects only. Reading the editor's working tree could
+              # invoke its clean filters; uncommitted work is never publication evidence.
+              # Native state was rechecked immediately before this trusted step. A
+              # moved head or new retained-owner registration is a hold, not a retry.
+              pr = api(f"repos/{repo}/pulls/{os.environ['PR_NUMBER']}")
+              if (pr['state'] != 'open' or pr['head']['sha'] != expected or pr['head']['ref'] != branch
+                      or pr['head']['repo']['full_name'].casefold() != repo.casefold()
+                      or branch in {pr['base']['ref'], pr['base']['repo'].get('default_branch')}
+                      or any(x['name'] in {'skip-ai-review','human-merge','security-remediation'} for x in pr['labels'])
+                      or re.search(r'^X-Follow-Through-Owner:', re.sub(r'```.*?```', '', pr.get('body') or '', flags=re.S), re.M)):
+                  result["outcome"] = "native_state_held"
+                  return result
+              server = os.environ['GITHUB_SERVER_URL'].rstrip('/')
+              if urllib.parse.urlparse(server).scheme != 'https':
+                  return result
+              with tempfile.TemporaryDirectory(prefix='trusted-autofix-publisher-') as directory:
+                  root = Path(directory)
+                  (root/'empty-template').mkdir()
+                  # Local object transfer cannot invoke upload-pack or PR hooks. The
+                  # fresh config never inherits the editor's URL rewrites or credentials.
+                  git(['clone', '--bare', '--local', '--shared', '--no-hardlinks',
+                       '--template='+str(root/'empty-template'), str(workspace), str(root/'objects.git')], root, timeout=120)
+                  recovery = Path(tempfile.mkdtemp(prefix='autofix-recovery-', dir=os.environ['RUNNER_TEMP']))
+                  git(['--git-dir='+str(root/'objects.git'), 'update-ref', 'refs/heads/implementation', candidate], root)
+                  git(['--git-dir='+str(root/'objects.git'), 'bundle', 'create', str(recovery/'implementation.bundle'),
+                       'refs/heads/implementation', '^'+expected], root, timeout=120)
+                  (recovery/'receipt.json').write_text(json.dumps(dict(repository=repo,
+                      pr_number=os.environ['PR_NUMBER'], base_sha=expected, candidate_sha=candidate,
+                      scope='Git objects only; never execute recovery payloads. Revalidate native custody/head and owning gates before publication.'))+'\n')
+                  result['recovery_path'] = str(recovery)
+                  token = os.environ.get("PUBLISH_TOKEN", "")
+                  if not token:
+                      result['outcome'] = 'publication_credential_unavailable'
+                      return result
+                  env = git_env()
+                  env.update(GIT_CONFIG_COUNT='1', GIT_CONFIG_KEY_0=f'http.{server}/.extraheader',
+                      GIT_CONFIG_VALUE_0='AUTHORIZATION: basic '+base64.b64encode(('x-access-token:'+token).encode()).decode())
+                  result['outcome'] = 'publication_unknown'  # Before the sole send.
+                  try:
+                      git(['--git-dir='+str(root/'objects.git'), 'push', server+'/'+repo+'.git',
+                           candidate+':refs/heads/'+branch], root, env=env, timeout=120)
+                  except subprocess.CalledProcessError:
+                      pass  # Read back once; never blindly resend an uncertain push.
+                  ref = api(f"repos/{repo}/git/ref/heads/{urllib.parse.quote(branch, safe='')}")
+                  if ref['object']['sha'] == candidate:
+                      result.update(outcome='published', published_sha=candidate)
+              return result
+
+
+          def record(result):
+              outcome = result.get('outcome')
+              if outcome in {'no_change', 'unverified'} or not outcome:
+                  return
+              repo, number, head = (os.environ[k] for k in ('GITHUB_REPOSITORY','PR_NUMBER','EXPECTED_HEAD'))
+              if not SHA.fullmatch(head) or not re.fullmatch(r'[1-9][0-9]*', number):
+                  return
+              marker = f'<!-- pack-autofix-publication:v1 head={head} outcome={outcome} -->'
+              for page in range(1,6):
+                  comments = api(f'repos/{repo}/issues/{number}/comments?per_page=100&page={page}')
+                  if any(c.get('user',{}).get('id') == 41898282 and marker in (c.get('body') or '') for c in comments):
+                      return
+                  if len(comments) < 100:
+                      break
+              else:
+                  return  # Incomplete history is not permission to duplicate a receipt.
+              body = ('Verified autofix publication: `'+result['published_sha']+'`. New-head CI still needs verification.'
+                      if outcome == 'published' else
+                      'Autofix execution did not establish publication: `'+outcome+'`. The parent task remains unfinished; '
+                      'the existing owner must resolve this specific dependency before retrying publication. '
+                      'Independent authorized implementation is not globally blocked.')
+              api(f'repos/{repo}/issues/{number}/comments', method='POST', body={'body':marker+'\n'+body})
+
+
+          def main():
+              result = {'outcome':'unverified','published_sha':''}
+              try:
+                  result = publish(result)
+              except Exception as exc:
+                  result['failure_class'] = type(exc).__name__  # No payloads, tokens or Git stderr.
+              with open(os.environ['GITHUB_OUTPUT'],'a') as stream:
+                  for key in ('outcome','published_sha','recovery_path'):
+                      stream.write(key+'='+result.get(key,'')+'\n')
+              print(json.dumps(result))
+              try:
+                  record(result)
+              except Exception:
+                  print('Publication receipt delivery unverified; no duplicate send attempted.')
+              return 0 if result['outcome'] in {'published','no_change'} else 2
+
+
+          if __name__ == '__main__':
+              raise SystemExit(main())
+          AUTOFIX_PY
+          # autofix-control:publish:end
+
+      - name: Retain unpublished implementation
+        if: always() && steps.publish.outputs.recovery_path != '' && steps.publish.outputs.outcome != 'published'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: autofix-recovery-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.publish.outputs.recovery_path }}
+          retention-days: 7
+          if-no-files-found: error
+
       - name: Verify autofix commits left the instruction surface alone
         if: always() && steps.claude.outcome != 'skipped' && steps.claude.outcome != ''
         env:
