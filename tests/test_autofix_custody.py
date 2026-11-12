@@ -52,7 +52,7 @@ def test_custody_uses_native_owner_and_fails_closed(tmp_path,case,allowed):
 
 
 @pytest.mark.parametrize('outcome', ['publication_admission_held','native_state_held','instruction_surface_held',
-    'publication_credential_unavailable','publication_unknown','native_state_unverified','commit_subject_held'])
+    'publication_credential_unavailable','publication_unknown','native_state_unverified','commit_subject_held','candidate_ancestry_held'])
 def test_held_receipts_suppress_duplicate_editors_for_the_same_head(tmp_path,outcome):
     # Run the actual Bash guard with a bounded fake native API, not a broker.
     original=native_pr
@@ -224,6 +224,30 @@ def test_replace_refs_cannot_hide_instruction_changes(candidate,monkeypatch):
     monkeypatch.setenv('PUBLISH_TOKEN','fixture-write-only')
     monkeypatch.setattr(m,'api',lambda *a,**kw:pytest.fail('instruction change must hold before publication'))
     assert m.publish()['outcome']=='instruction_surface_held'
+
+
+@pytest.mark.parametrize('name',['.claude','.husky','nested/.claude'])
+def test_new_instruction_directory_symlink_cannot_bypass_object_guard(candidate,monkeypatch,name):
+    work,base,head,git=candidate;m=load_publisher()
+    path=work/name;path.parent.mkdir(parents=True,exist_ok=True)
+    path.symlink_to('../untrusted-instructions',target_is_directory=True)
+    git('add','--',name);git('commit','-qm','[autofix] symlink fixture')
+    monkeypatch.setenv('PUBLISH_TOKEN','fixture-write-only')
+    monkeypatch.setattr(m,'api',lambda *a,**kw:pytest.fail('instruction symlink must hold before native/publication calls'))
+    assert m.publish()['outcome']=='instruction_surface_held'
+
+
+def test_legacy_grafts_cannot_authorize_a_history_rewrite(candidate,monkeypatch):
+    work,base,head,git=candidate;m=load_publisher()
+    git('checkout','--orphan','unrelated')
+    (work/'file.txt').write_text('unrelated history');git('add','.');git('commit','-qm','[autofix] unrelated fixture')
+    bad=git('rev-parse','HEAD');(work/'.git/info/grafts').write_text(bad+' '+base+'\n')
+    # Reproduce the old false ancestry even with replacement refs disabled.
+    old_env=m.git_env();old_env.pop('GIT_GRAFT_FILE')
+    assert subprocess.run(['/usr/bin/git','merge-base','--is-ancestor',base,bad],cwd=work,env=old_env,capture_output=True).returncode==0
+    monkeypatch.setenv('PUBLISH_TOKEN','fixture-write-only')
+    monkeypatch.setattr(m,'api',lambda *a,**kw:pytest.fail('forged ancestry must hold before publication'))
+    assert m.publish()['outcome']=='candidate_ancestry_held'
 
 
 @pytest.mark.parametrize('file',['pr-autofix-loop.yml','pr-autofix-loop-reusable.yml'])

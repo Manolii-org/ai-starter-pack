@@ -15,7 +15,7 @@ import urllib.parse
 import urllib.request
 
 SHA = re.compile(r"[0-9a-f]{40}")
-INSTRUCTIONS = re.compile(r"(^|/)(\.claude/|CLAUDE\.md$|CLAUDE\.local\.md$|AGENTS\.md$)|^(\.mcp\.json|\.claude\.json|\.gitmodules|\.ripgreprc)$|^\.husky/")
+INSTRUCTIONS = re.compile(r"(^|/)(\.claude(?:/|$)|CLAUDE\.md$|CLAUDE\.local\.md$|AGENTS\.md$)|^(\.mcp\.json|\.claude\.json|\.gitmodules|\.ripgreprc)$|^\.husky(?:/|$)")
 
 
 def git_env():
@@ -23,12 +23,12 @@ def git_env():
             "SSL_CERT_FILE", "SSL_CERT_DIR", "GIT_SSL_CAINFO"}
     return {**{k: v for k, v in os.environ.items() if k in keep},
             "PATH": "/usr/bin:/bin", "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null",
-            "GIT_NO_REPLACE_OBJECTS": "1",
+            "GIT_NO_REPLACE_OBJECTS": "1", "GIT_GRAFT_FILE": "/dev/null",
             "GIT_TERMINAL_PROMPT": "0", "GIT_ASKPASS": "/bin/false"}
 
 
 def git(args, cwd, *, env=None, timeout=30):
-    return subprocess.run(["/usr/bin/git", "-c", "core.fsmonitor=false", *args], cwd=cwd, env=env or git_env(),
+    return subprocess.run(["/usr/bin/git", "-c", "core.fsmonitor=false", "-c", "core.commitGraph=false", *args], cwd=cwd, env=env or git_env(),
                           capture_output=True, timeout=timeout, check=True).stdout
 
 
@@ -61,7 +61,11 @@ def publish(result=None):
     if candidate == expected:
         result["outcome"] = "no_change"
         return result
-    git(["merge-base", "--is-ancestor", expected, candidate], workspace)
+    try:
+        git(["merge-base", "--is-ancestor", expected, candidate], workspace)
+    except subprocess.CalledProcessError:
+        result['outcome'] = 'candidate_ancestry_held'
+        return result
     subjects = git(['log','--format=%s','--no-show-signature',expected+'..'+candidate], workspace).decode().splitlines()
     subjects_valid = bool(subjects) and all(subject.startswith('[autofix]') for subject in subjects)
     names = git(["diff", "--name-only", "--no-ext-diff", "--no-textconv", "--no-renames", "-z",
@@ -81,6 +85,10 @@ def publish(result=None):
         # fresh config never inherits the editor's URL rewrites or credentials.
         git(['clone', '--bare', '--local', '--shared', '--no-hardlinks',
              '--template='+str(root/'empty-template'), str(workspace), str(root/'objects.git')], root, timeout=120)
+        # Recheck actual commit parents in the controller's fresh repository.
+        # Editor-owned grafts, replace refs and commit-graph caches cannot grant
+        # a non-fast-forward update through the expected-ref lease.
+        git(['--git-dir='+str(root/'objects.git'),'merge-base','--is-ancestor',expected,candidate], root)
         recovery = Path(tempfile.mkdtemp(prefix='autofix-recovery-', dir=os.environ['RUNNER_TEMP']))
         git(['--git-dir='+str(root/'objects.git'), 'update-ref', 'refs/heads/implementation', candidate], root)
         git(['--git-dir='+str(root/'objects.git'), 'bundle', 'create', str(recovery/'implementation.bundle'),
@@ -151,6 +159,7 @@ def record(result):
         'native_state_held': 'The native PR head/state/repository/hold changed. Reconcile the current native state before recovering or publishing the candidate.',
         'instruction_surface_held': 'The candidate changed protected instruction paths. Separate the authorized repair and pass the instruction guard before publication.',
         'commit_subject_held': 'The candidate violated the existing [autofix] accounting convention. The original owner must review and recommit the retained repair with valid subjects.',
+        'candidate_ancestry_held': 'The candidate is not verified as a descendant of the admitted head. The original owner must reconcile workspace/head ownership and restore the authorized branch.',
         'native_state_unverified': 'Native PR readback is unverified. Restore the same approved read route and revalidate current custody/head; do not switch identities.',
         'publication_unknown': 'The sole push has an uncertain outcome. Verify the authenticated remote SHA before considering another send.',
     }
