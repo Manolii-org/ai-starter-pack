@@ -44,12 +44,38 @@ not execution, review or completion authority. Do not reset a lifetime repair
 ledger from a watch invocation or passive wake.
 
 ```bash
-python3 scripts/pr-watch-observe.py
+# pr-watch-observer:verified-bootstrap/v1
+set -euo pipefail
+expected='5b0436e628b655c25a4dc638ec9dbb0ba314c70248cdc2ddd5687b6ba2dd45ff'
+private_git_dir="$(git rev-parse --absolute-git-dir)"
+stage="$(mktemp "$private_git_dir/pr-watch-observer.XXXXXX")"
+trap 'rm -f -- "$stage"' EXIT
+trap 'exit 2' HUP INT TERM
+if [ -n "${CLAUDE_PLUGIN_ROOT:-}" ]; then
+  # This root comes from the registered trusted installation, not the PR.
+  head -c 65537 "$CLAUDE_PLUGIN_ROOT/scripts/pr-watch-observe.py" > "$stage"
+else
+  # Read raw object bytes; never execute a file from the PR worktree.
+  size="$(git cat-file -s HEAD:scripts/pr-watch-observe.py)"
+  case "$size" in ''|*[!0-9]*) exit 2 ;; esac
+  [ "$size" -le 65536 ] || exit 2
+  git --no-pager show --no-textconv --no-ext-diff HEAD:scripts/pr-watch-observe.py > "$stage"
+fi
+[ "$(wc -c < "$stage")" -le 65536 ] || exit 2
+printf '%s  %s\n' "$expected" "$stage" | sha256sum --check --status
+# Isolated mode excludes the PR cwd and PYTHONPATH from module loading.
+python3 -I "$stage"
 ```
 
-Use the same locked observation path after a head/phase change. An unchanged
-observation performs no checkpoint replacement. The original task's completion
-and budgets remain unchanged, including after this PR merges.
+Run this block from the trusted installed command definition. The pinned digest
+is derived from the reviewed framework helper; never take it from a PR payload.
+The bootstrap verifies bytes before Python and stages them in Git's private
+directory. A changed/unavailable helper holds without a worktree-execution fallback.
+Observations live in an owner/repository-bound sidecar beside the original
+checkpoint. The observer never writes that parent file; legacy unlocked writers
+cannot lose parent updates to this observer. Reuse the sidecar after head/phase
+changes. Unchanged observations perform no replacement. Parent completion,
+commitments, holds and budgets stay unchanged, including after this PR merges.
 
 ### Step 2: Subscribe (split — do not always subscribe PR activity)
 
