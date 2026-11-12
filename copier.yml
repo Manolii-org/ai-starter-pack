@@ -342,6 +342,10 @@ _exclude:
   - scripts/source-adapter-probe.py
   - scripts/tests/test_source_adapter_probe.py
   - docs/source-only-execution.md
+  # Native owner transport remains local to the public Pack.
+  - scripts/ci/native_owner_recipe.py
+  - .github/workflows/native-owner-recipe.yml
+  - docs/native-owner-recipe.md
   # Release capability consumers use the portable action and their own product
   # qualification. These suites require the Pack-only registry/build machinery.
   - scripts/tests/test_release_manifest.py

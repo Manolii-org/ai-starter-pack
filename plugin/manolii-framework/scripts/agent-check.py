@@ -1122,9 +1122,12 @@ def main(argv=None) -> int:
     parser.add_argument("--base")
     parser.add_argument("--provider", choices=["claude", "codex", "cursor", "devin", "unknown"], default="unknown")
     parser.add_argument("--plan", "--dry-run", dest="plan", action="store_true")
+    parser.add_argument("--select-only", action="store_true", help="with --plan, classify without tool probes or readiness evidence")
     parser.add_argument("--provision", action="store_true", help="install selected development dependencies once per input/tool digest")
     parser.add_argument("--no-cache", action="store_true")
     args = parser.parse_args(argv)
+    if args.select_only and not args.plan:
+        parser.error("--select-only requires --plan and cannot qualify execution")
     root = args.repo_root.resolve()
     inherited = git_environment()
     receipt_path = None
@@ -1138,6 +1141,9 @@ def main(argv=None) -> int:
             receipt_path.unlink(missing_ok=True)
         config = config_for(root)
         plan = plan_for(root, config, args.base)
+        if args.plan and args.select_only:
+            print(json.dumps(plan, indent=2))
+            return 0
         tools = versions(root, plan, inherited)
         if args.plan:
             print(json.dumps({**plan, "tool_versions": tools}, indent=2))
