@@ -37,6 +37,9 @@ publication credentials; there is no built-in-token publication fallback.
 Missing publication access does not prevent independent local implementation.
 Unpublished implementation is retained as a seven-day recovery artifact containing
 a Git bundle and bounded metadata, without execution logs or authentication files.
+The controller captures committed recovery data before checking late publication
+admission, so a moved head, retained owner or unavailable read holds the push
+without discarding the implementation.
 Recovery is data, not execution authority: the original owner must verify artifact
 provenance, base/head/custody, object identity, review and checks before restoring
 or publishing it. Artifact upload and comment delivery require their own receipts;

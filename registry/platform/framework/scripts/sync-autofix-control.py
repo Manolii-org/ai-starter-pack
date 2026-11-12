@@ -17,7 +17,8 @@ def step(kind, identity, condition, number, head, branch=None, token=None):
         env['GH_TOKEN'] = '${{ github.token }}'
         body = (ROOT/'scripts/ci/autofix-custody.sh').read_text().rstrip()
     else:
-        env.update(HEAD_REF=branch, READ_TOKEN='${{ github.token }}', PUBLISH_TOKEN=token)
+        env.update(HEAD_REF=branch, READ_TOKEN='${{ github.token }}', PUBLISH_TOKEN=token,
+                   PUBLICATION_ADMITTED="${{ steps.custody_publish.outputs.skip == 'false' }}")
         body = "/usr/bin/python3 -I - <<'AUTOFIX_PY'\n"+(ROOT/'scripts/ci/autofix-publish.py').read_text().rstrip()+"\nAUTOFIX_PY"
     lines = [f'      - name: {name}',f'        id: {identity}',f'        if: {condition}', '        env:']
     lines += [f'          {key}: {value}' for key,value in env.items()]
@@ -93,6 +94,19 @@ def initial(text, reusable):
 
 
 def render(text):
+    # Retention runs even when the final guard holds publication. The protected
+    # controller consumes the guard decision after capturing safe Git objects.
+    text = text.replace("id: publish\n        if: steps.verify_exec.outcome == 'success' && steps.custody_publish.outputs.skip == 'false'",
+                        "id: publish\n        if: steps.verify_exec.outcome == 'success'")
+    text = re.sub(r"(?m)^(          PUBLISH_TOKEN: .*)$",
+        r"\1\n          PUBLICATION_ADMITTED: ${{ steps.custody_publish.outputs.skip == 'false' }}",text)
+    text = text.replace("          PUBLICATION_ADMITTED: ${{ steps.custody_publish.outputs.skip == 'false' }}\n"*2,
+                        "          PUBLICATION_ADMITTED: ${{ steps.custody_publish.outputs.skip == 'false' }}\n")
+    text = text.replace("steps.budget.outputs.skip == 'true') && 'skipped'",
+        "steps.budget.outputs.skip == 'true' || steps.custody.outputs.skip == 'true' || steps.custody_dispatch.outputs.skip == 'true') && 'skipped'")
+    # The publisher owns the one material credential-hold receipt. The old
+    # preflight warning both repeats it and advertises a removed token fallback.
+    text = re.sub(r'(?ms)^      - name: Warn when elevated push token is absent\n.*?(?=^      - name: Resolve Anthropic credential\n)', '', text)
     text=text.replace('6. If architectural / ambiguous, post `gh pr comment` and STOP — do not guess',
         '6. A genuine external or human dependency holds only its affected finding. Record its dependency, unblock condition and next action once; finish other already-authorized findings before yielding. Never retry unchanged denials, repeat wait notices or mark the parent task done from a partial result.')
     if '      - name: Retain unpublished implementation' not in text:

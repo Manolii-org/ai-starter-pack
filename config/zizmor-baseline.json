@@ -164,12 +164,6 @@
       "severity": "High"
     },
     {
-      "fingerprint": "86c52650bc514a65",
-      "ident": "excessive-permissions",
-      "path": ".github/workflows/pr-autofix-loop.yml",
-      "severity": "High"
-    },
-    {
       "fingerprint": "b40b3c8739523e8b",
       "ident": "excessive-permissions",
       "path": ".github/workflows/pr-autofix-loop.yml",

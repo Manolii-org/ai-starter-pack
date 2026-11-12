@@ -60,7 +60,7 @@ def candidate(tmp_path,monkeypatch):
     (work/'file.txt').write_text('after');git('commit','-qam','[autofix] fixture');head=git('rev-parse','HEAD')
     for k,v in dict(GITHUB_WORKSPACE=str(work),EXPECTED_HEAD=base,HEAD_REF='fix/owned',PR_NUMBER='7',
         GITHUB_REPOSITORY='example/repository',GITHUB_SERVER_URL='https://github.com',RUNNER_TEMP=str(tmp_path),
-        GITHUB_API_URL='https://api.github.com',READ_TOKEN='fixture-read-only').items():monkeypatch.setenv(k,v)
+        GITHUB_API_URL='https://api.github.com',READ_TOKEN='fixture-read-only',PUBLICATION_ADMITTED='true').items():monkeypatch.setenv(k,v)
     monkeypatch.delenv('PUBLISH_TOKEN',raising=False)
     return work,base,head,git
 
@@ -74,6 +74,28 @@ def test_missing_publication_credential_preserves_local_implementation(candidate
     recovery=Path(result['recovery_path'])
     git('bundle','verify',str(recovery/'implementation.bundle'))
     assert json.loads((recovery/'receipt.json').read_text())['candidate_sha']==head
+
+
+@pytest.mark.parametrize('hold',['custody','stale-head','registered-owner','unreadable'])
+def test_late_publication_hold_retains_committed_recovery(candidate,monkeypatch,hold):
+    work,base,head,git=candidate;m=load_publisher()
+    monkeypatch.setenv('PUBLISH_TOKEN','fixture-write-only')
+    if hold=='custody':monkeypatch.setenv('PUBLICATION_ADMITTED','false')
+    def api(*a,**kw):
+        if hold=='custody':pytest.fail('a denied guard must not trigger another native read')
+        if hold=='unreadable':raise PermissionError('fixture denial')
+        return native_pr(body='X-Follow-Through-Owner: retained' if hold=='registered-owner' else '',
+                         head='b'*40 if hold=='stale-head' else base)
+    monkeypatch.setattr(m,'api',api)
+    result={'outcome':'unverified','published_sha':''}
+    if hold=='unreadable':
+        with pytest.raises(PermissionError):m.publish(result)
+        assert result['outcome']=='native_state_unverified'
+    else:
+        m.publish(result)
+        assert result['outcome']==('publication_admission_held' if hold=='custody' else 'native_state_held')
+    git('bundle','verify',str(Path(result['recovery_path'])/'implementation.bundle'))
+    assert result['published_sha']=='' and git('rev-parse','HEAD')==head
 
 
 def test_guarded_publisher_uses_fresh_config_and_remote_readback(candidate,monkeypatch,tmp_path):
@@ -140,9 +162,19 @@ def test_actual_editor_cannot_publish_and_controller_is_custody_gated(file):
     assert workflow['permissions']['contents']=='read'
     assert editor['with']['github_token']=='${{ github.token }}'
     assert 'steps.custody_dispatch.outputs.skip' in editor['if']
-    assert 'steps.custody_publish.outputs.skip' in publisher['if']
+    assert publisher['if']=="steps.verify_exec.outcome == 'success'"
+    assert publisher['env']['PUBLICATION_ADMITTED']=="${{ steps.custody_publish.outputs.skip == 'false' }}"
+    if 'reusable' in file:
+        activation=job['outputs']['activation']
+        assert "steps.custody.outputs.skip == 'true'" in activation
+        assert "steps.custody_dispatch.outputs.skip == 'true'" in activation
     assert 'do not push' in editor['with']['prompt']
     assert publisher['env']['PUBLISH_TOKEN'] in {'${{ secrets.GH_PAT }}','${{ secrets.MN_GH_AUTOMATION_TOKEN }}'}
+    for other in job['steps']:
+        if other is not publisher:
+            assert not any('secrets.GH_PAT' in str(v) or 'secrets.MN_GH_AUTOMATION_TOKEN' in str(v)
+                           for v in other.get('env',{}).values())
+    assert 'fall back to GITHUB_TOKEN' not in (ROOT/'.github/workflows'/file).read_text()
 
 
 def test_embedded_controller_source_is_current():

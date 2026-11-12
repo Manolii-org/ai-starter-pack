@@ -56,7 +56,7 @@ jobs:
     outputs:
       publication: ${{ steps.publish.outputs.outcome }}
       published_sha: ${{ steps.publish.outputs.published_sha }}
-      activation: ${{ steps.verify_exec.outcome == 'success' && 'active' || ((steps.ref.outputs.skip == 'true' || steps.pr.outputs.skip == 'true' || steps.budget.outputs.skip == 'true') && 'skipped' || '') }}
+      activation: ${{ steps.verify_exec.outcome == 'success' && 'active' || ((steps.ref.outputs.skip == 'true' || steps.pr.outputs.skip == 'true' || steps.budget.outputs.skip == 'true' || steps.custody.outputs.skip == 'true' || steps.custody_dispatch.outputs.skip == 'true') && 'skipped' || '') }}
     # Human collaborator reviews/comments, OR relayed bot review (**[@), OR CI workflow_run failure.
     # Do NOT blanket-exclude github-actions[bot] — that is the relay author.
     if: |
@@ -770,7 +770,7 @@ jobs:
 
       - name: Publish and verify the repair
         id: publish
-        if: steps.verify_exec.outcome == 'success' && steps.custody_publish.outputs.skip == 'false'
+        if: steps.verify_exec.outcome == 'success'
         env:
           REPOSITORY: ${{ github.repository }}
           PR_NUMBER: ${{ steps.ref.outputs.pr_number }}
@@ -778,6 +778,7 @@ jobs:
           HEAD_REF: ${{ steps.ref.outputs.head_ref }}
           READ_TOKEN: ${{ github.token }}
           PUBLISH_TOKEN: ${{ secrets.GH_PAT }}
+          PUBLICATION_ADMITTED: ${{ steps.custody_publish.outputs.skip == 'false' }}
         run: |
           # autofix-control:publish:begin
           /usr/bin/python3 -I - <<'AUTOFIX_PY'
@@ -852,16 +853,6 @@ jobs:
                   return result
               # Inspect committed objects only. Reading the editor's working tree could
               # invoke its clean filters; uncommitted work is never publication evidence.
-              # Native state was rechecked immediately before this trusted step. A
-              # moved head or new retained-owner registration is a hold, not a retry.
-              pr = api(f"repos/{repo}/pulls/{os.environ['PR_NUMBER']}")
-              if (pr['state'] != 'open' or pr['head']['sha'] != expected or pr['head']['ref'] != branch
-                      or pr['head']['repo']['full_name'].casefold() != repo.casefold()
-                      or branch in {pr['base']['ref'], pr['base']['repo'].get('default_branch')}
-                      or any(x['name'] in {'skip-ai-review','human-merge','security-remediation'} for x in pr['labels'])
-                      or re.search(r'^X-Follow-Through-Owner:', re.sub(r'```.*?```', '', pr.get('body') or '', flags=re.S), re.M)):
-                  result["outcome"] = "native_state_held"
-                  return result
               server = os.environ['GITHUB_SERVER_URL'].rstrip('/')
               if urllib.parse.urlparse(server).scheme != 'https':
                   return result
@@ -880,6 +871,20 @@ jobs:
                       pr_number=os.environ['PR_NUMBER'], base_sha=expected, candidate_sha=candidate,
                       scope='Git objects only; never execute recovery payloads. Revalidate native custody/head and owning gates before publication.'))+'\n')
                   result['recovery_path'] = str(recovery)
+                  # Local data retention is independent of publication authority. A late
+                  # owner/head/read hold must not discard implementation on runner exit.
+                  if os.environ.get('PUBLICATION_ADMITTED') != 'true':
+                      result['outcome'] = 'publication_admission_held'
+                      return result
+                  result['outcome'] = 'native_state_unverified'
+                  pr = api(f"repos/{repo}/pulls/{os.environ['PR_NUMBER']}")
+                  if (pr['state'] != 'open' or pr['head']['sha'] != expected or pr['head']['ref'] != branch
+                          or pr['head']['repo']['full_name'].casefold() != repo.casefold()
+                          or branch in {pr['base']['ref'], pr['base']['repo'].get('default_branch')}
+                          or any(x['name'] in {'skip-ai-review','human-merge','security-remediation'} for x in pr['labels'])
+                          or re.search(r'^X-Follow-Through-Owner:', re.sub(r'```.*?```', '', pr.get('body') or '', flags=re.S), re.M)):
+                      result['outcome'] = 'native_state_held'
+                      return result
                   token = os.environ.get("PUBLISH_TOKEN", "")
                   if not token:
                       result['outcome'] = 'publication_credential_unavailable'

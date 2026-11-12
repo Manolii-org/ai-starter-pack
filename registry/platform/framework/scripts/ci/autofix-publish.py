@@ -69,16 +69,6 @@ def publish(result=None):
         return result
     # Inspect committed objects only. Reading the editor's working tree could
     # invoke its clean filters; uncommitted work is never publication evidence.
-    # Native state was rechecked immediately before this trusted step. A
-    # moved head or new retained-owner registration is a hold, not a retry.
-    pr = api(f"repos/{repo}/pulls/{os.environ['PR_NUMBER']}")
-    if (pr['state'] != 'open' or pr['head']['sha'] != expected or pr['head']['ref'] != branch
-            or pr['head']['repo']['full_name'].casefold() != repo.casefold()
-            or branch in {pr['base']['ref'], pr['base']['repo'].get('default_branch')}
-            or any(x['name'] in {'skip-ai-review','human-merge','security-remediation'} for x in pr['labels'])
-            or re.search(r'^X-Follow-Through-Owner:', re.sub(r'```.*?```', '', pr.get('body') or '', flags=re.S), re.M)):
-        result["outcome"] = "native_state_held"
-        return result
     server = os.environ['GITHUB_SERVER_URL'].rstrip('/')
     if urllib.parse.urlparse(server).scheme != 'https':
         return result
@@ -97,6 +87,20 @@ def publish(result=None):
             pr_number=os.environ['PR_NUMBER'], base_sha=expected, candidate_sha=candidate,
             scope='Git objects only; never execute recovery payloads. Revalidate native custody/head and owning gates before publication.'))+'\n')
         result['recovery_path'] = str(recovery)
+        # Local data retention is independent of publication authority. A late
+        # owner/head/read hold must not discard implementation on runner exit.
+        if os.environ.get('PUBLICATION_ADMITTED') != 'true':
+            result['outcome'] = 'publication_admission_held'
+            return result
+        result['outcome'] = 'native_state_unverified'
+        pr = api(f"repos/{repo}/pulls/{os.environ['PR_NUMBER']}")
+        if (pr['state'] != 'open' or pr['head']['sha'] != expected or pr['head']['ref'] != branch
+                or pr['head']['repo']['full_name'].casefold() != repo.casefold()
+                or branch in {pr['base']['ref'], pr['base']['repo'].get('default_branch')}
+                or any(x['name'] in {'skip-ai-review','human-merge','security-remediation'} for x in pr['labels'])
+                or re.search(r'^X-Follow-Through-Owner:', re.sub(r'```.*?```', '', pr.get('body') or '', flags=re.S), re.M)):
+            result['outcome'] = 'native_state_held'
+            return result
         token = os.environ.get("PUBLISH_TOKEN", "")
         if not token:
             result['outcome'] = 'publication_credential_unavailable'
