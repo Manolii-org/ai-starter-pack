@@ -133,6 +133,7 @@ def test_broad_cli_uses_runner_stamps_and_removes_own_control_file(launch, tmp_p
 
 
 def test_specialist_cli_writes_failed_protected_role_with_current_binding(launch, tmp_path, monkeypatch):
+    monkeypatch.setenv("SECURITY_REVIEW_MODE", "direct")
     _, instance, _, _ = launch
     specialists = load('run-specialists.py')
     source = tmp_path / 'input.diff'

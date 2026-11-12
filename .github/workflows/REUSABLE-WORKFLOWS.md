@@ -137,7 +137,13 @@ receipt writers are unsupported and may not invoke this action.
 
 ## Provider Wiring
 
-Default: **Anthropic** (`ANTHROPIC_API_KEY` direct). Opt-in: **Proxy mode** (`ANTHROPIC_BASE_URL` + `LITELLM_MASTER_KEY`).
+Default: **Governed proxy** (`ANTHROPIC_BASE_URL` + `LITELLM_MASTER_KEY`).
+`ANTHROPIC_BASE_URL` is the Messages compatibility wire, not a provider pin.
+External consumers can explicitly opt into the existing Anthropic transport.
+Assessment maps `provider_mode=anthropic` to the supported `direct` runtime mode;
+its committed external admission is still required. Proxy mode leaves the
+trusted runtime's version-compatible default unset. A restrictive `CLIENT_AI_POLICY` flag alone remains a hold
+until the owner declares a compatible route.
 
 Guard-then-wire: Always validate secrets exist before wiring. Use this guard step FIRST:
 
@@ -188,8 +194,8 @@ table.
 | **integration-admission-reusable** | `config_path=config/integration-admission.json`, `base_sha` (req), `head_sha` (req), `installation_id` (req), `accepted_producer` (req), `pack_ref=v1`, `evidence_bundle_json=[]`, `runs_on=ubuntu-latest`, `shadow=true: boolean`, `timeout_minutes=15: number` | none | `plan`, `verdict` |
 | **migration-run-gate-reusable** | `db_image` (req), `db_ports_json` (req), `db_env_json` (req), `db_options=''`, `migrations_env_json` (req), `workdir=.`, `adapter=alembic`, `python_version=3.12`, `runs_on=ubuntu-latest`, `install_command` (req), `setup_command=''`, `run_prefix=''`, `downgrade_steps=1`, `alembic_check=false: boolean`, `url_env_var=ALEMBIC_DATABASE_URL` | none | none |
 | **outcome-check-reusable** | `outcome` (req), `operation` (req), `summary` (req), `head_sha=''` | none | none |
-| **pr-assessment-reusable** | `provider_mode=anthropic`, `litellm_proxy_url=''`, `model=''`, `runs_on=ubuntu-latest`, `pack_ref=v1`, `trusted_sync_author_id=215220684: number`, `jev_judge_shadow=off`, `jev_entity=''` | `ANTHROPIC_API_KEY`, `LITELLM_MASTER_KEY`, `JEV_TYPESAFE_API_KEY` | none |
-| **pr-autofix-loop-reusable** | `provider_mode=anthropic`, `litellm_proxy_url=''`, `model=''`, `runs_on=ubuntu-latest`, `max_successful_fixes=1`, `trusted_agent_bots=''` | `ANTHROPIC_API_KEY`, `LITELLM_MASTER_KEY`, `GH_PAT` | `activation` |
+| **pr-assessment-reusable** | `provider_mode=proxy`, `litellm_proxy_url=''`, `model=''`, `runs_on=ubuntu-latest`, `pack_ref=v1`, `trusted_sync_author_id=215220684: number`, `jev_judge_shadow=off`, `jev_entity=''` | `ANTHROPIC_API_KEY`, `LITELLM_MASTER_KEY`, `JEV_TYPESAFE_API_KEY` | none |
+| **pr-autofix-loop-reusable** | `provider_mode=proxy`, `litellm_proxy_url=''`, `model=''`, `runs_on=ubuntu-latest`, `max_successful_fixes=1`, `trusted_agent_bots=''` | `ANTHROPIC_API_KEY`, `LITELLM_MASTER_KEY`, `GH_PAT` | `activation` |
 | **pre-production-tier-reusable** | `gates` (req), `budget_minutes=45: number`, `job_timeout_minutes=60: number`, `runs_on=ubuntu-latest`, `max_parallel=4: number`, `environment=''`, `checkout_fetch_depth=0: number`, `open_issue_on_failure=false: boolean` | `GATE_SECRETS` | `verdict`, `breakdown` |
 | **restore-drill-reusable** | `resource_group` (req), `sql_server` (req), `source_database` (req), `sanity_queries=SELECT COUNT(*) AS table_count FROM INFORMATION_SCHEMA.TABLES`, `db_auth=sql-auth`, `sqlcmd_version=1.9.0`, `sqlcmd_sha256=b896bac71cf6ad8feca125bb42be61999116d8566a078ed475893372ccf8c0f2`, `timeout_minutes=45: number`, `runs_on=ubuntu-latest` | `DRILL_SQL_USER`, `DRILL_SQL_PASSWORD`, `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID` | none |
 | **secret-scan-reusable** | `runs_on=ubuntu-latest`, `node_version=24`, `python_version=3.12`, `require_gitleaks_license=false: boolean`, `npm_audit_omit_dev=false: boolean`, `gitleaks_version=8.30.0`, `fail_on_inert=false: boolean` | `GITLEAKS_LICENSE` | `npm_audit_activation`, `pip_audit_activation` |

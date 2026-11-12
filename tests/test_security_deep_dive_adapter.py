@@ -227,6 +227,7 @@ def test_unavailable_contract_refuses_preparation(interface, deep_repo, mutation
         role.name = 'systems-consistency'
     elif mutation == 'no_first_party':
         role.first_party = False
+        role.required_security_review = False
     else:
         role.data_sensitivity = 'restricted'
     with pytest.raises(ValueError):

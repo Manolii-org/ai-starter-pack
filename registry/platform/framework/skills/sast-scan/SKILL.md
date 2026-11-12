@@ -3,8 +3,8 @@ name: sast-scan
 version: 1.0.0
 description: "Run static application security testing (Semgrep, plus CodeQL when available) over changed files or a path, triage findings by exploitability, and promote true-positives to the security-deep-dive agent."
 type: skill
+required_security_review: true
 data_sensitivity: internal
-first_party: true  # eligibility matrix: security review stays on Anthropic even under OSS routing
 safety_tier: green
 requires_mcp: []
 required_entities: []
