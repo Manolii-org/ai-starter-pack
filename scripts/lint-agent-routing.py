@@ -5,12 +5,12 @@ RULE 1 — Data classification (restricted / restricted_us_oss_ok):
   An agent with data_sensitivity 'restricted' is a governance no-AI label and
   MUST NOT declare a runnable model at all. An agent with 'restricted_us_oss_ok'
   must declare a model/alias whose data_sensitivity_max covers that tier
-  (US-origin OSS or an Anthropic tier).
+  (an owner-qualified governed route or explicitly cleared native host).
 
 The LiteLLM proxy intercepts certain model IDs (including claude-haiku-4-5-20251001
 and its 'haiku' short alias) and silently routes them to OSS providers. An agent
-with restricted_us_oss_ok data classification that declares such a model
-would leak client/PII data to a third-party provider without any runtime warning.
+with protected data classification must use the intercepted route's actual
+declared clearance; a vendor-looking name does not establish permission.
 
 SOURCE OF TRUTH: .claude/model-routing.json
   - tier_aliases.<alias>.data_sensitivity_max   -- OSS tier names
@@ -51,13 +51,86 @@ ROUTING_CONFIG_PATH = next(
 )
 AGENTS_DIR = REPO_ROOT / ".claude" / "agents"
 
-# Sensitivity levels that require Anthropic-only routing.
+# Sensitivity levels that require declared route clearance.
 REQUIRES_NO_AI = {"restricted"}
 REQUIRES_US_OR_ANTHROPIC = {"restricted_us_oss_ok"}
 
 
+def _declared_sensitivity_max(meta):
+    order = {"public": 0, "internal": 1, "restricted_us_oss_ok": 2}
+    if "data_sensitivity_max" in meta:
+        value = meta["data_sensitivity_max"]
+        return value if isinstance(value, str) and value in order else "unknown"
+    if "data_clearance" not in meta:
+        return "internal"
+    levels = meta["data_clearance"]
+    if (not isinstance(levels, list) or not levels
+            or any(not isinstance(level, str) or level not in order for level in levels)):
+        return "unknown"
+    return max(levels, key=order.get)
+
+
+def _registered_platform_models(platform):
+    aliases = platform.get("available_models", [])
+    resolution = platform.get("alias_resolution", {})
+    if (not isinstance(aliases, list) or not isinstance(resolution, dict)
+            or any(not isinstance(alias, str) or not alias for alias in aliases)):
+        return set()
+    registered = set(aliases)
+    for alias in aliases:
+        target = resolution.get(alias)
+        if target is not None:
+            if not isinstance(target, str) or not target:
+                return set()
+            registered.add(target)
+    return registered
+
+
+def build_registered_routes(config):
+    """Resolve owner-declared clearance with proxy interception taking precedence."""
+    routes = {}
+    order = {"public": 0, "internal": 1, "restricted_us_oss_ok": 2, "restricted": 3}
+    def add(name, meta, source):
+        if not isinstance(name, str) or not name or name.startswith("$"):
+            return
+        if not isinstance(meta, dict):
+            meta = {"data_sensitivity_max": "unknown"}
+        if source == "platforms" and name in routes:
+            if order.get(routes[name]["data_sensitivity_max"], 0) <= order.get(_declared_sensitivity_max(meta), 0):
+                return
+        routes[name] = {"data_sensitivity_max": _declared_sensitivity_max(meta),
+                        "resolves_to": meta.get("resolves_to", meta.get("model", name)),
+                        "source": source, "warning": meta.get("warning", "")}
+    for platform in config.get("platforms", {}).values():
+        if isinstance(platform, dict):
+            for name in _registered_platform_models(platform):
+                add(name, platform, "platforms")
+    tiers = config.get("tier_definitions", {})
+    tier_routes = {}
+    for name, meta in tiers.items():
+        if isinstance(meta, dict):
+            for alias in (meta.get("model"), meta.get("litellm_alias")):
+                if not isinstance(alias, str):
+                    continue
+                previous = tier_routes.get(alias)
+                if previous is None or order.get(_declared_sensitivity_max(meta), 0) < order.get(_declared_sensitivity_max(previous), 0):
+                    tier_routes[alias] = meta
+    # Explicit route names retain their own ceiling; duplicate raw backends
+    # retain the lowest declaration until a specific route is selected.
+    for name, meta in tiers.items():
+        tier_routes[name] = meta
+    for name, meta in tier_routes.items():
+        add(name, meta, "tier_definitions")
+    for section in ("tier_aliases", "proxy_intercepted_models"):
+        for name, meta in config.get(section, {}).items():
+            add(name, meta, section)
+    return routes
+
+
 def build_anthropic_native_set(config):
     """Derive Anthropic-native model identifiers from routing config.
+
+    Legacy inventory API only: membership never grants data clearance.
 
     Collects tier names and litellm_aliases where provider == 'anthropic',
     then adds Claude Code short aliases from platforms.claude_code.available_models,
@@ -216,9 +289,6 @@ def lint_agent_file(path, oss_routed, anthropic_native, verbose=False, known_sen
     if data_sensitivity not in REQUIRES_US_OR_ANTHROPIC:
         return []
 
-    if model in anthropic_native:
-        return []
-
     if model in oss_routed:
         meta = oss_routed[model]
         if meta.get("data_sensitivity_max") == "restricted_us_oss_ok":
@@ -235,7 +305,7 @@ def lint_agent_file(path, oss_routed, anthropic_native, verbose=False, known_sen
         })
     else:
         # Unknown model + restricted_us_oss_ok data sensitivity → fail closed.
-        # We cannot prove Anthropic routing for an unregistered identifier.
+        # We cannot prove declared clearance for an unregistered identifier.
         violations.append({
             "file": str(path),
             "agent": fm.get("name", path.stem),
@@ -245,8 +315,7 @@ def lint_agent_file(path, oss_routed, anthropic_native, verbose=False, known_sen
             "data_sensitivity_max": "unknown",
             "source": "unregistered_model",
             "warning": (
-                "Model is not registered in tier_aliases or proxy_intercepted_models; "
-                "cannot prove Anthropic routing."
+                "Model has no registered route metadata; cannot prove declared data clearance."
             ),
         })
         if verbose:
@@ -278,9 +347,9 @@ def format_violation(v):
     if v.get("warning"):
         lines.append(f"  NOTE:        {v['warning']}")
     lines.append(
-        "  FIX:         Set model to an Anthropic-native identifier defined in "
-        ".claude/model-routing.json (tier_definitions where provider == 'anthropic', "
-        "or a claude_code platform alias not listed in proxy_intercepted_models)."
+        "  FIX:         Select an owner-configured route whose declared data_sensitivity_max "
+        "or data_clearance covers this classification in .claude/model-routing.json. "
+        "The restricted classification permits no AI model."
     )
     return "\n".join(lines)
 
@@ -522,7 +591,8 @@ def main():
 
     config = load_routing_config()
     oss_routed = build_oss_routed_set(config)
-    anthropic_native = build_anthropic_native_set(config)
+    registered_routes = build_registered_routes(config)
+    anthropic_native = set()  # Legacy lint API argument; identity grants no clearance.
 
     if args.list_oss:
         print("OSS-routed model identifiers (NOT safe for restricted data; restricted_us_oss_ok requires a guardrailed/declared alias):\n")
@@ -539,7 +609,7 @@ def main():
     all_violations = []
     for path in agent_files:
         vios = lint_agent_file(
-            path, oss_routed, anthropic_native, verbose=args.verbose,
+            path, registered_routes, anthropic_native, verbose=args.verbose,
             known_sensitivities=set(config.get("data_classification", {}).keys()),
         )
         all_violations.extend(vios)
@@ -553,10 +623,9 @@ def main():
         print("WHY THIS MATTERS:")
         print(
             "  Agents with data_sensitivity 'restricted' declare no model; 'restricted_us_oss_ok' agents handle\n"
-            "  client code, PII, or other Anthropic-only data.\n"
-            "  OSS tier aliases and proxy-intercepted model IDs route through third-party\n"
-            "  providers (Fireworks, Together AI, Groq) — data would leave Anthropic\n"
-            "  infrastructure silently, violating the data classification policy.\n"
+            "  protected data and require a route with explicit owner-declared clearance.\n"
+            "  A provider name or native model identifier grants no data permission.\n"
+            "  Proxy interception takes precedence over native host metadata.\n"
         )
         print(
             "  Source of truth: .claude/model-routing.json\n"
