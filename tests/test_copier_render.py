@@ -1182,3 +1182,95 @@ def test_executor_native_linux_gate_declares_tools_and_preserves_qualification()
         assert "|| true" not in step["run"]
     # The established portable contract is still called independently.
     assert "test_agent_check.py" in steps["Local agent validation contract"]["run"]
+
+
+@pytest.mark.parametrize("case,package,expected,message", [
+    ("success", "", 0, ""),
+    ("large-policy", "", 0, ""),
+    ("update-fails", "", 2, "package metadata unavailable"),
+    ("install-fails", "", 2, "prerequisite installation failed"),
+] + [
+    (case, package, 2, message)
+    for case, message in (
+        ("producer-fails", "prerequisite metadata query failed"),
+        ("producer-fails-after-candidate", "prerequisite metadata query failed"),
+        ("missing-candidate", "prerequisite candidate unavailable"),
+        ("empty-candidate", "prerequisite candidate unavailable"),
+        ("none-candidate", "prerequisite candidate unavailable"),
+    )
+    for package in ("bubblewrap", "build-essential")
+])
+def test_executor_public_linux_setup_consumes_metadata_and_fails_closed(tmp_path, case, package, expected, message):
+    """Execute the real recipe with synthetic metadata; never run apt or sudo."""
+    config = json.loads((ROOT / "config/agent-checks.json").read_text())
+    release = next(check for check in config["checks"] if check["id"] == "release-manifest-contract")
+    assert any("test_executor_public_linux_setup_consumes_metadata_and_fails_closed" in command[-1]
+               for command in release["commands"] if "-k" in command)
+    workflow = yaml.safe_load((ROOT / ".github/workflows/plugin-eval-gate.yml").read_text())
+    setup = next(step["run"] for step in workflow["jobs"]["eval-gate"]["steps"]
+                 if step.get("name") == "Install public Linux source-executor prerequisites")
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    calls = tmp_path / "calls"
+    versions = {"bubblewrap": "0.12.0-1", "build-essential": "12.12"}
+    if case == "large-policy":
+        for name, version in versions.items():
+            # More than a pipe buffer, with a later candidate that must not win.
+            (tmp_path / name).write_text(
+                f"{name}:\n  Candidate: {version}\n" + "  synthetic version-table row\n" * 300000
+                + "  Candidate: 0.0-not-selected\n")
+    scripts = {
+        "sudo": r'''
+printf 'sudo %s\n' "$*" >> "$SYNTHETIC_CALLS"
+[ "$1" = -n ] && [ "$2" = apt-get ] || exit 41
+case "$3" in
+  update) [ "$SYNTHETIC_CASE" != update-fails ] ;;
+  install)
+    [ "$*" = '-n apt-get install --no-install-recommends -y bubblewrap=0.12.0-1 build-essential=12.12' ] || exit 42
+    [ "$SYNTHETIC_CASE" != install-fails ] ;;
+  *) exit 43 ;;
+esac
+''',
+        "apt-cache": r'''
+printf 'apt-cache %s\n' "$*" >> "$SYNTHETIC_CALLS"
+[ "$1" = policy ] || exit 44
+case "$2" in bubblewrap) version=0.12.0-1 ;; build-essential) version=12.12 ;; *) exit 45 ;; esac
+if [ "$2" = "$SYNTHETIC_PACKAGE" ]; then
+  case "$SYNTHETIC_CASE" in
+    producer-fails) exit 23 ;;
+    producer-fails-after-candidate) printf '  Candidate: %s\n' "$version"; exit 23 ;;
+    missing-candidate) printf '  Installed: (none)\n'; exit 0 ;;
+    empty-candidate) printf '  Candidate:\n'; exit 0 ;;
+    none-candidate) printf '  Candidate: (none)\n'; exit 0 ;;
+  esac
+fi
+if [ "$SYNTHETIC_CASE" = large-policy ]; then
+  exec /bin/cat "$SYNTHETIC_POLICY_DIR/$2"
+fi
+printf '  Candidate: %s\n' "$version"
+''',
+        "dpkg-query": r'''
+printf 'dpkg-query %s\n' "$*" >> "$SYNTHETIC_CALLS"
+[ "$*" = '--show bubblewrap build-essential' ] || exit 46
+''',
+    }
+    for name, program in scripts.items():
+        path = tools / name
+        path.write_text("#!/bin/sh\nset -eu\n" + program)
+        path.chmod(0o700)
+    environment = {key: os.environ[key] for key in ("HOME", "LANG") if key in os.environ}
+    environment.update(PATH=str(tools) + os.pathsep + os.defpath,
+                       SYNTHETIC_CASE=case, SYNTHETIC_PACKAGE=package,
+                       SYNTHETIC_POLICY_DIR=str(tmp_path), SYNTHETIC_CALLS=str(calls))
+    result = subprocess.run(["/bin/bash", "-c", setup], cwd=tmp_path, env=environment,
+                            capture_output=True, text=True, timeout=30)
+    assert result.returncode == expected, result.stdout + result.stderr
+    recorded = calls.read_text()
+    if expected == 0:
+        assert "INCOMPLETE" not in result.stderr
+        assert "sudo -n apt-get install --no-install-recommends -y bubblewrap=0.12.0-1 build-essential=12.12\n" in recorded
+        assert "dpkg-query --show bubblewrap build-essential\n" in recorded
+    else:
+        assert message in result.stderr
+        assert "dpkg-query" not in recorded
+        assert ("sudo -n apt-get install" in recorded) == (case == "install-fails")

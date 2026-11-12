@@ -296,7 +296,7 @@
           "-q",
           "tests/test_copier_render.py",
           "-k",
-          "test_rendered_readme_counts_match_rendered_tree or test_release_capability_distribution_boundary or test_agent_validation_base_uses_owner_ref"
+          "test_rendered_readme_counts_match_rendered_tree or test_release_capability_distribution_boundary or test_agent_validation_base_uses_owner_ref or test_executor_public_linux_setup_consumes_metadata_and_fails_closed"
         ]
       ],
       "timeout_seconds": 180,

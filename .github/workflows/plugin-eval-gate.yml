@@ -59,8 +59,10 @@ jobs:
           fi
           # Resolve and pin the actual signed repository candidates on this
           # runner; do not invent a version for the moving ubuntu-latest image.
-          if ! bubblewrap_version="$(apt-cache policy bubblewrap | awk '/Candidate:/ {print $2; exit}')" || \
-              ! build_version="$(apt-cache policy build-essential | awk '/Candidate:/ {print $2; exit}')"; then
+          # Consume all metadata so an early consumer exit cannot SIGPIPE the
+          # producer under pipefail; emit only the first Candidate value.
+          if ! bubblewrap_version="$(apt-cache policy bubblewrap | awk '/Candidate:/ && !seen {print $2; seen=1}')" || \
+              ! build_version="$(apt-cache policy build-essential | awk '/Candidate:/ && !seen {print $2; seen=1}')"; then
             echo "INCOMPLETE: public Linux prerequisite metadata query failed" >&2
             exit 2
           fi
