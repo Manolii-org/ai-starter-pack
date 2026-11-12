@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Sentry incident sweep routes (one entity)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["entity", "organization", "routes"],
+  "properties": {
+    "entity": {"type": "string", "pattern": "^[a-z][a-z0-9_-]{1,40}$"},
+    "organization": {
+      "type": "object", "additionalProperties": false, "required": ["slug", "id"],
+      "properties": {
+        "slug": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,60}$"},
+        "id": {"type": "string", "pattern": "^[0-9]{1,32}$"}
+      }
+    },
+    "lookback_minutes": {"type": "integer", "minimum": 15, "maximum": 10080},
+    "max_enrichments": {"type": "integer", "minimum": 1, "maximum": 200},
+    "routes": {
+      "type": "array", "minItems": 1,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["project_id", "environment", "repo", "runtime_id"],
+        "properties": {
+          "project_id": {"type": "string", "pattern": "^[0-9]{1,32}$"},
+          "environment": {"type": "string", "pattern": "^[A-Za-z0-9_.-]{1,64}$"},
+          "repo": {"type": "string", "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"},
+          "runtime_id": {"type": "string", "minLength": 1, "maxLength": 300},
+          "note": {"type": "string", "maxLength": 300}
+        }
+      }
+    }
+  }
+}

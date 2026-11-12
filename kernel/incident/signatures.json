@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "comment": "Deterministic Sentry issue classification. Ordered: first match wins. Patterns are case-insensitive and written in the common subset of Python re and JavaScript RegExp. Matched against '<exception type> <message>' in memory only; the message is never persisted. Language mirrors must pass classification-cases.jsonl, the shared parity corpus.",
+  "classifications": ["code_defect", "migration", "configuration", "provider", "quota", "security", "unknown"],
+  "signatures": [
+    {"classification": "quota", "pattern": "RateLimit|\\b429\\b|quota|insufficient[_ ]?(credits|balance|funds)|\\b402\\b|credit limit|usage limit"},
+    {"classification": "configuration", "pattern": "ModelNotFound|model .{0,40}not (found|exist)|AuthenticationError|PermissionDenied|\\b40[13]\\b|no api key|api key .{0,20}(missing|invalid)|not configured|missing (env|environment)|Cron failure"},
+    {"classification": "migration", "pattern": "UndefinedColumn|UndefinedTable|relation \".{1,120}\" does not exist|column \".{1,120}\" does not exist|ProgrammingError|schema drift"},
+    {"classification": "provider", "pattern": "ServiceUnavailable|InternalServerError|BadGateway|GatewayTimeout|APIConnectionError|\\bAPIError\\b|\\b50[234]\\b|async_function_with_fallbacks|upstream|overloaded"}
+  ],
+  "code_defect_requires": ["in_app_frame", "release_sha"]
+}
