@@ -541,6 +541,42 @@
           "-v"
         ]
       ]
+    },
+    {
+      "id": "installer-layout-contract",
+      "paths": [
+        "scripts/install-agent-validation.py",
+        "plugin/manolii-framework/scripts/install-agent-validation.py",
+        "registry/platform/framework/scripts/install-agent-validation.py",
+        "scripts/tests/test_agent_validation_layout.py",
+        "docs/agent-validation-layout.md",
+        "config/agent-checks.json",
+        "config/agent-checks.json.jinja",
+        "copier.yml",
+        "tests/test_copier_render.py",
+        ".github/workflows/plugin-eval-gate.yml"
+      ],
+      "tools": [
+        "uv"
+      ],
+      "environment": "release-contract-python",
+      "timeout_seconds": 360,
+      "commands": [
+        [
+          ".ai/agent-checks/release-venv/bin/python",
+          "-B",
+          "-m",
+          "pytest",
+          "scripts/tests/test_agent_validation_layout.py",
+          "-q"
+        ]
+      ],
+      "ci_sources": [
+        {
+          "path": ".github/workflows/plugin-eval-gate.yml",
+          "contains": "python3 -m pytest scripts/tests/test_agent_validation_layout.py -q"
+        }
+      ]
     }
   ]
 }

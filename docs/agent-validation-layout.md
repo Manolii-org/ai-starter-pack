@@ -32,6 +32,15 @@ The explicit layout mode requires POSIX no-follow directory-descriptor support;
 unsupported hosts fail closed before planning. The regular default layout keeps
 its portable path through individual atomic replacements.
 
+Legacy default `--recipes` inputs may retain linked recipe paths on hosts without
+`O_PATH`/`O_NOFOLLOW` or `O_SYMLINK`. The installer repeatedly checks the observed
+link mapping and canonical recipe bytes before writes. That fallback cannot hold
+the original link inode or detect a replacement fully reversed between checks;
+caller-exclusive ownership is still required. It does not broaden permitted
+output paths or qualify explicit `--layout`, which continues to require the
+stronger directory-descriptor and retained-link support. Qualified POSIX link
+handles remain held until the plan closes, including on coarse-clock filesystems.
+
 The `.claude/skills/agent-validation/SKILL.md` logical output maps to exactly one
 `.github/skills/agent-validation/SKILL.md` write. `.cursor/skills` is a read-only
 witness, never a second write. Both tracked links stay unchanged. This is not
@@ -90,6 +99,28 @@ The batch is **not** an atomic filesystem transaction or a compare-and-swap
 against a noncooperating writer. There are bounded gaps between checks and
 operations. No automatic rollback overwrites a newer writer's files.
 
+A failed descriptor-based write retains its owned temporary inode and attempts
+to make that inode private (0600); cleanup never unlinks a pathname. Its
+`AGENT-VALIDATION-TEMPORARY-RECOVERY` stderr record preserves the existing
+`name`, `name_observation`, held identity/mode, privacy and link-count fields.
+The additive `selected_parent` records the absolute target directory selected by
+the caller, while `held_parent_identity` records the retained directory FD's
+device/inode. Together with `name`, these distinguish otherwise identical
+basenames in the repository root, `scripts`, `docs` or `.ai` directories.
+Older direct helper callers may omit the directory: `selected_parent` is then
+null and `selected_parent_observation` is `unknown`.
+
+For normal replacements, `selected_parent_observation` is
+`historical_selection`. That path is a historical selection, not proof that it
+still reaches the held directory or inode: a parent can be renamed or replaced,
+even between checks and record emission. Cleanup reads only held descriptors
+and checks the temporary name relative to its held parent; it does not resolve
+or reopen the selected directory. A denied privacy change reports the actual
+held mode and `private: false`. Root/OS trust and non-atomic observation limits
+remain; neither directory identity nor a recovery record grants deletion,
+rollback, retry or overwrite authority. Reconcile current owner-local evidence
+before any separate recovery action.
+
 Explicit-layout apply records private, mode-0600 evidence in
 `.ai/agent-checks/layout-recovery.json`, under the existing ignored receipt
 directory. Before planning can succeed, the path must be absent from HEAD and
@@ -107,6 +138,24 @@ input change prevents a journal refresh, the prepared snapshot and reported
 progress must be reconciled against actual file hashes. An uncertain last
 replacement is not permission to replay it. Incomplete evidence blocks another
 apply/check/preview. Keep this private evidence local; it can contain owner text.
+
+## Automatic maintainer coverage and budget
+
+The Pack-only `installer-layout-contract` runs the complete installer layout
+suite through the existing `release-contract-python` environment. Layout test,
+installer, guide, profile and native workflow changes select this check. The
+same full suite also runs in the existing native `eval-gate` job; its name,
+provider and 15-minute overall deadline are unchanged. Consumer profiles retain
+their two portable checks and exclude this maintenance suite.
+
+The dedicated maintainer command has an explicit 360-second budget. A bounded
+recovery-workspace measurement on 2026-11-12 completed all 201 tests without
+skips in 219.068 seconds wall time after an earlier 180-second attempt timed
+out. Existing apply/idempotence, execute-only and mode/provenance fixtures
+accounted for the slowest cases; no assertions or matrix rows were removed.
+The 600-second diagnostic ceiling was measurement only, not the automatic
+policy. Existing seven check definitions and budgets remain unchanged. These
+local measurements do not establish native CI timing or invoice savings.
 
 ## Packaging and reader handoff
 
