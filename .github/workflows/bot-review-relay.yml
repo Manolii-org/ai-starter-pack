@@ -5,6 +5,10 @@ name: Bot Review Relay
 # starting with '**[@'). Do not also install master auto-address-review.yml
 # on the same repo — that would race two fixers on the same relayed comment.
 #
+# This relay is a conversation aid, not execution delivery. Its GITHUB_TOKEN
+# comment cannot trigger an issue_comment workflow. Autofix admits approved
+# native reviewer events directly; do not add a PAT or competing dispatcher.
+#
 # Surfaces bot PR review comments as plain PR comments so LLM-based
 # autofix tools (e.g. Claude Code) can see and act on them.
 #

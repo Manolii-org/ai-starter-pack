@@ -57,8 +57,8 @@ permissions:
 jobs:
   autofix:
     name: Autofix PR
-    if: |
-      (
+    if: |-
+      ((
         (
           github.event_name == 'pull_request_review' &&
           contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.review.author_association) &&
@@ -91,7 +91,7 @@ jobs:
         )
       ) &&
       github.actor != 'dependabot[bot]' &&
-      github.actor != 'renovate[bot]'
+      github.actor != 'renovate[bot]') && github.event.action != 'edited' || (contains(fromJSON('["issue_comment","pull_request_review","pull_request_review_comment"]'), github.event_name) && github.event.sender.type == 'Bot' && contains(fromJSON(vars.AUTOFIX_TRUSTED_REVIEWER_IDS || '["199175422","136622811"]'), github.actor_id) && (github.event.comment.body || github.event.review.body || '') != '' && !contains((github.event.comment.body || github.event.review.body || ''), 'auto-generated reply by CodeRabbit') && ((contains((github.event.comment.body || github.event.review.body || ''), ' Badge') || contains((github.event.comment.body || github.event.review.body || ''), 'P0:') || contains((github.event.comment.body || github.event.review.body || ''), 'P1:') || contains((github.event.comment.body || github.event.review.body || ''), 'P2:') || contains((github.event.comment.body || github.event.review.body || ''), 'P3:') || contains((github.event.comment.body || github.event.review.body || ''), 'Critical**') || contains((github.event.comment.body || github.event.review.body || ''), 'Major**') || contains((github.event.comment.body || github.event.review.body || ''), 'Minor**') || contains((github.event.comment.body || github.event.review.body || ''), 'Nitpick**') || contains((github.event.comment.body || github.event.review.body || ''), 'Critical:') || contains((github.event.comment.body || github.event.review.body || ''), 'Major:') || contains((github.event.comment.body || github.event.review.body || ''), 'Minor:') || contains((github.event.comment.body || github.event.review.body || ''), 'Nitpick:') || contains((github.event.comment.body || github.event.review.body || ''), 'Potential issue') || contains((github.event.comment.body || github.event.review.body || ''), 'Actionable comments posted: 1') || contains((github.event.comment.body || github.event.review.body || ''), 'Actionable comments posted: 2') || contains((github.event.comment.body || github.event.review.body || ''), 'Actionable comments posted: 3') || contains((github.event.comment.body || github.event.review.body || ''), 'Actionable comments posted: 4')) || !(contains((github.event.comment.body || github.event.review.body || ''), 'codex-pull-request-review-summary') || contains((github.event.comment.body || github.event.review.body || ''), 'no security issues were found') || contains((github.event.comment.body || github.event.review.body || ''), 'Codex Review: Didn''t find any major issues.') || contains((github.event.comment.body || github.event.review.body || ''), 'Actionable comments posted: 0') || contains((github.event.comment.body || github.event.review.body || ''), 'rate limited by coderabbit.ai') || contains((github.event.comment.body || github.event.review.body || ''), 'skip review by coderabbit.ai') || contains((github.event.comment.body || github.event.review.body || ''), 'usage limit') || contains((github.event.comment.body || github.event.review.body || ''), 'BUGBOT_FREE_TIER_DISABLED_UPSELL'))))
     uses: $/.github/workflows/pr-autofix-execution-reusable.yml
     with:
       variant: reusable

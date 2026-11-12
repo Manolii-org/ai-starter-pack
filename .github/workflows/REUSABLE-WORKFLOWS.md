@@ -655,7 +655,14 @@ internal workflow is an implementation detail; retain the public caller API.
 failed CI (e.g., when Static Review, PR Assessment, or Secret Scan workflows fail).
 Autofix will only run on Pull Requests, not scheduled runs or other workflow_run events.
 
-**Relay acceptance:** Autofix processes comments starting with `**[@` posted by
+**Native review routing:** Approved native Codex/CodeRabbit bot events are admitted
+directly using immutable IDs; optional `AUTOFIX_TRUSTED_REVIEWER_IDS` replaces the
+JSON string-array policy. Include `edited` review/comment types for updated
+findings. The built-in-token relay is presentation-only and cannot trigger a
+new issue-comment workflow. It needs no PAT. See the event policy above; original
+owner custody remains mandatory.
+
+**Legacy relay format compatibility:** Autofix processes comments starting with `**[@` posted by
 `github-actions[bot]` (typically relayed by `bot-review-relay.yml`). The pack owns
 relay transport — do **not** install `manolii-org/master` `auto-address-review.yml`
 on the same repo alongside pack Autofix (creates duplicate processing).

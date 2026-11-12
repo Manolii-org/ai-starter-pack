@@ -4,12 +4,15 @@ on:
   issue_comment:
     types:
     - created
+    - edited
   pull_request_review:
     types:
     - submitted
+    - edited
   pull_request_review_comment:
     types:
     - created
+    - edited
   workflow_run:
     types:
     - completed
@@ -27,8 +30,8 @@ jobs:
     name: Autofix Preflight
     runs-on: ${{ fromJSON(vars.LIGHT_RUNNER || '["ubuntu-slim"]') }}
     timeout-minutes: 10
-    if: |
-      (
+    if: |-
+      ((
         (
           github.event_name == 'pull_request_review' &&
           contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.review.author_association) &&
@@ -61,7 +64,7 @@ jobs:
         )
       ) &&
       github.actor != 'dependabot[bot]' &&
-      github.actor != 'renovate[bot]'
+      github.actor != 'renovate[bot]') && github.event.action != 'edited' || (contains(fromJSON('["issue_comment","pull_request_review","pull_request_review_comment"]'), github.event_name) && github.event.sender.type == 'Bot' && contains(fromJSON(vars.AUTOFIX_TRUSTED_REVIEWER_IDS || '["199175422","136622811"]'), github.actor_id) && (github.event.comment.body || github.event.review.body || '') != '' && !contains((github.event.comment.body || github.event.review.body || ''), 'auto-generated reply by CodeRabbit') && ((contains((github.event.comment.body || github.event.review.body || ''), ' Badge') || contains((github.event.comment.body || github.event.review.body || ''), 'P0:') || contains((github.event.comment.body || github.event.review.body || ''), 'P1:') || contains((github.event.comment.body || github.event.review.body || ''), 'P2:') || contains((github.event.comment.body || github.event.review.body || ''), 'P3:') || contains((github.event.comment.body || github.event.review.body || ''), 'Critical**') || contains((github.event.comment.body || github.event.review.body || ''), 'Major**') || contains((github.event.comment.body || github.event.review.body || ''), 'Minor**') || contains((github.event.comment.body || github.event.review.body || ''), 'Nitpick**') || contains((github.event.comment.body || github.event.review.body || ''), 'Critical:') || contains((github.event.comment.body || github.event.review.body || ''), 'Major:') || contains((github.event.comment.body || github.event.review.body || ''), 'Minor:') || contains((github.event.comment.body || github.event.review.body || ''), 'Nitpick:') || contains((github.event.comment.body || github.event.review.body || ''), 'Potential issue') || contains((github.event.comment.body || github.event.review.body || ''), 'Actionable comments posted: 1') || contains((github.event.comment.body || github.event.review.body || ''), 'Actionable comments posted: 2') || contains((github.event.comment.body || github.event.review.body || ''), 'Actionable comments posted: 3') || contains((github.event.comment.body || github.event.review.body || ''), 'Actionable comments posted: 4')) || !(contains((github.event.comment.body || github.event.review.body || ''), 'codex-pull-request-review-summary') || contains((github.event.comment.body || github.event.review.body || ''), 'no security issues were found') || contains((github.event.comment.body || github.event.review.body || ''), 'Codex Review: Didn''t find any major issues.') || contains((github.event.comment.body || github.event.review.body || ''), 'Actionable comments posted: 0') || contains((github.event.comment.body || github.event.review.body || ''), 'rate limited by coderabbit.ai') || contains((github.event.comment.body || github.event.review.body || ''), 'skip review by coderabbit.ai') || contains((github.event.comment.body || github.event.review.body || ''), 'usage limit') || contains((github.event.comment.body || github.event.review.body || ''), 'BUGBOT_FREE_TIER_DISABLED_UPSELL'))))
     outputs:
       skip: ${{ steps.gate.outputs.skip }}
       pr_number: ${{ steps.ref.outputs.pr_number }}
@@ -86,23 +89,56 @@ jobs:
         WR_HEAD_REPO_ID: ${{ github.event.workflow_run.head_repository.id || '' }}
         REPO_ID: ${{ github.event.repository.id }}
         REPOSITORY: ${{ github.repository }}
-      run: "set -euo pipefail\nif [[ \"$EVENT_NAME\" == \"workflow_run\" ]]; then\n  if [[ \"$WR_FORK\" == \"true\" ]]; then\n    echo \"skip=true\"\
-        \ >> \"$GITHUB_OUTPUT\"\n    echo \"Fork PR workflow_run \u2014 no secrets; skipping\"\n    exit 0\n  fi\n  # Bind the triggering run\
-        \ itself to this repository: .fork is\n  # false for a PR from the upstream of a forked deployment.\n  if [[ -z \"$WR_HEAD_REPO_ID\" ||\
-        \ \"$WR_HEAD_REPO_ID\" != \"$REPO_ID\" ]]; then\n    echo \"skip=true\" >> \"$GITHUB_OUTPUT\"\n    echo \"workflow_run head repository\
-        \ is not this repository; skipping\"\n    exit 0\n  fi\n  PR_NUM=\"${WR_PR_NUM}\"\n  HEAD_REF=\"${WR_HEAD_BRANCH}\"\nelse\n  PR_NUM=\"\
-        ${PR_NUM_DIRECT:-$ISSUE_NUM}\"\n  HEAD_REF=\"${PR_HEAD_REF:-}\"\nfi\nif [[ -z \"$PR_NUM\" ]]; then\n  echo \"skip=true\" >> \"$GITHUB_OUTPUT\"\
-        \n  echo \"No PR number; skipping\"\n  exit 0\nfi\nif [[ \"$EVENT_NAME\" == \"workflow_run\" ]]; then\n  CURRENT_HEAD_SHA=$(gh api \"\
-        repos/${REPOSITORY}/pulls/${PR_NUM}\" --jq '.head.sha' 2>/dev/null || echo '')\n  if [[ -n \"$WR_HEAD_SHA\" && -n \"$CURRENT_HEAD_SHA\"\
-        \ && \"$WR_HEAD_SHA\" != \"$CURRENT_HEAD_SHA\" ]]; then\n    echo \"skip=true\" >> \"$GITHUB_OUTPUT\"\n    echo \"Stale workflow_run:\
-        \ ${WR_HEAD_SHA} is not current PR head ${CURRENT_HEAD_SHA}; skipping before checkout and agent dispatch\"\n    exit 0\n  fi\nfi\nif [[\
-        \ -z \"$HEAD_REF\" ]]; then\n  # issue_comment payloads carry issue.number but no pull_request\n  # section \u2014 resolve the head branch\
-        \ over the API. Without --repo,\n  # gh resolves the repository from cwd's git remotes, and this job\n  # has no checkout, so the call\
-        \ would fail and HEAD_REF stayed\n  # empty \u2014 aborting the heavy job on `git checkout -B \"\"` later.\n  HEAD_REF=$(timeout -k 5\
-        \ 30 gh pr view \"$PR_NUM\" --repo \"$REPOSITORY\" --json headRefName --jq '.headRefName' 2>/dev/null || echo '')\nfi\nif [[ -z \"$HEAD_REF\"\
-        \ ]]; then\n  echo \"skip=true\" >> \"$GITHUB_OUTPUT\"\n  echo \"head_ref unresolvable for ${EVENT_NAME} event \u2014 skipping before\
-        \ the heavy job\"\n  exit 0\nfi\necho \"skip=false\" >> \"$GITHUB_OUTPUT\"\necho \"pr_number=$PR_NUM\" >> \"$GITHUB_OUTPUT\"\necho \"\
-        head_ref=$HEAD_REF\" >> \"$GITHUB_OUTPUT\"\n"
+      run: |
+        set -euo pipefail
+        if [[ "$EVENT_NAME" == "workflow_run" ]]; then
+          if [[ "$WR_FORK" == "true" ]]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "Fork PR workflow_run — no secrets; skipping"
+            exit 0
+          fi
+          # Bind the triggering run itself to this repository: .fork is
+          # false for a PR from the upstream of a forked deployment.
+          if [[ -z "$WR_HEAD_REPO_ID" || "$WR_HEAD_REPO_ID" != "$REPO_ID" ]]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "workflow_run head repository is not this repository; skipping"
+            exit 0
+          fi
+          PR_NUM="${WR_PR_NUM}"
+          HEAD_REF="${WR_HEAD_BRANCH}"
+        else
+          PR_NUM="${PR_NUM_DIRECT:-$ISSUE_NUM}"
+          HEAD_REF="${PR_HEAD_REF:-}"
+        fi
+        if [[ -z "$PR_NUM" ]]; then
+          echo "skip=true" >> "$GITHUB_OUTPUT"
+          echo "No PR number; skipping"
+          exit 0
+        fi
+        if [[ "$EVENT_NAME" == "workflow_run" ]]; then
+          CURRENT_HEAD_SHA=$(gh api "repos/${REPOSITORY}/pulls/${PR_NUM}" --jq '.head.sha' 2>/dev/null || echo '')
+          if [[ -n "$WR_HEAD_SHA" && -n "$CURRENT_HEAD_SHA" && "$WR_HEAD_SHA" != "$CURRENT_HEAD_SHA" ]]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "Stale workflow_run: ${WR_HEAD_SHA} is not current PR head ${CURRENT_HEAD_SHA}; skipping before checkout and agent dispatch"
+            exit 0
+          fi
+        fi
+        if [[ -z "$HEAD_REF" ]]; then
+          # issue_comment payloads carry issue.number but no pull_request
+          # section — resolve the head branch over the API. Without --repo,
+          # gh resolves the repository from cwd's git remotes, and this job
+          # has no checkout, so the call would fail and HEAD_REF stayed
+          # empty — aborting the heavy job on `git checkout -B ""` later.
+          HEAD_REF=$(timeout -k 5 30 gh pr view "$PR_NUM" --repo "$REPOSITORY" --json headRefName --jq '.headRefName' 2>/dev/null || echo '')
+        fi
+        if [[ -z "$HEAD_REF" ]]; then
+          echo "skip=true" >> "$GITHUB_OUTPUT"
+          echo "head_ref unresolvable for ${EVENT_NAME} event — skipping before the heavy job"
+          exit 0
+        fi
+        echo "skip=false" >> "$GITHUB_OUTPUT"
+        echo "pr_number=$PR_NUM" >> "$GITHUB_OUTPUT"
+        echo "head_ref=$HEAD_REF" >> "$GITHUB_OUTPUT"
     - name: Determine skip conditions
       id: pr
       if: steps.ref.outputs.skip != 'true'
@@ -118,47 +154,199 @@ jobs:
         WR_URL: ${{ github.event.workflow_run.html_url || '' }}
         REPOSITORY: ${{ github.repository }}
         REVIEW_STATE: ${{ github.event.review.state }}
-      run: "set -euo pipefail\necho \"number=$PR_NUM\" >> \"$GITHUB_OUTPUT\"\necho \"trigger_workflow=$WR_NAME\" >> \"$GITHUB_OUTPUT\"\necho \"\
-        trigger_run_url=$WR_URL\" >> \"$GITHUB_OUTPUT\"\n\n# Loop break: prior autofix commit still HEAD. Preflight has no\n# checkout \u2014\
-        \ read the head commit message via the API instead of\n# `git log` (same assertion: subject starts with [autofix]).\nPR_HEAD=$(timeout\
-        \ 20 gh api \"repos/${REPOSITORY}/pulls/${PR_NUM}\" \\\n  --jq '. as $pr | $pr.head | {sha: .sha, same_repo: (if .repo == null then \"\
-        missing\" elif (.repo.id == $pr.base.repo.id) then \"true\" else \"false\" end)}' \\\n  2>/dev/null || echo '{}')\nHEAD_SHA=$(echo \"\
-        $PR_HEAD\" | jq -r '.sha // empty')\nSAME_REPO=$(echo \"$PR_HEAD\" | jq -r '.same_repo // empty')\necho \"head_sha=$HEAD_SHA\" >> \"$GITHUB_OUTPUT\"\
-        \nif [[ -z \"$HEAD_SHA\" ]]; then\n  # Fail closed: an empty SHA would fall back to movable head_ref in\n  # the autofix checkout \u2014\
-        \ unvalidated commit. Skip instead.\n  echo \"skip=true\" >> \"$GITHUB_OUTPUT\"\n  echo \"Could not resolve PR head SHA; skipping\"\n\
-        \  exit 0\nfi\nif [[ \"$SAME_REPO\" != \"true\" ]]; then\n  # Compare repo IDs, not .fork (pr-autofix-loop-reusable.yml): a\n  # forked\
-        \ deployment repo has fork=true on its own PRs, and a\n  # deleted head has repo=null \u2014 both must fail closed. A cross-repo\n  #\
-        \ head is attacker-controlled code under write perms + agent creds\n  # on issue_comment/pull_request triggers.\n  echo \"skip=true\"\
-        \ >> \"$GITHUB_OUTPUT\"\n  echo \"Cross-repo/unverifiable PR head (same_repo=$SAME_REPO) \u2014 refusing privileged autofix checkout\"\
-        \n  exit 0\nfi\nLAST_MSG=''\nif [[ -n \"$HEAD_SHA\" ]]; then\n  LAST_MSG=$(timeout 20 gh api \"repos/${REPOSITORY}/commits/${HEAD_SHA}\"\
-        \ \\\n    --jq '.commit.message | split(\"\\n\")[0]' 2>/dev/null || echo '')\nfi\nif [[ \"$LAST_MSG\" == \\[autofix\\]* ]]; then\n  echo\
-        \ \"skip=true\" >> \"$GITHUB_OUTPUT\"\n  echo \"Latest commit is [autofix]; skipping to avoid loop\"\n  exit 0\nfi\n\nif echo \"$COMMENT_BODY\"\
-        \ | grep -qi \"skip-autofix\"; then\n  echo \"skip=true\" >> \"$GITHUB_OUTPUT\"\n  exit 0\nfi\n\n# Human issue_comment needs @claude;\
-        \ relayed **[@ and workflow_run do not\nif [[ \"$EVENT_NAME\" == \"issue_comment\" ]]; then\n  if [[ \"$ACTOR\" == \"github-actions[bot]\"\
-        \ ]] && [[ \"$COMMENT_BODY\" == '**[@'* ]]; then\n    : # relayed bot review \u2014 proceed\n  elif ! echo \"$COMMENT_BODY\" | grep -qi\
-        \ \"@claude\"; then\n    echo \"skip=true\" >> \"$GITHUB_OUTPUT\"\n    exit 0\n  fi\nfi\n\nif [[ \"$EVENT_NAME\" == \"pull_request_review\"\
-        \ ]]; then\n  if [[ \"$REVIEW_STATE\" == \"approved\" ]] && [[ -z \"$COMMENT_BODY\" || \"$COMMENT_BODY\" == \"null\" ]]; then\n    echo\
-        \ \"skip=true\" >> \"$GITHUB_OUTPUT\"\n    exit 0\n  fi\nfi\n\n# Opt-in trusted agent bots (e.g. Devin, Codex cloud, Cursor\n# background\
-        \ agents) whose pushes may trigger Autofix when CI fails.\n# Only on the workflow_run path, only for [bot] actors, matched like\n# the\
-        \ action's allowed_bots (case-insensitive, [bot] optional); '*'\n# is never honoured. Fork heads were already refused above.\n# The action's\
-        \ allowed_bots receives only this sanitised list, so a\n# '*' or malformed entry can never widen it either.\ntrusted_bots() {\n  local\
-        \ entry\n  IFS=',' read -ra entries <<< \"${TRUSTED_BOTS:-}\"\n  for entry in \"${entries[@]}\"; do\n    entry=\"${entry#\"${entry%%[![:space:]]*}\"\
-        }\"\n    entry=\"${entry%\"${entry##*[![:space:]]}\"}\"\n    entry=\"${entry,,}\"\n    entry=\"${entry%\\[bot\\]}\"\n    if [[ \"$entry\"\
-        \ =~ ^[a-z0-9][a-z0-9-]*$ ]]; then echo \"$entry\"; fi\n  done\n}\ntrusted_bot() {\n  local who=\"${1,,}\" entry\n  who=\"${who%\\[bot\\\
-        ]}\"\n  for entry in $(trusted_bots); do\n    [[ \"$entry\" == \"$who\" ]] && return 0\n  done\n  return 1\n}\n# Agent bots reach the\
-        \ action only on the CI-failure path; comment\n# and review triggers keep the relay bot alone.\nallowed_bots=\"github-actions\"\nif [[\
-        \ \"$EVENT_NAME\" == \"workflow_run\" ]]; then\n  for entry in $(trusted_bots); do allowed_bots+=\",$entry\"; done\nfi\necho \"allowed_bots=$allowed_bots\"\
-        \ >> \"$GITHUB_OUTPUT\"\n\n# claude-code-action fails the job (rather than skipping) for bot\n# actors outside allowed_bots and for actors\
-        \ without write access.\n# Only the relay bot and opted-in agent bots are allowed; skip\n# everything else before dispatch.\nfor who in\
-        \ \"$ACTOR\" \"${WR_ACTOR:-}\"; do\n  [[ -z \"$who\" ]] && continue\n  if [[ \"$who\" == \"github-actions[bot]\" && \"$EVENT_NAME\" ==\
-        \ \"issue_comment\" && \"$COMMENT_BODY\" == '**[@'* ]]; then\n    continue\n  fi\n  if [[ \"$EVENT_NAME\" == \"workflow_run\" && \"$who\"\
-        \ == *\"[bot]\" ]] && trusted_bot \"$who\"; then\n    continue\n  fi\n  PERM=$(timeout -k 5 30 gh api \"repos/${REPOSITORY}/collaborators/${who}/permission\"\
-        \ --jq '.permission' 2>/dev/null || echo unknown)\n  case \"$PERM\" in\n    admin|write) ;;\n    *)\n      echo \"skip=true\" >> \"$GITHUB_OUTPUT\"\
-        \n      echo \"Actor ${who} has no write access or is a non-relay bot (permission=${PERM}); skipping\"\n      exit 0\n      ;;\n  esac\n\
-        done\n\n# --repo required: this step runs with no checkout, so gh would\n# resolve the repo from cwd and fail. Failure must fail closed\
-        \ \u2014\n# a label list we can't read might contain skip-ai-review.\nLABELS=$(timeout 20 gh pr view \"$PR_NUM\" --repo \"${REPOSITORY}\"\
-        \ --json labels --jq '[.labels[].name]' 2>/dev/null || echo 'FAIL')\nif [[ \"$LABELS\" == \"FAIL\" ]] || echo \"$LABELS\" | grep -q \"\
-        skip-ai-review\"; then\n  echo \"skip=true\" >> \"$GITHUB_OUTPUT\"\nelse\n  echo \"skip=false\" >> \"$GITHUB_OUTPUT\"\nfi\n"
+        ACTOR_ID: ${{ github.actor_id }}
+        ACTOR_TYPE: ${{ github.event.sender.type }}
+        REVIEWER_IDS: ${{ vars.AUTOFIX_TRUSTED_REVIEWER_IDS || '["199175422","136622811"]' }}
+        REVIEW_SOURCE_HEAD: ${{ github.event.review.commit_id || github.event.comment.commit_id || '' }}
+        REVIEW_FINDING_PATTERN: \ Badge|P0:|P1:|P2:|P3:|Critical\*\*|Major\*\*|Minor\*\*|Nitpick\*\*|Critical:|Major:|Minor:|Nitpick:|Potential\
+          issue|Actionable\ comments\ posted:\ 1|Actionable\ comments\ posted:\ 2|Actionable\ comments\ posted:\ 3|Actionable\ comments\ posted:\
+          4
+        REVIEW_INFORMATIONAL_PATTERN: codex\-pull\-request\-review\-summary|no\ security\ issues\ were\ found|Codex\ Review:\ Didn't\ find\ any\
+          major\ issues\.|Actionable\ comments\ posted:\ 0|rate\ limited\ by\ coderabbit\.ai|skip\ review\ by\ coderabbit\.ai|usage\ limit|BUGBOT_FREE_TIER_DISABLED_UPSELL
+        ADMITTED_REVIEW_HEAD: ''
+      run: |
+        # autofix-control:event:begin
+        #!/usr/bin/env bash
+        # Canonical native PR/event admission; embedded, never sourced from PR code.
+        set -euo pipefail
+
+        echo "number=$PR_NUM" >> "$GITHUB_OUTPUT"
+        echo "trigger_workflow=$WR_NAME" >> "$GITHUB_OUTPUT"
+        echo "trigger_run_url=$WR_URL" >> "$GITHUB_OUTPUT"
+
+        # Loop break: prior autofix commit still HEAD. Preflight has no
+        # checkout — read the head commit message via the API instead of
+        # `git log` (same assertion: subject starts with [autofix]).
+        PR_HEAD=$(timeout 20 gh api "repos/${REPOSITORY}/pulls/${PR_NUM}" \
+          --jq '. as $pr | $pr.head | {sha: .sha, same_repo: (if .repo == null then "missing" elif (.repo.id == $pr.base.repo.id) then "true" else "false" end)}' \
+          2>/dev/null || echo '{}')
+        HEAD_SHA=$(echo "$PR_HEAD" | jq -r '.sha // empty')
+        SAME_REPO=$(echo "$PR_HEAD" | jq -r '.same_repo // empty')
+        echo "head_sha=$HEAD_SHA" >> "$GITHUB_OUTPUT"
+        if [[ ! "$HEAD_SHA" =~ ^[0-9a-f]{40}$ || ( -n "${ADMITTED_REVIEW_HEAD:-}" && "$HEAD_SHA" != "$ADMITTED_REVIEW_HEAD" ) ]]; then
+          # Fail closed: an empty SHA would fall back to movable head_ref in
+          # the autofix checkout — unvalidated commit. Skip instead.
+          echo "skip=true" >> "$GITHUB_OUTPUT"
+          echo "Could not resolve PR head SHA; skipping"
+          exit 0
+        fi
+        if [[ "$SAME_REPO" != "true" ]]; then
+          # Compare repo IDs, not .fork (pr-autofix-loop-reusable.yml): a
+          # forked deployment repo has fork=true on its own PRs, and a
+          # deleted head has repo=null — both must fail closed. A cross-repo
+          # head is attacker-controlled code under write perms + agent creds
+          # on issue_comment/pull_request triggers.
+          echo "skip=true" >> "$GITHUB_OUTPUT"
+          echo "Cross-repo/unverifiable PR head (same_repo=$SAME_REPO) — refusing privileged autofix checkout"
+          exit 0
+        fi
+        LAST_MSG=''
+        if [[ -n "$HEAD_SHA" ]]; then
+          if ! LAST_MSG=$(timeout 20 gh api "repos/${REPOSITORY}/commits/${HEAD_SHA}" \
+            --jq '.commit.message | split("\n")[0]' 2>/dev/null); then
+            echo 'skip=true' >> "$GITHUB_OUTPUT"
+            echo 'Head commit metadata is unreadable; editor admission held.'
+            exit 0
+          fi
+        fi
+        if [[ "$LAST_MSG" == \[autofix\]* ]]; then
+          echo "skip=true" >> "$GITHUB_OUTPUT"
+          echo "Latest commit is [autofix]; skipping to avoid loop"
+          exit 0
+        fi
+
+        # Native webhook identity, never relayed body text, grants reviewer admission.
+        # Embedded in protected workflow source. All review content remains untrusted.
+        review_admitted=false
+        case "$EVENT_NAME" in
+          issue_comment|pull_request_review|pull_request_review_comment)
+            if [[ "${ACTOR_TYPE:-}" == Bot ]]; then
+              if ! jq -e 'type == "array" and all(.[]; type == "string" and test("^[1-9][0-9]*$"))' <<< "$REVIEWER_IDS" >/dev/null 2>&1; then
+                echo 'skip=true' >> "$GITHUB_OUTPUT"
+                echo 'Approved reviewer ID configuration is invalid; editor admission held.'
+                exit 0
+              fi
+              if jq -e --arg id "${ACTOR_ID:-}" 'index($id) != null' <<< "$REVIEWER_IDS" >/dev/null; then
+                # Match the job-level inexpensive cue filter. Mixed findings/limit
+                # banners remain eligible; an unchanged healthy notice is not progress.
+                if [[ -z "${COMMENT_BODY//[[:space:]]/}" ]] ||
+                   grep -qi 'auto-generated reply by CodeRabbit' <<< "$COMMENT_BODY" ||
+                   { ! grep -Eqi "$REVIEW_FINDING_PATTERN" <<< "$COMMENT_BODY" &&
+                     grep -Eqi "$REVIEW_INFORMATIONAL_PATTERN" <<< "$COMMENT_BODY"; }; then
+                  echo 'skip=true' >> "$GITHUB_OUTPUT"
+                  echo 'Informational reviewer event; no editor admitted.'
+                  exit 0
+                fi
+                if [[ -n "${REVIEW_SOURCE_HEAD:-}" ]]; then
+                  if [[ ! "$REVIEW_SOURCE_HEAD" =~ ^[0-9a-f]{40}$ || "$HEAD_SHA" != "$REVIEW_SOURCE_HEAD" ||
+                        ( -n "${ADMITTED_REVIEW_HEAD:-}" && "$ADMITTED_REVIEW_HEAD" != "$REVIEW_SOURCE_HEAD" ) ]]; then
+                    echo 'skip=true' >> "$GITHUB_OUTPUT"
+                    echo 'Review head is stale or unreadable; original GitHub facts remain pending.'
+                    exit 0
+                  fi
+                fi
+                review_admitted=true
+              fi
+            fi
+            ;;
+        esac
+
+        if [[ "$review_admitted" != true ]] && echo "$COMMENT_BODY" | grep -qi "skip-autofix"; then
+          echo "skip=true" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        # Human issue_comment needs @claude. Verified native reviews, legacy relay
+        # compatibility events and CI failures use their own admission routes.
+        if [[ "$EVENT_NAME" == "issue_comment" ]]; then
+          if [[ "$review_admitted" == true ]] || { [[ "$ACTOR" == "github-actions[bot]" ]] && [[ "$COMMENT_BODY" == '**[@'* ]]; }; then
+            : # relayed bot review — proceed
+          elif ! echo "$COMMENT_BODY" | grep -qi "@claude"; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+        fi
+
+        if [[ "$EVENT_NAME" == "pull_request_review" ]]; then
+          if [[ "$REVIEW_STATE" == "approved" ]] && [[ -z "$COMMENT_BODY" || "$COMMENT_BODY" == "null" ]]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+        fi
+
+        # Opt-in trusted agent bots (e.g. Devin, Codex cloud, Cursor
+        # background agents) whose pushes may trigger Autofix when CI fails.
+        # Only on the workflow_run path, only for [bot] actors, matched like
+        # the action's allowed_bots (case-insensitive, [bot] optional); '*'
+        # is never honoured. Fork heads were already refused above.
+        # The action's allowed_bots receives only this sanitised list, so a
+        # '*' or malformed entry can never widen it either.
+        trusted_bots() {
+          local entry
+          IFS=',' read -ra entries <<< "${TRUSTED_BOTS:-}"
+          for entry in "${entries[@]}"; do
+            entry="${entry#"${entry%%[![:space:]]*}"}"
+            entry="${entry%"${entry##*[![:space:]]}"}"
+            entry="${entry,,}"
+            entry="${entry%\[bot\]}"
+            if [[ "$entry" =~ ^[a-z0-9][a-z0-9-]*$ ]]; then echo "$entry"; fi
+          done
+        }
+        trusted_bot() {
+          local who="${1,,}" entry
+          who="${who%\[bot\]}"
+          for entry in $(trusted_bots); do
+            [[ "$entry" == "$who" ]] && return 0
+          done
+          return 1
+        }
+        # CI push bots remain opt-in. Authenticated direct reviewer events use
+        # their own immutable-ID policy; they do not widen the CI actor policy.
+        allowed_bots="github-actions"
+        if [[ "$review_admitted" == true ]]; then
+          reviewer_login="${ACTOR,,}"
+          if [[ ! "$reviewer_login" =~ ^[a-z0-9][a-z0-9-]*(\[bot\])?$ ]]; then echo "skip=true" >> "$GITHUB_OUTPUT"; exit 0; fi
+          allowed_bots+=",${reviewer_login%\[bot\]}"
+        fi
+        if [[ "$EVENT_NAME" == "workflow_run" ]]; then
+          for entry in $(trusted_bots); do allowed_bots+=",$entry"; done
+        fi
+        echo "allowed_bots=$allowed_bots" >> "$GITHUB_OUTPUT"
+
+        # claude-code-action fails the job (rather than skipping) for bot
+        # actors outside allowed_bots and for actors without write access.
+        # Native review admission, the relay compatibility route and opted-in CI
+        # bots are distinct. All other actors need native repository write access.
+        for who in "$ACTOR" "${WR_ACTOR:-}"; do
+          [[ -z "$who" ]] && continue
+          if [[ "$review_admitted" == true && "$who" == "$ACTOR" && "$EVENT_NAME" != workflow_run ]]; then continue; fi
+          if [[ "$who" == "github-actions[bot]" && "$EVENT_NAME" == "issue_comment" && "$COMMENT_BODY" == '**[@'* ]]; then
+            continue
+          fi
+          if [[ "$EVENT_NAME" == "workflow_run" && "$who" == *"[bot]" ]] && trusted_bot "$who"; then
+            continue
+          fi
+          PERM=$(timeout -k 5 30 gh api "repos/${REPOSITORY}/collaborators/${who}/permission" --jq '.permission' 2>/dev/null || echo unknown)
+          case "$PERM" in
+            admin|write) ;;
+            *)
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              echo "Actor ${who} has no write access or is not an approved source (permission=${PERM}); skipping"
+              exit 0
+              ;;
+          esac
+        done
+
+        # --repo required: this step runs with no checkout, so gh would
+        # resolve the repo from cwd and fail. Failure must fail closed —
+        # a label list we can't read might contain skip-ai-review.
+        LABELS=$(timeout 20 gh pr view "$PR_NUM" --repo "${REPOSITORY}" --json labels --jq '[.labels[].name]' 2>/dev/null || echo 'FAIL')
+        if [[ "$LABELS" == "FAIL" ]] || echo "$LABELS" | grep -q "skip-ai-review"; then
+          echo "skip=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+        fi
+        # autofix-control:event:end
     - name: Check retained execution owner
       id: custody
       if: steps.ref.outputs.skip != 'true' && steps.pr.outputs.skip != 'true'
@@ -232,23 +420,42 @@ jobs:
         PR_NUM: ${{ steps.pr.outputs.number }}
         MAX_FIXES: '1'
         REPOSITORY: ${{ github.repository }}
-      run: "set -euo pipefail\nMAX_FIXES=\"${MAX_FIXES:-1}\"\nif [[ ! \"$MAX_FIXES\" =~ ^[0-9]+$ ]]; then echo \"skip=true\" >> \"$GITHUB_OUTPUT\"\
-        ; exit 0; fi\n# Count commits on this PR whose subject starts with [autofix]\nif ! COUNT=$(timeout -k 5 30 gh api \"repos/${REPOSITORY}/pulls/${PR_NUM}/commits\"\
-        \ --paginate \\\n  --jq '[.[].commit.message | split(\"\\n\")[0] | select(startswith(\"[autofix]\"))] | length' 2>/dev/null \\\n  | awk\
-        \ '{s+=$1} END {print s+0}'); then\n  echo \"skip=true\" >> \"$GITHUB_OUTPUT\"\n  echo \"::notice::Commit enumeration failed/timed out\
-        \ \u2014 budget unverifiable; skipping\"\n  exit 0\nfi\necho \"successful_fix_commits=$COUNT\" >> \"$GITHUB_OUTPUT\"\nif [[ \"$COUNT\"\
-        \ -ge \"$MAX_FIXES\" ]]; then\n  echo \"skip=true\" >> \"$GITHUB_OUTPUT\"\n  echo \"::notice::Per-PR autofix budget reached ($COUNT >=\
-        \ $MAX_FIXES successful [autofix] commits); skipping\"\n  # autofix-control:budget-notice:begin\n  #!/usr/bin/env bash\n  # One material\
-        \ budget receipt; repeated exhausted-budget wakes stay quiet.\n  notice=unknown\n  for page in 1 2 3 4 5; do\n    if ! comments=$(timeout\
-        \ -k 5 30 gh api \"repos/${REPOSITORY}/issues/${PR_NUM}/comments?per_page=100&page=${page}\" 2>/dev/null); then break; fi\n    if ! jq\
-        \ -e 'type == \"array\"' <<< \"$comments\" >/dev/null; then break; fi\n    if jq -e 'any(.[]; .user.id == 41898282 and ((.body // \"\"\
-        ) | startswith(\"<!-- pack-autofix:budget-exhausted -->\")))' <<< \"$comments\" >/dev/null; then\n      notice=seen; break\n    fi\n \
-        \   if [[ $(jq 'length' <<< \"$comments\") -lt 100 ]]; then notice=absent; break; fi\n  done\n  if [[ \"$notice\" == absent ]]; then\n\
-        \    timeout -k 5 30 gh pr comment \"$PR_NUM\" --repo \"$REPOSITORY\" --body \"<!-- pack-autofix:budget-exhausted --> Autofix reached\
-        \ its configured successful-fix budget (${COUNT}/${MAX_FIXES}). The original owner retains unfinished commitments. Do not remove commits,\
-        \ reset counters or switch owners to evade this budget.\" || true\n  fi\n  # autofix-control:budget-notice:end\nelse\n  echo \"skip=false\"\
-        \ >> \"$GITHUB_OUTPUT\"\nfi\n"
-    - name: "Gate \u2014 combine skip decisions"
+      run: |
+        set -euo pipefail
+        MAX_FIXES="${MAX_FIXES:-1}"
+        if [[ ! "$MAX_FIXES" =~ ^[0-9]+$ ]]; then echo "skip=true" >> "$GITHUB_OUTPUT"; exit 0; fi
+        # Count commits on this PR whose subject starts with [autofix]
+        if ! COUNT=$(timeout -k 5 30 gh api "repos/${REPOSITORY}/pulls/${PR_NUM}/commits" --paginate \
+          --jq '[.[].commit.message | split("\n")[0] | select(startswith("[autofix]"))] | length' 2>/dev/null \
+          | awk '{s+=$1} END {print s+0}'); then
+          echo "skip=true" >> "$GITHUB_OUTPUT"
+          echo "::notice::Commit enumeration failed/timed out — budget unverifiable; skipping"
+          exit 0
+        fi
+        echo "successful_fix_commits=$COUNT" >> "$GITHUB_OUTPUT"
+        if [[ "$COUNT" -ge "$MAX_FIXES" ]]; then
+          echo "skip=true" >> "$GITHUB_OUTPUT"
+          echo "::notice::Per-PR autofix budget reached ($COUNT >= $MAX_FIXES successful [autofix] commits); skipping"
+          # autofix-control:budget-notice:begin
+          #!/usr/bin/env bash
+          # One material budget receipt; repeated exhausted-budget wakes stay quiet.
+          notice=unknown
+          for page in 1 2 3 4 5; do
+            if ! comments=$(timeout -k 5 30 gh api "repos/${REPOSITORY}/issues/${PR_NUM}/comments?per_page=100&page=${page}" 2>/dev/null); then break; fi
+            if ! jq -e 'type == "array"' <<< "$comments" >/dev/null; then break; fi
+            if jq -e 'any(.[]; .user.id == 41898282 and ((.body // "") | startswith("<!-- pack-autofix:budget-exhausted -->")))' <<< "$comments" >/dev/null; then
+              notice=seen; break
+            fi
+            if [[ $(jq 'length' <<< "$comments") -lt 100 ]]; then notice=absent; break; fi
+          done
+          if [[ "$notice" == absent ]]; then
+            timeout -k 5 30 gh pr comment "$PR_NUM" --repo "$REPOSITORY" --body "<!-- pack-autofix:budget-exhausted --> Autofix reached its configured successful-fix budget (${COUNT}/${MAX_FIXES}). The original owner retains unfinished commitments. Do not remove commits, reset counters or switch owners to evade this budget." || true
+          fi
+          # autofix-control:budget-notice:end
+        else
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+        fi
+    - name: Gate — combine skip decisions
       id: gate
       env:
         REF_SKIP: ${{ steps.ref.outputs.skip }}

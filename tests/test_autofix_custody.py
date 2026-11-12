@@ -285,7 +285,7 @@ def test_embedded_controller_source_is_current():
 
 @pytest.mark.parametrize('variant',['standalone','reusable'])
 @pytest.mark.parametrize('defect',['missing','duplicate','late','empty-payload','fail-open','or-bypass',
-    'publisher-payload','publisher-admission','publisher-condition','shared-environment','wrong-artifact','editor-secret','failure-capture-gate','failed-editor-publication'])
+    'publisher-payload','publisher-admission','publisher-condition','shared-environment','wrong-artifact','editor-secret','failure-capture-gate','failed-editor-publication','variant-bypass','reviewer-gate','reviewer-id'])
 def test_generator_refuses_partial_or_unsafe_control_wiring(variant,defect):
     spec=importlib.util.spec_from_file_location('autofix_sync',ROOT/'scripts/sync-autofix-control.py')
     m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
@@ -307,6 +307,12 @@ def test_generator_refuses_partial_or_unsafe_control_wiring(variant,defect):
     if defect=='wrong-artifact':next(s for s in pub_job['steps'] if 'download-artifact@' in s.get('uses',''))['with']['run-id']='other-run'
     if defect=='failure-capture-gate':next(s for s in steps if s.get('id')=='prepare')['if']="steps.verify_exec.outcome == 'success'"
     if defect=='failed-editor-publication':pub_job['if']='always()'
+    if defect=='variant-bypass':workflow['jobs'][variant+'_editor']['if']='true'
+    if defect=='reviewer-gate':
+        if variant=='reusable':next(s for s in steps if s.get('id')=='pr')['run']='echo skip=false'
+        else:next(s for s in workflow['jobs']['reusable_editor']['steps'] if s.get('id')=='pr')['run']='echo skip=false'
+    if defect=='reviewer-id':
+        next(s for s in workflow['jobs']['reusable_editor']['steps'] if s.get('id')=='pr')['env']['ACTOR_ID']='body-controlled'
     if defect=='editor-secret':editor['env']['PUBLISH_TOKEN']='${{ secrets.GH_PAT }}'
     with pytest.raises(ValueError):m.validate(yaml.safe_dump(workflow))
 
@@ -428,3 +434,104 @@ def test_protected_source_hold_routes_only_its_finding(variant):
     assert 'Route only that finding to the existing owner' in prompt
     assert 'finish other authorized findings' in prompt
     assert 'if a finding needs that, comment and STOP' not in prompt
+
+
+@pytest.fixture
+def native_event_gate(tmp_path,monkeypatch):
+    # Actual Bash + jq with native API fixtures; no live webhook, model or push.
+    spec=importlib.util.spec_from_file_location('sync_event',ROOT/'scripts/sync-autofix-control.py')
+    m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
+    bin_dir=tmp_path/'bin';bin_dir.mkdir();data=tmp_path/'event-facts.json'
+    fake=bin_dir/'gh';fake.write_text('''#!/usr/bin/python3
+import json,os,subprocess,sys
+facts=json.load(open(os.environ['EVENT_FACTS']))
+a=sys.argv[1:]
+if a[:2]==['pr','view']:value={'labels':facts['labels']}
+elif a and a[0]=='api':
+ path=a[1]
+ if '/collaborators/' in path:value={'permission':facts['permission']}
+ elif '/commits/' in path:
+  if facts['commit_unreadable']:sys.exit(1)
+  value={'commit':{'message':facts['subject']}}
+ elif '/comments?' in path:value=[]
+ elif '/pulls/' in path:
+  if facts['head_unreadable']:sys.exit(1)
+  value=facts['pr']
+ else:sys.exit(2)
+else:sys.exit(2)
+if '--jq' in a:
+ r=subprocess.run(['/usr/bin/jq','-c',a[a.index('--jq')+1]],input=json.dumps(value),text=True,capture_output=True)
+ # gh --jq emits scalar strings without JSON quotes.
+ if r.returncode:sys.exit(r.returncode)
+ output=json.loads(r.stdout)
+ print(output if isinstance(output,str) else json.dumps(output))
+else:print(json.dumps(value))
+''');fake.chmod(0o755)
+    pr=native_pr();pr['base']['repo']['id']=42;pr['head']['repo']['id']=42
+    facts=dict(pr=pr,permission='none',labels=[],subject='owned source',head_unreadable=False,commit_unreadable=False)
+    env={**os.environ,'PATH':str(bin_dir)+':/usr/bin:/bin','EVENT_FACTS':str(data),
+        'EVENT_NAME':'pull_request_review_comment','COMMENT_BODY':'**P2 Badge** actionable finding',
+        'PR_NUM':'7','PR_NUMBER':'7','ACTOR':'chatgpt-codex-connector[bot]','ACTOR_ID':'199175422','ACTOR_TYPE':'Bot',
+        'WR_ACTOR':'','TRUSTED_BOTS':'','WR_NAME':'','WR_URL':'','REVIEW_STATE':'commented',
+        'REPOSITORY':'example/repository','EXPECTED_HEAD':'a'*40,'REVIEW_SOURCE_HEAD':'a'*40,
+        'ADMITTED_REVIEW_HEAD':'a'*40,'REVIEWER_IDS':m.DEFAULT_REVIEWER_IDS,
+        'REVIEW_FINDING_PATTERN':'|'.join(m.re.escape(x) for x in m.REVIEW_CUES),
+        'REVIEW_INFORMATIONAL_PATTERN':'|'.join(m.re.escape(x) for x in m.REVIEW_INFORMATIONAL),
+        'GH_TOKEN':'fixture-read-only'}
+    def run(script=None):
+        data.write_text(json.dumps(facts));output=tmp_path/'gate-output';output.write_text('')
+        result=subprocess.run(['bash','-c',script or (ROOT/'scripts/ci/autofix-event-gate.sh').read_text()],
+            env={**env,'GITHUB_OUTPUT':str(output)},capture_output=True,text=True,timeout=10)
+        assert result.returncode==0,result.stderr
+        return dict(line.split('=',1) for line in output.read_text().splitlines() if '=' in line),result.stdout
+    return facts,env,run
+
+
+@pytest.mark.parametrize('case,admitted',[
+    ('codex',True),('suffixless-app',True),('coderabbit',True),('edited-finding',True),('unknown-new-text',True),
+    ('mixed-limit-P2',True),('skip-control-in-finding',True),('fake-login',False),
+    ('wrong-type',False),('invalid-policy',False),('disabled-policy',False),
+    ('clean-code',False),('clean-security',False),('summary',False),('reply',False),
+    ('empty',False),('stale',False),('moved-checkout',False),('fork',False),
+    ('unreadable-head',False),('unreadable-commit',False),('ci-policy-separate',False),
+    ('maintainer',False)])
+def test_native_reviewer_reaches_actual_event_gate_without_relay(native_event_gate,case,admitted):
+    facts,env,run=native_event_gate
+    if case=='suffixless-app':env.update(ACTOR='FixtureApp',ACTOR_ID='111',REVIEWER_IDS='["111"]')
+    if case=='coderabbit':env.update(ACTOR='coderabbitai[bot]',ACTOR_ID='136622811',COMMENT_BODY='Major: actionable finding')
+    if case=='edited-finding':env['EVENT_ACTION']='edited'
+    if case=='unknown-new-text':env['COMMENT_BODY']='A new concrete finding in the changed implementation.'
+    if case=='mixed-limit-P2':env['COMMENT_BODY']='Usage limit reached. P2: this finding still needs repair.'
+    if case=='skip-control-in-finding':env['COMMENT_BODY']='P2: the skip-autofix control is incorrectly applied.'
+    if case=='fake-login':env['ACTOR_ID']='999'
+    if case=='wrong-type':env['ACTOR_TYPE']='User'
+    if case=='invalid-policy':env['REVIEWER_IDS']='not-json'
+    if case=='disabled-policy':env['REVIEWER_IDS']='[]'
+    if case=='clean-code':env['COMMENT_BODY']="Codex Review: Didn't find any major issues."
+    if case=='clean-security':env['COMMENT_BODY']='Security review completed. No security issues were found.'
+    if case=='summary':env['COMMENT_BODY']='<!-- codex-pull-request-review-summary --> Running'
+    if case=='reply':env['COMMENT_BODY']='Major: old text\n<!-- This is an auto-generated reply by CodeRabbit -->'
+    if case=='empty':env['COMMENT_BODY']='  \n '
+    if case=='stale':env['REVIEW_SOURCE_HEAD']='b'*40
+    if case=='moved-checkout':env['ADMITTED_REVIEW_HEAD']='b'*40
+    if case=='fork':facts['pr']['head']['repo']['id']=7
+    if case=='unreadable-head':facts['head_unreadable']=True
+    if case=='unreadable-commit':facts['commit_unreadable']=True
+    if case=='ci-policy-separate':env['EVENT_NAME']='workflow_run'
+    if case=='maintainer':env.update(ACTOR='maintainer',ACTOR_ID='17',ACTOR_TYPE='User');facts['permission']='maintain'
+    result,_=run()
+    assert result.get('skip')==str(not admitted).lower()
+    if admitted and case!='maintainer':assert env['ACTOR'].lower().removesuffix('[bot]') in result['allowed_bots']
+
+
+def test_old_human_only_gate_rejects_the_same_real_reviewer_identity(native_event_gate):
+    _,_,run=native_event_gate
+    script=(ROOT/'tests/fixtures/autofix/legacy-event-gate.sh').read_text()
+    before,_=run(script);after,_=run()
+    assert before['skip']=='true' and after['skip']=='false'
+
+
+def test_direct_review_admission_does_not_bypass_retained_custody(native_event_gate):
+    facts,_,run=native_event_gate;facts['pr']['body']='X-Follow-Through-Owner: retained-original'
+    event,_=run();custody,_=run((ROOT/'scripts/ci/autofix-custody.sh').read_text())
+    assert event['skip']=='false' and custody['skip']=='true'

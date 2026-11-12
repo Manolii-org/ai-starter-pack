@@ -518,7 +518,7 @@ def test_trusted_bot_matcher_is_identical_in_both_workflows() -> None:
     (",,", "github-actions[bot]", False),
 ])
 def test_trusted_bot_matcher(bots: str, who: str, trusted: bool, tmp_path) -> None:
-    script = "set -euo pipefail\n" + _trusted_bot_fn("reusable") + 'trusted_bot "$WHO"\n'
+    script = "set -euo pipefail\nreview_admitted=false\n" + _trusted_bot_fn("reusable") + 'trusted_bot "$WHO"\n'
     env = {**os.environ, "TRUSTED_BOTS": bots, "WHO": who, "EVENT_NAME": "workflow_run",
            "GITHUB_OUTPUT": str(tmp_path / "out")}
     result = subprocess.run(["bash", "-c", script], env=env)
@@ -534,7 +534,7 @@ def test_trusted_bot_matcher(bots: str, who: str, trusted: bool, tmp_path) -> No
 ])
 def test_allowed_bots_output_is_sanitised(bots: str, allowed: str, tmp_path) -> None:
     out = tmp_path / "out"
-    script = "set -euo pipefail\n" + _trusted_bot_fn("reusable")
+    script = "set -euo pipefail\nreview_admitted=false\n" + _trusted_bot_fn("reusable")
     env = {**os.environ, "TRUSTED_BOTS": bots, "EVENT_NAME": "workflow_run", "GITHUB_OUTPUT": str(out)}
     subprocess.run(["bash", "-c", script], env=env, check=True)
     assert out.read_text() == f"allowed_bots={allowed}\n"
@@ -546,7 +546,7 @@ def test_agent_bots_reach_the_action_only_on_workflow_run(name: str, event: str,
     """A trusted bot with write access passes the collaborator check on comment
     and review triggers too; the action's allowed_bots must not accept it there."""
     out = tmp_path / "out"
-    script = "set -euo pipefail\n" + _trusted_bot_fn(name)
+    script = "set -euo pipefail\nreview_admitted=false\n" + _trusted_bot_fn(name)
     env = {**os.environ, "TRUSTED_BOTS": "devin-ai-integration[bot]", "EVENT_NAME": event,
            "GITHUB_OUTPUT": str(out)}
     subprocess.run(["bash", "-c", script], env=env, check=True)

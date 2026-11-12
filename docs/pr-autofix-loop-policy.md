@@ -2,7 +2,7 @@
 
 The standalone and reusable workflows implement the same retained-owner contract.
 `scripts/ci/autofix-custody.sh`, `autofix-publish.py` and
-`autofix-budget-notice.sh` are embedded in workflow source by
+`autofix-budget-notice.sh` and `autofix-event-gate.sh` are embedded in workflow source by
 `scripts/sync-autofix-control.py`. Run it after editing those files; `--check`
 detects drift. Workflows do not execute controller scripts from a PR checkout.
 
@@ -127,3 +127,35 @@ all lint diagnostics. It neither changes execution source nor suppresses an
 audit. Pin checks recognize only the bounded self-workflow spelling; mutable or
 malformed references still fail. Positive relay admission uses the immutable
 GitHub Actions actor ID rather than a renameable login.
+
+## Native review event routing
+
+`bot-review-relay.yml` uses the built-in token to display review text. GitHub
+recursion protection means that copied comment does not trigger `issue_comment`
+workflows; it is not delivery to an editor. The existing native review/comment
+triggers now admit approved reviewers directly, including edited findings. The
+default immutable bot user IDs are Codex 199175422 and CodeRabbit 136622811, verified
+from native GitHub API identities (not their different App IDs). Owning operators
+can replace that list with the JSON string array repo/org variable
+`AUTOFIX_TRUSTED_REVIEWER_IDS`; `[]` disables the direct bot route. This does not
+change `trusted_agent_bots`, which remains a separate opt-in CI-push policy.
+
+The canonical event gate is embedded in standalone preflight, reusable editing
+and fresh publisher admission. It verifies native sender type/ID, current native
+head and any explicit review commit, passes only the verified reviewer login to
+the action's bot allowlist, and retains native permission checks for other users.
+Known informational summaries and unchanged reply loops stay quiet. Mixed
+P2/P3 findings remain eligible, and unknown new approved review text is inspected
+rather than discarded. Bot review text cannot issue the human `skip-autofix`
+control. Human edited triggers retain their prior behavior. Reusable callers
+need to include `edited` in their review/comment event types to receive updates;
+this requires reviewed caller adoption. No new dispatcher, credential scope or
+owner is created. Retained-owner custody still declines editing: direct event
+admission is not an accepted handoff to a hosted chat.
+
+Reviewer ID admission controls the legacy automatic worker, not which findings
+a retained owner may inspect. Original task authority still governs its owner's
+triage. The pinned action admits explicitly allowed bot accounts, but requires
+`admin`/`write` from the collaborator API for human accounts. The event gate
+preserves those exact requirements; it does not use the action's non-write-user
+bypass or switch credentials after a denied permission read.
