@@ -392,10 +392,9 @@ def _model_sensitivity_max(model_name: str | None, cfg: dict) -> str | None:
         return _declared_sensitivity_max(tiers[model_name]) if isinstance(tiers[model_name], dict) else "unknown"
     matched = [_declared_sensitivity_max(tier) for tier in tiers.values()
                if isinstance(tier, dict) and model_name in (tier.get("model"), tier.get("litellm_alias"))]
-    if matched:
-        # A shared raw backend name does not select the more privileged route.
-        return min(matched, key=lambda level: SENSITIVITY_ORDER.get(level, 0))
-    platform_matches = []
+    # Raw backend names may also name native platform models. Until an explicit
+    # route/alias is selected, they cannot borrow a higher namespace's clearance.
+    platform_matches = matched
     platforms = cfg.get("platforms", {})
     if not isinstance(platforms, dict):
         return "unknown"

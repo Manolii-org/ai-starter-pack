@@ -1071,6 +1071,10 @@ def invoke_agent(
     base_url = proxy or "https://api.anthropic.com"
     if proxy and model in {"claude-haiku-4-5-20251001", "claude-sonnet-4-6"}:
         model = {"claude-haiku-4-5-20251001": "haiku", "claude-sonnet-4-6": "sonnet"}[model]
+    if proxy:
+        reason = _policy_module.route_reason(model, agent_config.data_sensitivity)
+        if reason:
+            return _incomplete(agent_config, reason)
     if not proxy:
         model = DIRECT_MODEL_MAP.get(model, model)
     api_url = f"{base_url}/v1/messages"
@@ -1124,7 +1128,8 @@ def invoke_agent(
             "messages": [
                 {
                     "role": "user",
-                    "content": f"{_api_instructions(agent_config.instructions)}\n\n{user_message}",
+                    "content": _deep_screen_helpers()._join_review_text(
+                        _api_instructions(agent_config.instructions), "\n\n", user_message),
                 }
             ],
         }
@@ -1132,6 +1137,10 @@ def invoke_agent(
         if len(request_bytes) > _MAX_REQUEST_BYTES:
             logger.error("%s: complete serialized review request exceeds limit", agent_config.name)
             return _incomplete(agent_config, "input_limit")
+        try:
+            _policy_module.admit_review_wire(request_bytes, proved_value=payload)
+        except _policy_module.ReviewInputError as exc:
+            return _incomplete(agent_config, str(exc))
         resp_data = None
         for attempt in range(MAX_RETRIES):
             try:
@@ -1291,10 +1300,14 @@ def _governed_security_message(diff: str, changed_files: list[str]) -> str:
         "source_evidence": evidence,
     }
     guard._require_safe_packet(packet)
-    return build_user_message(
-        diff + "\n<review_source_context>\n" + json.dumps(packet, ensure_ascii=True)
-        + "\n</review_source_context>", changed_files
-    )
+    # JSON escaping preserves the exact evidence values/hashes while keeping
+    # author-controlled delimiters out of the surrounding untrusted fence.
+    encoded = guard._review_json(packet, escape_angles=True)
+    base = build_user_message(diff, changed_files)
+    closing = "\n</untrusted_diff>"
+    return guard._join_review_text(
+        base[:-len(closing)], "\n<review_source_context>\n", encoded,
+        "\n</review_source_context>", closing)
 
 
 def run_broad_agents(

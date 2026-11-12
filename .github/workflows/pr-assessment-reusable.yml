@@ -20,7 +20,7 @@ name: PR Assessment (Reusable)
 on:
   workflow_call:
     inputs:
-      provider_mode: { type: string, default: proxy, description: 'proxy uses the configured governed router; optional anthropic compatibility also requires SECURITY_REVIEW_MODE=direct and committed external admission.' }
+      provider_mode: { type: string, default: proxy, description: 'proxy uses the configured governed router; explicit anthropic selects direct compatibility and still requires committed external admission.' }
       litellm_proxy_url: { type: string, default: '', description: 'Proxy base URL for proxy mode; pass vars.LITELLM_PROXY_URL.' }
       model: { type: string, default: '', description: 'Optional model id override; empty = script/action default.' }
       runs_on: { type: string, default: ubuntu-latest }
@@ -307,8 +307,13 @@ jobs:
           if [[ "$PM" == "proxy" ]]; then
             if [[ -z "$LK" ]]; then echo "::error::provider_mode=proxy requires LITELLM_MASTER_KEY"; exit 1; fi
             if [[ -z "$PURL" ]]; then echo "::error::provider_mode=proxy requires litellm_proxy_url"; exit 1; fi
-          else
+          elif [[ "$PM" == "anthropic" ]]; then
             if [[ -z "$AK" ]]; then echo "::error::provider_mode=anthropic requires ANTHROPIC_API_KEY"; exit 1; fi
+            # Explicit opt-in only. Both old trusted runtime and current runtime
+            # support this enum; proxy leaves the version-owned default unset.
+            printf 'SECURITY_REVIEW_MODE=direct\n' >> "$GITHUB_ENV"
+          else
+            echo "::error::unsupported provider_mode"; exit 1
           fi
 
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -786,8 +791,13 @@ jobs:
           if [[ "$PM" == "proxy" ]]; then
             if [[ -z "$LK" ]]; then echo "::error::provider_mode=proxy requires LITELLM_MASTER_KEY"; exit 1; fi
             if [[ -z "$PURL" ]]; then echo "::error::provider_mode=proxy requires litellm_proxy_url"; exit 1; fi
-          else
+          elif [[ "$PM" == "anthropic" ]]; then
             if [[ -z "$AK" ]]; then echo "::error::provider_mode=anthropic requires ANTHROPIC_API_KEY"; exit 1; fi
+            # Explicit opt-in only. Both old trusted runtime and current runtime
+            # support this enum; proxy leaves the version-owned default unset.
+            printf 'SECURITY_REVIEW_MODE=direct\n' >> "$GITHUB_ENV"
+          else
+            echo "::error::unsupported provider_mode"; exit 1
           fi
 
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -942,8 +952,13 @@ jobs:
           if [[ "$PM" == "proxy" ]]; then
             if [[ -z "$LK" ]]; then echo "::error::provider_mode=proxy requires LITELLM_MASTER_KEY"; exit 1; fi
             if [[ -z "$PURL" ]]; then echo "::error::provider_mode=proxy requires litellm_proxy_url"; exit 1; fi
-          else
+          elif [[ "$PM" == "anthropic" ]]; then
             if [[ -z "$AK" ]]; then echo "::error::provider_mode=anthropic requires ANTHROPIC_API_KEY"; exit 1; fi
+            # Explicit opt-in only. Both old trusted runtime and current runtime
+            # support this enum; proxy leaves the version-owned default unset.
+            printf 'SECURITY_REVIEW_MODE=direct\n' >> "$GITHUB_ENV"
+          else
+            echo "::error::unsupported provider_mode"; exit 1
           fi
 
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -1106,8 +1121,13 @@ jobs:
           if [[ "$PM" == "proxy" ]]; then
             if [[ -z "$LK" ]]; then echo "::error::provider_mode=proxy requires LITELLM_MASTER_KEY"; exit 1; fi
             if [[ -z "$PURL" ]]; then echo "::error::provider_mode=proxy requires litellm_proxy_url"; exit 1; fi
-          else
+          elif [[ "$PM" == "anthropic" ]]; then
             if [[ -z "$AK" ]]; then echo "::error::provider_mode=anthropic requires ANTHROPIC_API_KEY"; exit 1; fi
+            # Explicit opt-in only. Both old trusted runtime and current runtime
+            # support this enum; proxy leaves the version-owned default unset.
+            printf 'SECURITY_REVIEW_MODE=direct\n' >> "$GITHUB_ENV"
+          else
+            echo "::error::unsupported provider_mode"; exit 1
           fi
 
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6

@@ -128,6 +128,13 @@ changes since this section was written:
 
 ### Governed review default (2026-11-12)
 
+HTTP reviewers enforce the selected route's declared data clearance before
+dispatch. The complete serialized review body is screened by the existing
+catalog and credential-assignment policy. Existing locally proved source
+identifier spans survive known JSON/fence encoding only when the frozen body
+matches the outgoing bytes exactly; catalog matches and unproved diff text
+remain strict. Refusal is unavailable remote coverage, never a clean review.
+
 Classifier, specialist, broad-agent and Judge calls default to the owner's
 configured HTTPS review router (`SECURITY_REVIEW_MODE=governed`). A Messages
 wire envelope does not require an Anthropic account, direct API key or model.

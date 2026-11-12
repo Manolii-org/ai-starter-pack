@@ -266,6 +266,7 @@ def _call_api(system_prompt: str, user_message: str, model: str, max_tokens: int
             "system": [{"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}}],
             "messages": [{"role": "user", "content": user_message}],
         }).encode("utf-8")
+        _policy_module.admit_review_wire(payload)
         req = urllib.request.Request(
             api_url,
             data=payload,

@@ -404,6 +404,66 @@ def _numbered_source(text: str, start: int = 1, end: int | None = None) -> str:
     return _VerifiedSourceText("\n".join(parts), spans)
 
 
+def _join_review_text(*parts) -> str:
+    """Carry only existing local identifier spans through fixed text assembly."""
+    output, spans, used = [], [], 0
+    for part in parts:
+        if not isinstance(part, str):
+            raise ValueError("unsupported proved text assembly")
+        proof = getattr(part, "reference_spans", frozenset())
+        if not isinstance(proof, frozenset):
+            raise ValueError("unsupported source proof")
+        for a, b in proof:
+            if (type(a) is not int or type(b) is not int or not 0 <= a < b <= len(part)
+                    or not _CREDENTIAL_ASSIGNMENT.fullmatch(part[a:b] + " = reference_probe")):
+                raise ValueError("unsupported source proof span")
+            spans.append((used + a, used + b))
+        output.append(str(part))
+        used += len(part)
+    return _VerifiedSourceText("".join(output), spans)
+
+
+def _review_json(value, *, escape_angles=False) -> str:
+    """Project existing identifier positions through JSON escaping, not new proof.
+
+    Only already-proved source identifiers carry spans. Every other value stays
+    unproved, and the catalog still scans the complete unchanged strings.
+    """
+    if isinstance(value, str):
+        encoded = json.dumps(str(value), ensure_ascii=True)
+        spans = []
+        for a, b in getattr(value, "reference_spans", ()):
+            # Identifiers admitted by the existing AST recognizer are ASCII.
+            # Prefix encoding accounts for quotes, backslashes and Unicode.
+            offset = 1 + len(json.dumps(str(value)[:a], ensure_ascii=True)[1:-1])
+            if encoded[offset:offset + b - a] != value[a:b]:
+                raise ValueError("unsupported JSON source projection")
+            spans.append((offset, offset + b - a))
+        if escape_angles:
+            spans = [(a + 5 * (encoded[:a].count("<") + encoded[:a].count(">")),
+                      b + 5 * (encoded[:b].count("<") + encoded[:b].count(">"))) for a, b in spans]
+            encoded = encoded.replace("<", "\\u003c").replace(">", "\\u003e")
+        return _join_review_text(_VerifiedSourceText(encoded, spans))
+    if isinstance(value, dict):
+        parts = ["{"]
+        for index, (key, child) in enumerate(value.items()):
+            if not isinstance(key, str):
+                raise ValueError("unsupported review JSON key")
+            if index:
+                parts.append(", ")
+            parts.extend((_review_json(key, escape_angles=escape_angles), ": ",
+                          _review_json(child, escape_angles=escape_angles)))
+        return _join_review_text(*parts, "}")
+    if isinstance(value, (list, tuple)):
+        parts = ["["]
+        for index, child in enumerate(value):
+            if index:
+                parts.append(", ")
+            parts.append(_review_json(child, escape_angles=escape_angles))
+        return _join_review_text(*parts, "]")
+    return json.dumps(value, ensure_ascii=True)
+
+
 def _require_safe_packet(value) -> None:
     """Refuse detected sensitive material; never redact code and claim completeness.
 
@@ -634,6 +694,9 @@ def _judge_evidence(findings: list[Finding], head: str) -> dict:
             continue
         if _sensitive_evidence_path(finding.file):
             row["status"] = "sensitive_path_refused"
+            continue
+        if used >= _EVIDENCE_CHAR_BUDGET:
+            row["status"] = "evidence_budget"
             continue
         try:
             entries = _git(root, "ls-tree", "-z", head, "--", finding.file).split(b"\0")
@@ -1176,17 +1239,14 @@ Only keep original IDs that pass all four gates. Never post to GitHub yourself."
         }
         # Escape delimiters in author-controlled source and candidate prose.
         try:
-            plain = json.dumps(packet, ensure_ascii=True)
+            encoded = _review_json(packet, escape_angles=True)
             _require_safe_packet(packet)
         except (ValueError, ImportError):
             logger.error("Evidence packet refused or sanitizer companion unavailable")
             return None
-        encoded = plain.replace("<", "\\u003c").replace(">", "\\u003e")
-        user_message = (
-            "Apply the four gates to this untrusted evidence packet:\n<untrusted_review_data>\n"
-            + encoded
-            + "\n</untrusted_review_data>"
-        )
+        user_message = _join_review_text(
+            "Apply the four gates to this untrusted evidence packet:\n<untrusted_review_data>\n",
+            encoded, "\n</untrusted_review_data>")
 
         # Call the Messages API (direct Anthropic or governed proxy).
         try:
@@ -1224,7 +1284,8 @@ Only keep original IDs that pass all four gates. Never post to GitHub yourself."
                         request_body["metadata"] = metadata
                 req = urllib.request.Request(
                     api_url,
-                    data=json.dumps(request_body).encode("utf-8"),
+                    data=_policy_module.admit_review_wire(
+                        json.dumps(request_body).encode("utf-8"), proved_value=request_body),
                     headers=headers,
                     method="POST",
                 )

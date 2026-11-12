@@ -262,6 +262,7 @@ def _call_api(system_prompt: str, user_message: str, model: str, max_tokens: int
         # size too. Never replace an unsupported whole request with an excerpt.
         if len(payload) > _MAX_REQUEST_BYTES:
             raise ValueError("complete review request exceeds Messages request size limit")
+        _policy_module.admit_review_wire(payload)
         req = urllib.request.Request(
             api_url,
             data=payload,
@@ -430,6 +431,13 @@ def _invoke_skill(skill_name: str, diff: str, output_dir: pathlib.Path) -> tuple
         writer(skill_name, output_dir, "route_policy_denied")
         return skill_name, str(exc)
 
+    if proxied_preview:
+        reason = _policy_module.route_reason(
+            _PROXY_MODEL_MAP.get(model, model), frontmatter.get("data_sensitivity", "internal"))
+        if reason:
+            _write_skipped_marker(skill_name, output_dir, reason)
+            return skill_name, reason
+
     if not estate_requested and first_party and not api_key:
         # Write a marker, not nothing: a first-party skill that cannot run
         # must surface as a first-party candidate so the judge fails closed
@@ -532,7 +540,7 @@ def _invoke_skill(skill_name: str, diff: str, output_dir: pathlib.Path) -> tuple
                 _write_skipped_marker(skill_name, output_dir, "api_error")
             return skill_name, f"'findings' is not a list of objects: {type(data['findings'])}"
 
-        if mode != "estate-ci-v1":
+        if mode != "estate-ci-v1" or not estate_requested:
             data["first_party"] = not proxied_preview
         if first_party and not proxied_preview and data.get("findings"):
             # Marks the candidate set for run-judge: first-party findings must
@@ -547,6 +555,9 @@ def _invoke_skill(skill_name: str, diff: str, output_dir: pathlib.Path) -> tuple
         print(f"[{skill_name}] {finding_count} findings written to {output_file}")
         return skill_name, None
 
+    except _policy_module.ReviewInputError as exc:
+        _write_skipped_marker(skill_name, output_dir, str(exc))
+        return skill_name, str(exc)
     except json.JSONDecodeError as exc:
         if estate_requested:
             _write_skip_marker(skill_name, output_dir, "protected_review_incomplete")

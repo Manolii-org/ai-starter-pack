@@ -21,6 +21,8 @@ ROOT = Path(__file__).resolve().parents[1]
     ('fable', 'platform_intercepted', 'restricted_us_oss_ok', 'restricted_us_oss_ok', False),
     ('shared-backend', 'duplicate', 'restricted_us_oss_ok', 'restricted_us_oss_ok', False),
     ('high-route', 'duplicate', 'restricted_us_oss_ok', 'restricted_us_oss_ok', True),
+    ('fable', 'mixed', 'restricted_us_oss_ok', 'restricted_us_oss_ok', False),
+    ('high-route', 'mixed', 'restricted_us_oss_ok', 'restricted_us_oss_ok', True),
     ('approved-route', 'other', {'data_sensitivity_max': []}, 'restricted_us_oss_ok', False),
     ('approved-route', 'other', {'data_clearance': [{}]}, 'restricted_us_oss_ok', False),
     ('approved-route', 'other', {'data_sensitivity_max': [], 'data_clearance': ['restricted_us_oss_ok']}, 'restricted_us_oss_ok', False),
@@ -73,6 +75,9 @@ def test_declared_clearance_controls_hook_and_linter(tmp_path, model, provider, 
             'low-route': {'model': 'shared-backend', 'data_sensitivity_max': 'internal'},
             'high-route': {'model': 'shared-backend', **meta},
         }
+    if provider == 'mixed':
+        cfg['platforms'] = {'native': {'available_models': ['fable'], 'data_sensitivity_max': 'internal'}}
+        cfg['tier_definitions'] = {'high-route': {'model': 'fable', **meta}}
     (tmp_path / '.claude/model-routing.json').write_text(json.dumps(cfg))
     env = dict(os.environ, CLAUDE_PROJECT_DIR=str(tmp_path))
     env.pop('CLAUDE_PLUGIN_ROOT', None)

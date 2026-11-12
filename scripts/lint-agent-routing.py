@@ -115,11 +115,14 @@ def build_registered_routes(config):
                 previous = tier_routes.get(alias)
                 if previous is None or order.get(_declared_sensitivity_max(meta), 0) < order.get(_declared_sensitivity_max(previous), 0):
                     tier_routes[alias] = meta
-    # Explicit route names retain their own ceiling; duplicate raw backends
-    # retain the lowest declaration until a specific route is selected.
-    for name, meta in tiers.items():
-        tier_routes[name] = meta
+    # Raw backends remain ambiguous with platform model names.
     for name, meta in tier_routes.items():
+        previous = routes.get(name)
+        if (previous is None or order.get(_declared_sensitivity_max(meta), 0)
+                < order.get(previous["data_sensitivity_max"], 0)):
+            add(name, meta, "tier_definitions")
+    # Explicit route names retain their own ceiling and alias precedence.
+    for name, meta in tiers.items():
         add(name, meta, "tier_definitions")
     for section in ("tier_aliases", "proxy_intercepted_models"):
         for name, meta in config.get(section, {}).items():

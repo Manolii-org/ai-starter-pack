@@ -139,9 +139,10 @@ receipt writers are unsupported and may not invoke this action.
 
 Default: **Governed proxy** (`ANTHROPIC_BASE_URL` + `LITELLM_MASTER_KEY`).
 `ANTHROPIC_BASE_URL` is the Messages compatibility wire, not a provider pin.
-External consumers can explicitly opt into the existing Anthropic transport;
-assessment additionally requires `SECURITY_REVIEW_MODE=direct` and its committed
-external admission. A restrictive `CLIENT_AI_POLICY` flag alone remains a hold
+External consumers can explicitly opt into the existing Anthropic transport.
+Assessment maps `provider_mode=anthropic` to the supported `direct` runtime mode;
+its committed external admission is still required. Proxy mode leaves the
+trusted runtime's version-compatible default unset. A restrictive `CLIENT_AI_POLICY` flag alone remains a hold
 until the owner declares a compatible route.
 
 Guard-then-wire: Always validate secrets exist before wiring. Use this guard step FIRST:
