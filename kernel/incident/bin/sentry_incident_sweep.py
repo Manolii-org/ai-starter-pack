@@ -204,7 +204,10 @@ def sweep(manifest: dict, fetch: Fetch, *, now: datetime | None = None, lookback
             cursors.add(cursor)
 
     candidates, deferred, enriched, unreadable = [], 0, 0, 0
-    for index, (row, route, environment) in enumerate(groups.values()):
+    # Oldest lastSeen first: groups nearest the lookback edge are enriched now,
+    # so a deferred group is among the newest and is re-observed next sweep.
+    ordered = sorted(groups.values(), key=lambda item: str(item[0].get("lastSeen") or ""))
+    for index, (row, route, environment) in enumerate(ordered):
         if index >= budget or clock() - started > deadline_seconds:
             deferred += 1  # re-observed by the next sweep while it recurs
             continue

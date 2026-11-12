@@ -12,8 +12,8 @@ credential.
    `error`/`fatal` issue groups seen in the lookback window, with complete
    bounded pagination.
 2. Reads each group's latest event **once**, up to `max_enrichments` (default
-   60). Groups over the budget are deferred to the next sweep rather than
-   emitted unclassified.
+   60), oldest `lastSeen` first. Groups over the budget are the newest; they
+   are deferred to the next sweep rather than emitted unclassified.
 3. Classifies deterministically with `signatures.json`, without a model call,
    using the candidate-schema enum `code_defect | migration | configuration |
    provider | quota | security | unknown`. `code_defect` requires an in-app

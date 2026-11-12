@@ -143,3 +143,10 @@ def test_manifest_rejects_duplicate_routes(tmp_path):
 
 def test_example_manifest_loads():
     assert sweep_mod.load_routes(ROOT / "manifest" / "examples" / "example.json")["entity"] == "example"
+
+
+def test_budget_defers_the_newest_groups_first():
+    rows = [dict(issue(str(i)), lastSeen=f"2026-11-12T11:{50 - i:02d}:00Z") for i in range(1, 6)]
+    result = sweep_mod.sweep(MANIFEST, fake({"production": rows}), now=NOW, max_enrichments=3)
+    emitted = {c["delivery_id"].split(":")[2] for c in result["candidates"]}
+    assert emitted == {"3", "4", "5"}  # the three oldest; 1 and 2 (newest) are deferred
