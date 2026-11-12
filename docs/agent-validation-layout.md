@@ -32,6 +32,15 @@ The explicit layout mode requires POSIX no-follow directory-descriptor support;
 unsupported hosts fail closed before planning. The regular default layout keeps
 its portable path through individual atomic replacements.
 
+Legacy default `--recipes` inputs may retain linked recipe paths on hosts without
+`O_PATH`/`O_NOFOLLOW` or `O_SYMLINK`. The installer repeatedly checks the observed
+link mapping and canonical recipe bytes before writes. That fallback cannot hold
+the original link inode or detect a replacement fully reversed between checks;
+caller-exclusive ownership is still required. It does not broaden permitted
+output paths or qualify explicit `--layout`, which continues to require the
+stronger directory-descriptor and retained-link support. Qualified POSIX link
+handles remain held until the plan closes, including on coarse-clock filesystems.
+
 The `.claude/skills/agent-validation/SKILL.md` logical output maps to exactly one
 `.github/skills/agent-validation/SKILL.md` write. `.cursor/skills` is a read-only
 witness, never a second write. Both tracked links stay unchanged. This is not

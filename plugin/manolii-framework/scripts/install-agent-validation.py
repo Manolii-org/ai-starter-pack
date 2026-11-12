@@ -270,14 +270,29 @@ class OutputPlan:
             handle.close()
 
     def pin_link(self, path: Path, current):
-        """Retain the original link inode, including on coarse-clock filesystems."""
+        """Pin supported links; default inputs otherwise use repeated snapshots."""
         if hasattr(os, "O_PATH") and hasattr(os, "O_NOFOLLOW"):
             flags = os.O_PATH | os.O_NOFOLLOW
         elif hasattr(os, "O_SYMLINK"):
             flags = os.O_RDONLY | getattr(os, "O_SYMLINK")
         else:
-            raise ValueError("platform cannot retain symlink installation identity")
-        handle = io.FileIO(os.open(path, flags), "rb")
+            if self.layout:
+                raise ValueError("explicit layout requires retained symlink identity support")
+            # Legacy recipe aliases use repeated snapshots on portable hosts.
+            # They do not gain the inode retention of the qualified path.
+            if state(path) != current:
+                raise ValueError(f"link identity changed during planning: {path}")
+            return
+        descriptor = os.open(path, flags)
+        try:
+            handle = io.FileIO(descriptor, "rb")
+        except BaseException as error:
+            # Ownership transfers only when construction returns successfully.
+            # Preserve the primary error even if descriptor cleanup also fails.
+            try:
+                os.close(descriptor)
+            finally:
+                raise error
         retained = False
         try:
             info = os.fstat(handle.fileno())

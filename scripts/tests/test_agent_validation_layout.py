@@ -1334,3 +1334,199 @@ def test_failed_privacy_change_reports_actual_held_mode(
     record = json.loads(error.split("AGENT-VALIDATION-TEMPORARY-RECOVERY: ", 1)[1].splitlines()[0])
     assert record["held_mode"] == "0644"
     assert record["private"] is False
+
+
+@pytest.mark.parametrize("kind", ["ancestor", "leaf"])
+def test_missing_link_handle_flags_preserve_legacy_recipe_cli(producers, consumer, tmp_path, kind):
+    for rel in (".claude/skills", ".cursor/skills"):
+        (consumer / rel).unlink()
+        (consumer / rel).mkdir()
+    recipes = tmp_path / "portable-recipes"
+    recipes.mkdir()
+    raw = b'{"schema_version":1,"base":"origin/main","checks":[]}\n'
+    (recipes / "checks.json").write_bytes(raw)
+    alias = tmp_path / "portable-recipe-alias"
+    alias.symlink_to(recipes if kind == "ancestor" else recipes / "checks.json")
+    supplied = alias / "checks.json" if kind == "ancestor" else alias
+    source = producers["source"][0]
+    wrapper = ("import os,runpy,sys\n"
+               "for name in ('O_PATH','O_NOFOLLOW','O_SYMLINK'):\n"
+               "    if hasattr(os,name): delattr(os,name)\n"
+               "sys.argv=sys.argv[1:]\nrunpy.run_path(sys.argv[0],run_name='__main__')\n")
+    environment = {**ENV, **{k: os.environ[k] for k in (
+        "HOME", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy",
+        "SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "NODE_EXTRA_CA_CERTS") if k in os.environ}}
+    def run(*flags):
+        return subprocess.run([sys.executable, "-B", "-c", wrapper,
+            str(source / "scripts/install-agent-validation.py"), "--repo-root", str(consumer),
+            "--recipes", str(supplied), *flags], env=environment, cwd=tmp_path,
+            capture_output=True, text=True, timeout=30)
+    before = snapshot(consumer)
+    dry, check = run("--dry-run"), run("--check")
+    assert dry.returncode == 0, dry.stderr
+    assert check.returncode == 1, check.stderr
+    assert snapshot(consumer) == before
+    applied = run()
+    assert applied.returncode == 0, applied.stderr
+    assert (consumer / "config/agent-checks.json").read_bytes() == raw
+    after = snapshot(consumer)
+    for flags in [("--check",), ("--dry-run",), ()]:
+        result = run(*flags)
+        assert result.returncode == 0, result.stderr
+        assert snapshot(consumer) == after
+    assert alias.is_symlink()
+
+
+@pytest.mark.parametrize("changed", ["alias", "canonical"])
+def test_portable_link_recipe_inputs_still_revalidate(producers, consumer, tmp_path, monkeypatch, changed):
+    for name in ("O_PATH", "O_NOFOLLOW", "O_SYMLINK"):
+        monkeypatch.delattr(os, name, raising=False)
+    for rel in (".claude/skills", ".cursor/skills"):
+        (consumer / rel).unlink()
+        (consumer / rel).mkdir()
+    recipes = tmp_path / "portable-recipes"
+    recipes.mkdir()
+    recipe = recipes / "checks.json"
+    recipe.write_bytes((consumer / "config/agent-checks.json").read_bytes())
+    alias = tmp_path / "portable-recipe-alias"
+    alias.symlink_to(recipes, target_is_directory=True)
+    module = imported(producers["source"][0])
+    assert module.DIRFD_ATOMIC is False
+    original = module.build_plan
+    changed_inputs = []
+    def altered(args):
+        plan = original(args)
+        if changed == "alias":
+            alternate = tmp_path / "alternate-recipes"
+            alternate.mkdir()
+            (alternate / "checks.json").write_bytes(recipe.read_bytes())
+            alias.unlink()
+            alias.symlink_to(alternate, target_is_directory=True)
+        else:
+            recipe.write_bytes(recipe.read_bytes() + b"\n")
+        changed_inputs.append(changed)
+        return plan
+    monkeypatch.setattr(module, "build_plan", altered)
+    before = snapshot(consumer)
+    assert module.main(["--repo-root", str(consumer), "--recipes", str(alias / "checks.json")]) == 2
+    assert changed_inputs == [changed]
+    assert snapshot(consumer) == before
+
+
+@pytest.mark.parametrize("flags", [(), ("--check",), ("--dry-run",)])
+def test_missing_link_handle_flags_do_not_qualify_explicit_layout(producers, consumer, monkeypatch, flags):
+    for name in ("O_PATH", "O_NOFOLLOW", "O_SYMLINK"):
+        monkeypatch.delattr(os, name, raising=False)
+    module = imported(producers["source"][0])
+    assert module.DIRFD_ATOMIC is False
+    before = snapshot(consumer)
+    assert module.main(["--repo-root", str(consumer), "--layout", LAYOUT_NAME, *flags]) == 2
+    assert snapshot(consumer) == before
+
+
+@pytest.mark.parametrize("cleanup_error", [False, True])
+def test_link_fileio_failure_closes_descriptor_without_masking_primary(tmp_path, monkeypatch, cleanup_error):
+    module = imported(ROOT)
+    root = tmp_path / "constructor-failure"
+    root.mkdir()
+    (root / "target").write_text("synthetic")
+    alias = root / "alias"
+    alias.symlink_to("target")
+    opened = []
+    original_open, original_close = os.open, os.close
+    primary = ValueError("synthetic FileIO initialization failure")
+    def opening(path, flags, *args, **kwargs):
+        fd = original_open(path, flags, *args, **kwargs)
+        if Path(path) == alias:
+            opened.append(fd)
+        return fd
+    def closing(fd):
+        original_close(fd)
+        if cleanup_error and fd in opened:
+            raise OSError(errno.EIO, "synthetic close reporting failure")
+    def construct(*args, **kwargs):
+        raise primary
+    monkeypatch.setattr(module.os, "open", opening)
+    monkeypatch.setattr(module.os, "close", closing)
+    monkeypatch.setattr(module.io, "FileIO", construct)
+    plan = module.OutputPlan(root)
+    try:
+        with pytest.raises(ValueError) as error:
+            plan.watch(alias)
+        assert error.value is primary
+        assert len(opened) == 1
+        with pytest.raises(OSError) as closed:
+            os.fstat(opened[0])
+        assert closed.value.errno == errno.EBADF
+        assert plan._link_handles == {}
+        if cleanup_error:
+            assert isinstance(error.value.__context__, OSError)
+            assert error.value.__context__.errno == errno.EIO
+    finally:
+        plan.close()
+        for fd in opened:
+            try:
+                os.fstat(fd)
+            except OSError:
+                continue
+            original_close(fd)
+
+
+@pytest.mark.skipif(not hasattr(os, "O_PATH") or not hasattr(os, "O_NOFOLLOW"),
+                    reason="actual O_PATH directory constructor behavior requires these host flags")
+def test_link_replaced_with_directory_closes_actual_constructor_failure(tmp_path, monkeypatch):
+    module = imported(ROOT)
+    root = tmp_path / "directory-race"
+    root.mkdir()
+    (root / "target").mkdir()
+    alias = root / "alias"
+    alias.symlink_to("target", target_is_directory=True)
+    original_open = os.open
+    opened = []
+    def opening(path, flags, *args, **kwargs):
+        if Path(path) == alias:
+            alias.rename(root / "retained-alias")
+            alias.mkdir()
+        fd = original_open(path, flags, *args, **kwargs)
+        if Path(path) == alias:
+            opened.append(fd)
+        return fd
+    monkeypatch.setattr(module.os, "open", opening)
+    plan = module.OutputPlan(root)
+    try:
+        with pytest.raises(IsADirectoryError):
+            plan.watch(alias)
+        assert len(opened) == 1
+        with pytest.raises(OSError) as closed:
+            os.fstat(opened[0])
+        assert closed.value.errno == errno.EBADF
+        assert plan._link_handles == {}
+    finally:
+        plan.close()
+        for fd in opened:
+            try:
+                os.fstat(fd)
+            except OSError:
+                continue
+            os.close(fd)
+
+
+@pytest.mark.skipif(not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "O_DIRECTORY"),
+                    reason="requires actual no-follow directory descriptor support")
+def test_explicit_layout_never_downgrades_with_directory_descriptors_only(tmp_path, monkeypatch):
+    for name in ("O_PATH", "O_SYMLINK"):
+        monkeypatch.delattr(os, name, raising=False)
+    module = imported(ROOT)
+    assert module.DIRFD_ATOMIC is True
+    root = tmp_path / "explicit-no-link-handle"
+    root.mkdir()
+    (root / "target").mkdir()
+    alias = root / "alias"
+    alias.symlink_to("target", target_is_directory=True)
+    plan = module.OutputPlan(root, layout=True)
+    try:
+        with pytest.raises(ValueError, match="symlink"):
+            plan.watch(alias)
+        assert plan._link_handles == {}
+    finally:
+        plan.close()
