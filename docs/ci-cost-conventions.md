@@ -123,6 +123,42 @@ Cancel leftover PR / merge-queue runs after close rather than waiting them
 out. Orchestrator example: `merged-pr-run-sweeper`. Do not add a dense GHA
 poller.
 
+## 6. Maintainer source-contract execution budget
+
+The 2026-11-12 E3 policy migration sets the existing
+`assessment-sast-failure-contract` in `config/agent-checks.json` to **180 seconds
+per command**, replacing its 120-second limit. This applies only to the Pack's
+maintainer contract: the same 22 pytest modules and the existing pinned-reference
+check. Its check identity, selectors, complete test scope, declared environment
+and provider remain unchanged. The contract uses the already provisioned
+`release-contract-python` interpreter; its Jinja2 prerequisite must not depend on
+ambient Python packages.
+
+The old limit had little execution margin. Local source-head observations were:
+
+| Observation | Result |
+| --- | --- |
+| Old 120-second whole-recipe attempts at `037d549a` and `57c1c1e3` | Contract timed out at 120.005 and 120.007 seconds; both remain failed. |
+| Related full-scope run at `902bf546` | 1,435 cases passed in 119.41 seconds, close to the old ceiling. |
+| Controlled full-scope diagnostic, before changing this policy | 1,435 cases passed, zero skips, in 113.67 seconds; runner wall time 114.378 seconds and CPU time 111.918 seconds. |
+
+The diagnostic used a fresh normal declared release environment and verified
+actionlint 1.7.12. Its 180-second diagnostic cap was not a passing receipt under
+the old policy. No individual test exceeded 0.95 seconds; the budget accounts for
+the cumulative deterministic contract workload and execution variation. Relative
+to that observation, 180 seconds leaves 65.622 seconds (about 36%) of headroom.
+Source heads and execution conditions differ across these observations; they
+are not matched billing samples or native enforcement proof. Invoice savings
+remain unmeasured and are not claimed.
+
+Nonzero exits, missing prerequisites and deadline expiration still fail the
+contract. The native missing-Jinja2 collection error is a separate prerequisite
+failure, addressed by the declared interpreter binding rather than this budget.
+All product scanner rule limits, workflow job deadlines, source-executor limits
+and release/production authority deadlines retain their owning policies. Apply
+this migration only through reviewed source and actual new-head owning gates;
+there is no routine operator task or manual enable switch.
+
 ## What this pack will not absorb
 
 - Product staging hostnames or Vercel project IDs
