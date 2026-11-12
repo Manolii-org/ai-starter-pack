@@ -22,7 +22,8 @@ Invoke as `/watch-pr [PR_NUMBER]` or `/watch-pr` (auto-detects from current bran
 ### Step 0: Retain the existing task
 
 Read the existing accepted owner checkpoint before subscribing. Preserve its
-parent commitments, holds, budgets, instructions and other owners. Missing or
+parent commitments, holds, budgets, instructions and other owners. Execute only
+trusted installed sources, never repository tools from an untrusted PR or fork. Missing or
 malformed custody is an infrastructure hold for persistence/continuation, not
 permission to reconstruct it or stop independent authorized implementation.
 
@@ -147,7 +148,8 @@ subscribe_github_ci(owner, repo, pr_number)   # Cursor Cloud only
 ```
 
 Docs/CI with **none** (no CI subscribe): do **not** enter the 60s poll /
-5-minute wait. GitHub auto-merge + Judge is the waiter. End the turn.
+5-minute wait. GitHub auto-merge + Judge is the waiter. Continue independent
+parent commitments; end the turn only if no runnable work remains.
 
 ### Step 3: Continue authorized work (existing repair budget)
 

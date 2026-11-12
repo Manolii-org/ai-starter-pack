@@ -358,7 +358,7 @@ def test_release_capability_distribution_boundary(default_render, branded_render
         for path in maintenance_paths:
             assert not (rendered / path.relative_to(ROOT)).exists()
         config = json.loads((rendered / "config/agent-checks.json").read_text())
-        assert all(c["id"] not in {"release-manifest-contract", "feature-controls", "feature-controls-distribution", "assessment-sast-failure-contract", "registry-bootstrap-contract", "installer-layout-contract"} for c in config["checks"])
+        assert all(c["id"] not in {"release-manifest-contract", "feature-controls", "feature-controls-distribution", "assessment-sast-failure-contract", "registry-bootstrap-contract", "installer-layout-contract", "watch-continuity-contract"} for c in config["checks"])
         assert all(e["id"] not in {"release-contract-python", "feature-controls-python"} for e in config["environments"])
         fixture = ROOT / "scripts/tests/fixtures/release-manifest.v1.json"
         release_id = json.loads(fixture.read_text())["release_id"]
@@ -485,7 +485,7 @@ def test_branded_attribution(branded_render, default_render):
 def test_agent_validation_base_uses_owner_ref(tmp_path, default_render, base_ref):
     """A real rendered CLI plans correctly with remote or local owner refs."""
     canonical = json.loads((ROOT / "config/agent-checks.json").read_text())
-    canonical["checks"] = [c for c in canonical["checks"] if c["id"] not in {"release-manifest-contract", "feature-controls", "feature-controls-distribution", "assessment-sast-failure-contract", "registry-bootstrap-contract", "installer-layout-contract"}]
+    canonical["checks"] = [c for c in canonical["checks"] if c["id"] not in {"release-manifest-contract", "feature-controls", "feature-controls-distribution", "assessment-sast-failure-contract", "registry-bootstrap-contract", "installer-layout-contract", "watch-continuity-contract"}]
     canonical["environments"] = [e for e in canonical["environments"] if e["id"] not in {"release-contract-python", "feature-controls-python"}]
     assert json.loads((default_render / "config/agent-checks.json").read_text()) == canonical
     dst = tmp_path / "custom-integration"
@@ -1078,3 +1078,11 @@ def test_standard_keeps_codex_review_unless_opted_out(default_render, tmp_path):
 def test_strict_refuses_manolii_hosted_services(tmp_path, flag):
     with pytest.raises(subprocess.CalledProcessError):
         render(tmp_path / "bad", isolation_profile="strict", **{flag: "true"})
+
+
+def test_watch_continuity_maintainer_fixture_never_ships(default_render, strict_render):
+    for rendered in (default_render, strict_render):
+        assert not (rendered / "tests/test_watch_pr_continuity.py").exists()
+        command = rendered / ".claude/commands/watch-pr.md"
+        assert command.is_file()
+        assert "original task" in command.read_text().lower()
