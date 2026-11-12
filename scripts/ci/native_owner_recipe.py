@@ -62,12 +62,49 @@ def subject(event, env):
             "native_job": env.get("GITHUB_JOB")}
 
 
-def git(root, *args):
+def git(root, *args, input=None):
     env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
     env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull,
-               GIT_TERMINAL_PROMPT="0", GIT_NO_LAZY_FETCH="1")
-    return subprocess.check_output(["git", "--no-replace-objects", *args], cwd=root,
-                                   env=env, timeout=30)
+               GIT_TERMINAL_PROMPT="0", GIT_NO_LAZY_FETCH="1", GIT_OPTIONAL_LOCKS="0",
+               GIT_GRAFT_FILE=os.devnull, GIT_SHALLOW_FILE=os.devnull, GIT_ATTR_NOSYSTEM="1")
+    # Metadata queries must not execute a local index-monitor hook or update
+    # its caches. Command-line config wins over repository/include settings.
+    return subprocess.check_output(["git", "--no-replace-objects",
+                                   "-c", "core.fsmonitor=false",
+                                   "-c", "core.untrackedCache=false",
+                                   "-c", "core.commitGraph=false",
+                                   "-c", "advice.graftFileDeprecated=false",
+                                   "-c", "core.attributesFile=" + os.devnull,
+                                   "-c", "protocol.allow=never", *args], cwd=root,
+                                   env=env, input=input, timeout=30)
+
+
+def require_unfiltered_source(root):
+    # Attribute metadata can be inspected without converting worktree bytes.
+    # Refuse filter drivers before diff has an opportunity to execute one.
+    inventory = git(root, "ls-files", "--cached", "-v", "-z")
+    if not inventory.endswith(b"\0"):
+        raise ValueError("source index inventory is incomplete")
+    entries = inventory.split(b"\0")[:-1]
+    if any(not entry.startswith(b"H ") or len(entry) <= 2 for entry in entries):
+        raise ValueError("special or ambiguous source index flags cannot be qualified")
+    paths = b"\0".join(entry[2:] for entry in entries) + b"\0"
+    # --all distinguishes absent attributes from literal driver names such as
+    # "unset"/"unspecified", which the single-attribute text form conflates.
+    attributes = git(root, "check-attr", "-z", "--stdin", "--all", input=paths)
+    if not paths.endswith(b"\0") or (attributes and not attributes.endswith(b"\0")):
+        raise ValueError("source filter attributes are incomplete")
+    names = paths.split(b"\0")[:-1]
+    values = attributes.split(b"\0")[:-1] if attributes else []
+    if len(set(names)) != len(names) or len(values) % 3:
+        raise ValueError("source filter attributes are incomplete")
+    known, seen = set(names), set()
+    for index in range(0, len(values), 3):
+        entry, attribute, _value = values[index:index + 3]
+        key = (entry, attribute)
+        if entry not in known or not attribute or key in seen or attribute == b"filter":
+            raise ValueError("filtered or ambiguous source cannot be qualified")
+        seen.add(key)
 
 
 def identifiers(items):
@@ -109,11 +146,17 @@ def execute(root, event, env, *, plan_only=False):
     if git(root, "rev-parse", "HEAD").decode().strip() != current["head_sha"]:
         raise ValueError("checkout differs from immutable event head")
     current["tree_sha"] = sha(git(root, "rev-parse", "HEAD^{tree}").decode().strip())
-    if subprocess.run(["git", "--no-replace-objects", "merge-base", "--is-ancestor",
-                       current["base_sha"], current["head_sha"]], cwd=root, timeout=30).returncode:
-        raise ValueError("the selected current base must be integrated before qualification")
-    if git(root, "diff", "--name-only", "HEAD"):
+    try:
+        git(root, "merge-base", "--is-ancestor", current["base_sha"], current["head_sha"])
+    except subprocess.CalledProcessError as error:
+        if error.returncode != 1:
+            raise
+        raise ValueError("the selected current base must be integrated before qualification") from error
+    require_unfiltered_source(root)
+    if git(root, "diff", "--no-ext-diff", "--no-textconv", "--name-only", "HEAD"):
         raise ValueError("tracked source is modified before qualification")
+    if git(root, "ls-files", "--others", "--exclude-standard", "-z"):
+        raise ValueError("untracked source is present before qualification")
     summary = {"schema": SCHEMA, **current, "recipe_passed": False,
                "whole_configured_recipe_passed": False, "merge_authority": False,
                "admission_authorized": False, "production_authority": False}
@@ -132,6 +175,13 @@ def execute(root, event, env, *, plan_only=False):
     if planned.returncode != 0:
         summary["status"] = "classification-failed"
         return summary, planned.returncode
+    # Classification is code execution too. Recheck before it can select an
+    # execution or publish even an unselected/plan-only successful result.
+    require_unfiltered_source(root)
+    if (git(root, "rev-parse", "HEAD").decode().strip() != current["head_sha"]
+            or git(root, "diff", "--no-ext-diff", "--no-textconv", "--name-only", "HEAD")
+            or git(root, "ls-files", "--others", "--exclude-standard", "-z")):
+        raise ValueError("source changed during qualification")
     if len(planned.stdout) > 2_000_000:
         raise ValueError("recipe plan exceeds bounded metadata")
     plan = json.loads(planned.stdout)
@@ -152,8 +202,10 @@ def execute(root, event, env, *, plan_only=False):
     if len(receipt_raw) > 2_000_000:
         raise ValueError("owner receipt exceeds bounded metadata")
     passing_receipt(json.loads(receipt_raw), current, selected, plan["base"])
+    require_unfiltered_source(root)
     if (git(root, "rev-parse", "HEAD").decode().strip() != current["head_sha"]
-            or git(root, "diff", "--name-only", "HEAD")):
+            or git(root, "diff", "--no-ext-diff", "--no-textconv", "--name-only", "HEAD")
+            or git(root, "ls-files", "--others", "--exclude-standard", "-z")):
         raise ValueError("source changed during qualification")
     summary.update(status="passed", recipe_passed=True,
                    whole_configured_recipe_passed=set(selected) == set(configured),
