@@ -1567,3 +1567,115 @@ def test_duplicate_source_and_numeric_alias_edits_cannot_be_filtered_as_audit():
     alias["user"]["id"] = float(first["user"]["id"])
     with pytest.raises(Q.QualificationError, match="conflicting duplicate"):
         Q.effective_current_reviews([first, alias], HEAD)
+
+
+@pytest.mark.parametrize("status", [1, 2, 9])
+def test_collector_failure_publishes_exact_held_json_before_propagating_status(tmp_path, status):
+    import os
+    workflow = yaml.load((ROOT / ".github/workflows/source-qualification-reusable.yml").read_text(),
+                         Loader=yaml.BaseLoader)
+    step = next(s for s in workflow["jobs"]["qualification"]["steps"] if s.get("id") == "qualification")
+    helper = tmp_path / ".source-qualification-pack/scripts/ci/source_qualification.py"
+    helper.parent.mkdir(parents=True)
+    payload = {"schema": Q.SCHEMA, "source_qualified": False, "admission_authorized": False,
+               "head_sha": HEAD, "base_sha": BASE, "reasons": ["synthetic pending review"]}
+    helper.write_text("import sys\nprint(" + repr(json.dumps(payload)) + ")\nsys.exit(" + str(status) + ")\n")
+    runner = tmp_path / "runner"
+    runner.mkdir()
+    output = runner / "github-output"
+    env = {"HOME": os.environ["HOME"], "PATH": os.environ["PATH"], "LANG": "C.UTF-8",
+           "RUNNER_TEMP": str(runner), "GITHUB_OUTPUT": str(output), "REPOSITORY": REPO,
+           "PR": "201", "HEAD_SHA": HEAD, "BASE_SHA": BASE,
+           "POLICY_PATH": "config/source-qualification.json"}
+    result = subprocess.run(["bash", "-e", "-o", "pipefail", "-c", step["run"]], cwd=tmp_path,
+                            env=env, capture_output=True, text=True, timeout=10)
+    assert result.returncode == status
+    assert json.loads(result.stdout) == payload
+    assert json.loads((runner / "source-qualification-result.json").read_text()) == payload
+    assert not output.exists()
+
+
+@pytest.mark.parametrize("raw", ["1e999", "-1e999", '{"n":1e999}', '{"n":-1e999}',
+                                  '{"nested":[{"n":1e999}]}', '{"nested":[{"n":-1e999}]}'])
+def test_native_json_exponent_overflow_is_nonfinite_at_every_depth(raw):
+    with pytest.raises(Q.QualificationError, match="nonfinite"):
+        Q.strict_json(raw)
+
+
+def test_finite_native_json_numbers_keep_standard_types_and_values():
+    value = Q.strict_json('{"integer":7,"decimal":1.25,"large":1e308,"tiny":1e-999,"bool":true}')
+    assert value == {"integer": 7, "decimal": 1.25, "large": 1e308, "tiny": 0.0, "bool": True}
+    assert type(value["integer"]) is int and type(value["decimal"]) is float
+    assert type(value["bool"]) is bool
+
+
+@pytest.mark.parametrize("scanner", ["semgrep", "bandit"])
+@pytest.mark.parametrize("status", [0, 1])
+def test_complete_scanner_findings_cannot_produce_a_passing_receipt(complete_native_source, scanner, status):
+    semgrep, bandit = copy.deepcopy(complete_native_source[-2:])
+    if scanner == "semgrep":
+        semgrep["results"] = [{"check_id": "synthetic-rule", "path": "a.py", "start": {"line": 1},
+                               "extra": {"message": "Synthetic finding", "severity": "ERROR"}}]
+    else:
+        bandit["results"] = [{"test_id": "B999", "filename": "a.py", "line_number": 1,
+                              "issue_text": "Synthetic finding", "issue_severity": "HIGH"}]
+    # Complete reports remain useful diagnostics; a finding never earns executed_pass.
+    report = semgrep if scanner == "semgrep" else bandit
+    assert Q.scanner_report(report, status, scanner)["finding_count"] == 1
+    with pytest.raises(Q.QualificationError, match="passing evidence"):
+        completed_source_receipt(complete_native_source, semgrep=semgrep, bandit=bandit,
+                                 **{scanner + "_exit": status})
+
+
+def test_security_cli_findings_revoke_stale_receipt_before_artifact_success(
+        complete_native_source, monkeypatch, tmp_path_factory):
+    root, environment, event, read, semgrep, bandit = complete_native_source
+    temporary = tmp_path_factory.mktemp("scanner-producer")
+    environment.update(RUNNER_TEMP=str(temporary), GITHUB_EVENT_PATH=str(temporary / "event.json"),
+                       SEMGREP_EXIT="1", BANDIT_EXIT="0")
+    (temporary / "event.json").write_text(json.dumps(event))
+    semgrep["results"] = [{"check_id": "synthetic-rule", "path": "a.py", "start": {"line": 1},
+                           "extra": {"message": "Synthetic finding", "severity": "ERROR"}}]
+    for key, value in environment.items():
+        monkeypatch.setenv(key, value)
+    original = Path.read_bytes
+    reports_by_path = {Path("/tmp/semgrep-results.json"): semgrep, Path("/tmp/bandit-results.json"): bandit}
+    monkeypatch.setattr(Path, "read_bytes", lambda path: json.dumps(reports_by_path[path]).encode()
+                        if path in reports_by_path else original(path))
+    original_git = subprocess.check_output
+    def native_git(command, **kwargs):
+        assert command[:2] == ["git", "--no-replace-objects"]
+        if command[2:] == ["show", event["pull_request"]["base"]["sha"] + ":config/source-qualification.json"]:
+            return json.dumps(configuration()).encode()
+        return original_git(["git", "-C", str(root), *command[1:]], **kwargs)
+    monkeypatch.setattr(Q.subprocess, "check_output", native_git)
+    monkeypatch.setattr(Q, "NativeAPI", lambda reviewer: object())
+    monkeypatch.setattr(Q, "producing_job", lambda *args, **kwargs: {"native_job_id": 302, "native_check_id": 202})
+    output = temporary / "source-qualification-102-1-security-security/source-qualification.json"
+    output.parent.mkdir()
+    output.write_text('{"result":"executed_pass"}')
+    assert Q.receipt_main(["--role", "security", "--output", str(output)]) == 1
+    assert not output.exists()
+    action = yaml.load((ROOT / ".github/actions/source-qualification-receipt/action.yml").read_text(),
+                       Loader=yaml.BaseLoader)
+    assert "set -euo pipefail" in action["runs"]["steps"][0]["run"]
+    assert "if" not in action["runs"]["steps"][-1]  # Native default success condition retains failure.
+
+
+def test_review_evidence_test_alone_selects_owning_source_contract(tmp_path):
+    config = json.loads((ROOT / "config/agent-checks.json").read_text())
+    target = tmp_path / "scripts/tests/test_review_evidence.py"
+    target.parent.mkdir(parents=True)
+    target.write_text("# Synthetic original review contract\n")
+    git(tmp_path, "init", "-q")
+    git(tmp_path, "add", ".")
+    git(tmp_path, "commit", "-qm", "Synthetic original contract")
+    target.write_text("# Synthetic changed review contract\n")
+    path = ROOT / "scripts/agent-check.py"
+    spec = importlib.util.spec_from_file_location("source_contract_selector", path)
+    runner = importlib.util.module_from_spec(spec)
+    exec(compile(path.read_bytes(), str(path), "exec"), runner.__dict__)
+    plan = runner.plan_for(tmp_path, config, "HEAD")
+    assert plan["paths"] == ["scripts/tests/test_review_evidence.py"]
+    selected = next(check for check in plan["checks"] if check["id"] == "source-qualification-contract")
+    assert "scripts/tests/test_review_evidence.py" in selected["commands"][0]

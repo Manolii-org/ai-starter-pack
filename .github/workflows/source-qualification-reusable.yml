@@ -66,7 +66,12 @@ jobs:
           POLICY_PATH: ${{ inputs.policy_path }}
         run: |
           set -euo pipefail
-          python3 .source-qualification-pack/scripts/ci/source_qualification.py --repository "$REPOSITORY" --pr "$PR" --head "$HEAD_SHA" --base "$BASE_SHA" --policy-path "$POLICY_PATH" > "$RUNNER_TEMP/source-qualification-result.json"
+          collector_status=0
+          python3 .source-qualification-pack/scripts/ci/source_qualification.py --repository "$REPOSITORY" --pr "$PR" --head "$HEAD_SHA" --base "$BASE_SHA" --policy-path "$POLICY_PATH" > "$RUNNER_TEMP/source-qualification-result.json" || collector_status=$?
+          cat "$RUNNER_TEMP/source-qualification-result.json"
+          if [[ "$collector_status" -ne 0 ]]; then
+            exit "$collector_status"
+          fi
           python3 -I - "$RUNNER_TEMP/source-qualification-result.json" <<'PY'
           import json, os, sys
           with open(sys.argv[1], encoding='utf-8') as stream:
@@ -78,5 +83,4 @@ jobs:
                   or result.get('base_sha') != os.environ['BASE_SHA']):
               raise SystemExit('Source qualification did not produce an exact passing candidate result')
           PY
-          cat "$RUNNER_TEMP/source-qualification-result.json"
           echo 'source_qualified=true' >> "$GITHUB_OUTPUT"

@@ -457,6 +457,7 @@
         "config/source-qualification.example.json",
         "docs/contracts/source-qualification.md",
         "scripts/ci/review_evidence.py",
+        "scripts/tests/test_review_evidence.py",
         "config/agent-checks.json",
         "scripts/ci/source_qualification_transport.py",
         ".github/workflows/source-qualification-producer-proof.yml",

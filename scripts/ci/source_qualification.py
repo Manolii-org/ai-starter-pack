@@ -16,6 +16,7 @@ import fnmatch
 import importlib.util
 import io
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -48,7 +49,12 @@ def strict_json(raw):
         return out
     def constant(_):
         raise QualificationError("nonfinite native JSON value")
-    return json.loads(raw, object_pairs_hook=pairs, parse_constant=constant)
+    def finite_float(raw_number):
+        value = float(raw_number)
+        if not math.isfinite(value):
+            raise QualificationError("nonfinite native JSON value")
+        return value
+    return json.loads(raw, object_pairs_hook=pairs, parse_constant=constant, parse_float=finite_float)
 
 
 def digest(value):
@@ -754,6 +760,8 @@ def produce_receipt(env, event, role, git_read, *, artifact_key=None, semgrep=No
     if role == "security":
         security = {"semgrep": scanner_report(semgrep, semgrep_exit, "semgrep"),
                     "bandit": scanner_report(bandit, bandit_exit, "bandit")}
+        if semgrep_exit != 0 or bandit_exit != 0 or any(item["finding_count"] for item in security.values()):
+            raise QualificationError("scanner findings or unsuccessful exit cannot produce passing evidence")
         inventory = source_inventory(entries, compiled["security_scope"])
         for scanner, report in (("semgrep", semgrep), ("bandit", bandit)):
             if report_paths(report, scanner) != inventory[scanner]:
