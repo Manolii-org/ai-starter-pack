@@ -22,6 +22,10 @@ def native_pr(body='',head='a'*40):
         base={'ref':'main','repo':{'default_branch':'main'}})
 
 
+def native_branch(head, ref='fix/owned', protected=False):
+    return dict(name=ref, commit={'sha':head}, protected=protected)
+
+
 @pytest.mark.parametrize('case,allowed',[
     ('unclaimed',True),('body',False),('sticky-author',False),('sticky-actions',False),
     ('forged-sticky',True),('fenced-example',True),('stale',False),('fork',False),
@@ -51,7 +55,7 @@ def test_custody_uses_native_owner_and_fails_closed(tmp_path,case,allowed):
     assert out.read_text()==f'skip={str(not allowed).lower()}\n'
 
 
-@pytest.mark.parametrize('outcome', ['publication_admission_held','native_state_held','instruction_surface_held',
+@pytest.mark.parametrize('outcome', ['protected_head_held','head_protection_unverified','publication_admission_held','native_state_held','instruction_surface_held',
     'publication_credential_unavailable','publication_unknown','native_state_unverified','commit_subject_held','candidate_ancestry_held','publication_packet_held'])
 def test_held_receipts_suppress_duplicate_editors_for_the_same_head(tmp_path,outcome):
     # Run the actual Bash guard with a bounded fake native API, not a broker.
@@ -86,13 +90,57 @@ def candidate(tmp_path,monkeypatch):
 
 def test_missing_publication_credential_preserves_local_implementation(candidate,monkeypatch):
     work,base,head,git=candidate;m=load_publisher()
-    monkeypatch.setattr(m,'api',lambda path,**kw:native_pr(head=base) if '/pulls/' in path else pytest.fail('missing writer must not attempt publication'))
+    monkeypatch.setattr(m,'api',lambda path,**kw:native_pr(head=base) if '/pulls/' in path else native_branch(base) if '/branches/' in path else pytest.fail('missing writer must not attempt publication'))
     result=m.publish()
     assert result['outcome']=='publication_credential_unavailable' and result['published_sha']==''
     assert git('rev-parse','HEAD')==head and (work/'file.txt').read_text()=='after'
     recovery=Path(result['recovery_path'])
     git('bundle','verify',str(recovery/'implementation.bundle'))
     assert json.loads((recovery/'receipt.json').read_text())['candidate_sha']==head
+
+
+@pytest.mark.parametrize('state', ['protected','ruleset','denied','missing','string','wrong-branch','moved','deleted'])
+def test_protected_or_unverified_head_cannot_use_writer(candidate,monkeypatch,state):
+    work,base,head,git=candidate;m=load_publisher();calls=[]
+    monkeypatch.setenv('HEAD_REF','develop')
+    monkeypatch.setenv('PUBLISH_TOKEN','fixture-bypass-capable-writer')
+    # A held candidate cannot even install writer auth into the Git environment.
+    monkeypatch.setattr(m.base64,'b64encode',lambda *a:pytest.fail('writer auth must remain unused'))
+    def api(path,**kw):
+        calls.append(path)
+        if '/pulls/' in path:
+            pr=native_pr(head=base);pr['head']['ref']='develop';return pr
+        assert path=='repos/example/repository/branches/develop'
+        if state in {'denied','deleted'}:raise PermissionError('fixture native branch read denied')
+        value=native_branch(base,ref='develop',protected=state in {'protected','ruleset'})
+        if state=='missing':value.pop('protected')
+        if state=='string':value['protected']='false'
+        if state=='wrong-branch':value['name']='somewhere-else'
+        if state=='moved':value['commit']['sha']='b'*40
+        return value
+    monkeypatch.setattr(m,'api',api)
+    result={'outcome':'unverified','published_sha':''}
+    if state in {'denied','deleted'}:
+        with pytest.raises(PermissionError):m.publish(result)
+    else:m.publish(result)
+    assert result['outcome']==('protected_head_held' if state in {'protected','ruleset'} else 'head_protection_unverified')
+    assert not result['published_sha'] and len(calls)==2
+    assert git('rev-parse','HEAD')==head
+    git('bundle','verify',str(Path(result['recovery_path'])/'implementation.bundle'))
+
+
+def test_native_protection_read_uses_builtin_token_only(candidate,monkeypatch):
+    import io
+    m=load_publisher();calls=[]
+    monkeypatch.setenv('PUBLISH_TOKEN','fixture-bypass-capable-writer')
+    def transport(request,timeout):
+        calls.append(request)
+        assert request.get_header('Authorization')=='Bearer fixture-read-only'
+        assert timeout==20 and request.get_method()=='GET'
+        return io.BytesIO(json.dumps(native_branch('a'*40)).encode())
+    monkeypatch.setattr(m.urllib.request,'urlopen',transport)
+    assert m.api('repos/example/repository/branches/fix%2Fowned')['protected'] is False
+    assert len(calls)==1
 
 
 def test_unmarked_commit_is_held_without_losing_implementation(candidate,monkeypatch):
@@ -148,6 +196,7 @@ def test_guarded_publisher_uses_fresh_config_and_remote_readback(candidate,monke
     monkeypatch.setattr(m,'git',run)
     def api(path,**kw):
         if '/pulls/' in path:return native_pr(head=base)
+        if '/branches/' in path:return native_branch(base)
         assert '/git/ref/heads/fix%2Fowned' in path
         return {'object':{'sha':head}}
     monkeypatch.setattr(m,'api',api)
@@ -166,6 +215,7 @@ def test_uncertain_push_is_retained_and_never_retried(candidate,monkeypatch):
     monkeypatch.setattr(m,'git',run)
     def api(path,**kw):
         if '/pulls/' in path:return native_pr(head=base)
+        if '/branches/' in path:return native_branch(base)
         raise TimeoutError('fixture-only raw provider payload must not be reported')
     monkeypatch.setattr(m,'api',api)
     retained={'outcome':'unverified','published_sha':''}
@@ -206,6 +256,7 @@ def test_publication_lease_refuses_a_ref_changed_after_native_read(candidate,mon
     monkeypatch.setattr(m,'git',run)
     def api(path,**kw):
         if '/pulls/' in path:return native_pr(head=base)
+        if '/branches/' in path:return native_branch(base)
         r=subprocess.run(['/usr/bin/git','--git-dir='+str(remote),'rev-parse','--verify','refs/heads/fix/owned'],capture_output=True,text=True)
         return {'object':{'sha':r.stdout.strip() if r.returncode==0 else ''}}
     monkeypatch.setattr(m,'api',api)
@@ -374,7 +425,7 @@ def test_separate_publisher_imports_only_bundle_data(candidate,monkeypatch,tmp_p
     imported=m.import_packet(target)
     assert m.git(['rev-parse','HEAD'],imported).decode().strip()==head
     monkeypatch.setenv('GITHUB_WORKSPACE',str(imported))
-    monkeypatch.setattr(m,'api',lambda *a,**kw:native_pr(head=base))
+    monkeypatch.setattr(m,'api',lambda path,**kw:native_pr(head=base) if '/pulls/' in path else native_branch(base))
     result=m.publish()
     assert result['outcome']=='publication_credential_unavailable'
     assert Path(result['recovery_path'],'implementation.bundle').is_file()

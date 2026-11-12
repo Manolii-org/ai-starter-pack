@@ -72,6 +72,16 @@ including deletion/reset races; validated ancestry prevents history rewrites.
 Exact remote-ref readback is still required.
 Unknown publication is retained as unknown; it is never blindly resent.
 
+Before installing publication authentication, the controller reads the exact
+native branch with the built-in read token. Branch name and SHA must still match
+admission, and `protected` must be explicitly false; GitHub includes branch
+protections and rulesets in this flag. Protected heads, denied reads and unknown
+metadata retain implementation and hold publication without a writer-identity
+fallback. The existing owner recovers through an authorized task branch and
+normal protected PR merge. These holds suppress duplicate editors on the same
+head. This metadata observation is not an atomic policy lock; the owning writer
+and native controls must continue enforcing protections if policy changes.
+
 Reusable callers keep the existing optional `GH_PAT` secret. The standalone
 caller keeps `MN_GH_AUTOMATION_TOKEN`. These must be owning-entity, CI-triggering
 publication credentials; there is no built-in-token publication fallback.

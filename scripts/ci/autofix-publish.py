@@ -117,6 +117,20 @@ def publish(result=None):
                 or re.search(r'^X-Follow-Through-Owner:', re.sub(r'```.*?```', '', pr.get('body') or '', flags=re.S), re.M)):
             result['outcome'] = 'native_state_held'
             return result
+        # Native branch metadata reports classic protection and rulesets. Read
+        # with the same built-in token, before constructing a writer environment;
+        # a bypass-capable optional PAT must never authorize a protected PR head.
+        result['outcome'] = 'head_protection_unverified'
+        native_branch = api(f"repos/{repo}/branches/{urllib.parse.quote(branch, safe='')}")
+        if (not isinstance(native_branch, dict) or native_branch.get('name') != branch
+                or not isinstance(native_branch.get('commit'), dict)
+                or native_branch['commit'].get('sha') != expected):
+            return result
+        if native_branch.get('protected') is True:
+            result['outcome'] = 'protected_head_held'
+            return result
+        if native_branch.get('protected') is not False:
+            return result
         token = os.environ.get("PUBLISH_TOKEN", "")
         if not token:
             result['outcome'] = 'publication_credential_unavailable'
@@ -157,6 +171,8 @@ def record(result):
     else:
         return  # Incomplete history is not permission to duplicate a receipt.
     dependencies = {
+        'protected_head_held': 'Native branch protection or rulesets protect this PR head. Its existing owner must recover the retained implementation on an authorized task branch and use normal protected PR merge controls; never bypass protection with another token.',
+        'head_protection_unverified': 'Native branch protection or current head is unverified. Restore the same approved read route and verify the exact unprotected task branch before publication; do not switch identities or repeat an unchanged denial.',
         'publication_credential_unavailable': 'The owning CI-triggering publication credential is unavailable. Restore its approved scoped route before publication.',
         'publication_admission_held': 'Native custody admission declined. The retained owner must resolve the reported custody/read/hold dependency before publication.',
         'native_state_held': 'The native PR head/state/repository/hold changed. Reconcile the current native state before recovering or publishing the candidate.',
