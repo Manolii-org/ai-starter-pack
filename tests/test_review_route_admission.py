@@ -25,6 +25,13 @@ def load(name, prefix=''):
     return module
 
 
+@pytest.fixture(autouse=True)
+def explicit_external_compatibility_lane(monkeypatch):
+    # These tests exercise the retained, explicitly selected direct lane.
+    # The vendor-neutral default is tested separately through real runners.
+    monkeypatch.setenv("SECURITY_REVIEW_MODE", "direct")
+
+
 @pytest.fixture
 def external(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
@@ -159,6 +166,10 @@ def test_valid_ci_base_admitted_and_child_env_has_no_credentials(external, monke
 
 
 class NoCredentialReads(dict):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # This helper observes credential admission in the explicit legacy lane.
+        self.setdefault("SECURITY_REVIEW_MODE", "direct")
     def get(self, key, default=None):
         assert key not in SECRET_NAMES, 'credential accessed before admission'
         return super().get(key, default)
@@ -385,7 +396,7 @@ def test_old_helper_preserves_proxy_but_never_admits_direct(monkeypatch, tmp_pat
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     with monkeypatch.context() as patch:
-        patch.setattr(module.os, 'environ', {'GITHUB_REPOSITORY': 'ExampleOrg/project',
+        patch.setattr(module.os, 'environ', {'GITHUB_REPOSITORY': 'ExampleOrg/project', 'SECURITY_REVIEW_MODE': 'direct',
             'LITELLM_PROXY_URL': 'https://proxy.example', 'LLM_API_KEY': 'offline-proxy'})
         if name == 'run-broad-agents.py':
             assert module.get_api_key() == 'offline-proxy'

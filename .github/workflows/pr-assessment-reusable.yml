@@ -9,7 +9,7 @@ name: PR Assessment (Reusable)
 # (GitHub filters converted_to_draft the same way, which blocks cancel).
 # Downstream jobs require needs.classify.result == 'success' so SAST cannot
 # start when classify is skipped (empty depth is not the string 'none').
-# Dual provider_mode: anthropic (direct ANTHROPIC_API_KEY) | proxy (LiteLLM via ANTHROPIC_BASE_URL + LITELLM_MASTER_KEY).
+# Default provider_mode is proxy; external anthropic compatibility requires explicit direct admission.
 # See REUSABLE-WORKFLOWS.md for caller examples and secret passing conventions.
 # config-completeness-ignore: uses
 # config-completeness-ignore: with
@@ -20,7 +20,7 @@ name: PR Assessment (Reusable)
 on:
   workflow_call:
     inputs:
-      provider_mode: { type: string, default: anthropic, description: 'anthropic (direct ANTHROPIC_API_KEY) | proxy (LiteLLM via ANTHROPIC_BASE_URL + LITELLM_MASTER_KEY).' }
+      provider_mode: { type: string, default: proxy, description: 'proxy uses the configured governed router; optional anthropic compatibility also requires SECURITY_REVIEW_MODE=direct and committed external admission.' }
       litellm_proxy_url: { type: string, default: '', description: 'Proxy base URL for proxy mode; pass vars.LITELLM_PROXY_URL.' }
       model: { type: string, default: '', description: 'Optional model id override; empty = script/action default.' }
       runs_on: { type: string, default: ubuntu-latest }
@@ -51,6 +51,7 @@ permissions:
 # tests/test_hydrate_assessment.py fails if
 # this list and the runners drift apart.
 env:
+  SECURITY_REVIEW_MODE: ${{ vars.SECURITY_REVIEW_MODE || 'governed' }}
   ASSESSMENT_RUNTIME_FILES: >-
     scripts/run-pr-classifier.py
     scripts/run-specialists.py
@@ -290,8 +291,8 @@ jobs:
       ANTHROPIC_API_KEY: ${{ inputs.provider_mode == 'proxy' && secrets.LITELLM_MASTER_KEY || secrets.ANTHROPIC_API_KEY }}
       ANTHROPIC_BASE_URL: ${{ inputs.provider_mode == 'proxy' && inputs.litellm_proxy_url || '' }}
       ANTHROPIC_MODEL: ${{ inputs.model }}
-      # CLIENT_AI_POLICY engagements route the classifier Anthropic-direct as
-      # well; the proxy credential cannot authenticate api.anthropic.com.
+      # Optional explicitly admitted external/direct mode only. Legacy client
+      # policy flags do not infer egress permission or require this key.
       ANTHROPIC_DIRECT_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       CLIENT_AI_POLICY: ${{ vars.CLIENT_AI_POLICY }}
     needs: [classify]
@@ -771,9 +772,8 @@ jobs:
       ANTHROPIC_API_KEY: ${{ inputs.provider_mode == 'proxy' && secrets.LITELLM_MASTER_KEY || secrets.ANTHROPIC_API_KEY }}
       ANTHROPIC_BASE_URL: ${{ inputs.provider_mode == 'proxy' && inputs.litellm_proxy_url || '' }}
       ANTHROPIC_MODEL: ${{ inputs.model }}
-      # first_party specialist skills (shell-security, sast-scan,
-      # security-boundary-test) run Anthropic-direct on this key; without it
-      # they skip-with-warning in proxy mode. CLIENT_AI_POLICY routes all direct.
+      # Optional explicitly admitted external/direct mode only. Security
+      # specialists use the configured governed router by default.
       ANTHROPIC_DIRECT_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       CLIENT_AI_POLICY: ${{ vars.CLIENT_AI_POLICY }}
     steps:
@@ -1092,8 +1092,8 @@ jobs:
       ANTHROPIC_API_KEY: ${{ inputs.provider_mode == 'proxy' && secrets.LITELLM_MASTER_KEY || secrets.ANTHROPIC_API_KEY }}
       ANTHROPIC_BASE_URL: ${{ inputs.provider_mode == 'proxy' && inputs.litellm_proxy_url || '' }}
       ANTHROPIC_MODEL: ${{ inputs.model }}
-      # Judge adjudicates first_party candidates Anthropic-direct (run-judge.py
-      # _endpoint(direct=True)); without this key those findings go unjudged.
+      # Optional explicitly admitted external/direct mode only. Legacy
+      # candidate provenance cannot override the governed default.
       ANTHROPIC_DIRECT_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       CLIENT_AI_POLICY: ${{ vars.CLIENT_AI_POLICY }}
     steps:

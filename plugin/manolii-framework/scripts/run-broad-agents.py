@@ -26,8 +26,9 @@ import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Optional
+from types import SimpleNamespace
 from urllib.error import HTTPError
 from urllib.parse import urlparse
 from urllib.request import HTTPRedirectHandler, Request, build_opener
@@ -125,6 +126,7 @@ class AgentConfig:
     instructions: str
     client_policy_model: Optional[str] = None
     first_party: bool = False
+    required_security_review: bool = False
 
 
 def parse_agent_file(agent_path: Path) -> AgentConfig:
@@ -162,10 +164,20 @@ def parse_agent_file(agent_path: Path) -> AgentConfig:
         instructions=instructions,
         client_policy_model=frontmatter.get("client_policy_model"),
         first_party=bool(frontmatter.get("first_party")),
+        required_security_review=bool(frontmatter.get("required_security_review")),
     )
 
 
 _ANTHROPIC_HOST = "api.anthropic.com"
+
+
+def _review_mode():
+    resolver = getattr(globals().get("_policy_module"), "review_mode", None)
+    if callable(resolver):
+        return resolver()
+    if os.environ.get("SECURITY_REVIEW_MODE", "governed") == "direct":
+        return "direct"
+    raise RouteAdmissionError("compatible governed review policy runtime missing")
 
 
 def _proxy_base() -> Optional[str]:
@@ -199,6 +211,8 @@ def _urlopen_https(req: Request, *, timeout: int, host: str):
 
 def get_api_key() -> Optional[str]:
     """Transport token: proxy accepts LLM_API_KEY/LITELLM_MASTER_KEY; direct uses ANTHROPIC_API_KEY."""
+    if _review_mode() == "governed":
+        return _policy_module.governed_review_endpoint()[0] or None
     key: Optional[str] = None
     if _proxy_base():
         # A genuine sk-ant-* key is a first-party credential and must never
@@ -741,7 +755,8 @@ def build_security_deep_dive_requests(packet: dict, agent: AgentConfig, *, capac
     binding = _deep_validate_packet(packet)
     heading = "## Provider-free input/output preparation (v1; not activated)"
     if (not isinstance(agent, AgentConfig) or agent.name != "security-deep-dive"
-            or agent.first_party is not True or agent.data_sensitivity == "restricted"
+            or not (agent.first_party or agent.required_security_review)
+            or agent.data_sensitivity == "restricted"
             or not isinstance(agent.system_prompt, str) or not agent.system_prompt.strip()
             or not isinstance(agent.instructions, str) or agent.instructions.count(heading) != 1):
         raise ValueError("deep-dive API role contract unavailable")
@@ -936,15 +951,26 @@ def invoke_agent(
            (agent_config.system_prompt, agent_config.instructions, user_message)) > _MAX_REQUEST_BYTES:
         logger.error("%s: complete review input exceeds request limit", agent_config.name)
         return _incomplete(agent_config, "input_limit")
-    # Route through the LiteLLM proxy when configured (Bearer auth); otherwise
-    # direct Anthropic (x-api-key). The retired anthropic_only tier has no
-    # callers left — its agents were remapped to restricted_us_oss_ok.
+    try:
+        mode = _review_mode()
+    except RouteAdmissionError as exc:
+        logger.warning("%s: %s", agent_config.name, exc)
+        return {"source": agent_config.name, "findings": [],
+                "first_party": bool(agent_config.first_party or agent_config.required_security_review), "skipped": "route_policy_denied"}
+    # The governed default resolves before any optional direct-compatibility
+    # branch. A role flag cannot choose a vendor or grant spending authority.
     proxy = _proxy_base()
+    if mode == "governed":
+        api_key, endpoint, _ = _policy_module.governed_review_endpoint()
+        if not api_key:
+            return {"source": agent_config.name, "findings": [],
+                    "first_party": False, "skipped": "no_proxy_credential"}
+        proxy = endpoint.removesuffix("/v1/messages")
     # True once this call is bound to the Anthropic-direct plane — a runtime
     # failure must then degrade to the skipped first-party marker so the judge
     # fails closed instead of adjudicating without the required direct leg.
     direct_required = False
-    if (agent_config.first_party and not os.environ.get("CLIENT_AI_POLICY")
+    if (mode == "estate-ci-v1" and (agent_config.first_party or agent_config.name == "security-deep-dive") and not os.environ.get("CLIENT_AI_POLICY")
             and os.environ.get("SECURITY_REVIEW_MODE", "direct") != "direct"):
         # None of the broad security roles has an accepted estate producer.
         # Preserve the three-argument API and missing coverage; do not route an
@@ -960,7 +986,7 @@ def invoke_agent(
         and _policy_module.readonly_proxy_fallback(agent_config.name)
     )
     try:
-        if not readonly_proxy and (agent_config.first_party or os.environ.get("CLIENT_AI_POLICY") or not proxy):
+        if mode == "direct" and not readonly_proxy and (agent_config.first_party or agent_config.required_security_review or os.environ.get("CLIENT_AI_POLICY") or not proxy):
             require_direct_llm_admission(role=agent_config.name)
     except RouteAdmissionError as exc:
         logger.warning("%s: %s", agent_config.name, exc)
@@ -976,7 +1002,7 @@ def invoke_agent(
         logger.info(
             "%s: admitted read-only reviewer on the CI proxy", agent_config.name
         )
-    elif agent_config.first_party:
+    elif mode == "direct" and (agent_config.first_party or agent_config.required_security_review):
         direct_key = os.getenv("ANTHROPIC_DIRECT_API_KEY") or (
             os.getenv("ANTHROPIC_API_KEY") if not proxy else None
         )
@@ -1007,7 +1033,7 @@ def invoke_agent(
     # agent — the proxy/OSS route is bypassed entirely. Agents declaring
     # client_policy_model pin that model; the rest dispatch on their declared
     # model's Anthropic equivalent (DIRECT_MODEL_MAP below).
-    elif os.environ.get("CLIENT_AI_POLICY"):
+    elif mode == "direct" and os.environ.get("CLIENT_AI_POLICY"):
         direct_required = True
         # The shared credential resolved before this point is the proxy token
         # whenever a proxy is configured — api.anthropic.com would reject it
@@ -1040,6 +1066,8 @@ def invoke_agent(
     if not api_key:
         return {"source": agent_config.name, "findings": [],
                 "first_party": direct_required, "skipped": "no_credential"}
+    if mode == "direct" and not proxy:
+        direct_required = True
     base_url = proxy or "https://api.anthropic.com"
     if proxy and model in {"claude-haiku-4-5-20251001", "claude-sonnet-4-6"}:
         model = {"claude-haiku-4-5-20251001": "haiku", "claude-sonnet-4-6": "sonnet"}[model]
@@ -1215,6 +1243,60 @@ def invoke_agent(
             **parsed_findings}
 
 
+def _governed_security_message(diff: str, changed_files: list[str]) -> str:
+    """Supply the actual SAST input and immutable source to a tool-less role.
+
+    This is input preparation for the ordinary reviewer, not protected estate
+    qualification or native completion proof. Missing evidence stays missing.
+    """
+    path = Path(".ai/sast-findings.json")
+    raw = path.read_bytes()
+    if len(raw) > _MAX_REQUEST_BYTES:
+        raise ValueError("complete SAST input exceeds transport limit")
+    text = raw.decode("utf-8")
+    artifact = _deep_json(text)
+    rows = artifact.get("findings") if isinstance(artifact, dict) else artifact
+    if not isinstance(rows, list) or any(
+        not isinstance(row, dict) or not isinstance(row.get("file"), str)
+        or not row["file"] or (row.get("line") is not None
+                              and (type(row["line"]) is not int or row["line"] < 1))
+        for row in rows
+    ):
+        raise ValueError("SAST source locations unavailable")
+    locations = []
+    for row in rows:
+        source = PurePosixPath(row["file"])
+        if source.is_absolute() or ".." in source.parts or "\\" in row["file"]:
+            raise ValueError("SAST source location is not repository-relative")
+        # Bandit emits ./path.py. Keep the raw artifact unchanged while
+        # resolving its validated location to Git's canonical relative path.
+        locations.append(SimpleNamespace(file=source.as_posix(), line=row.get("line")))
+    context = _policy_module.assessment_context()
+    head = context["head"] if context else os.environ.get("PR_HEAD_SHA", "")
+    if not head:
+        head = _deep_git(Path.cwd(), "rev-parse", "HEAD", limit=64).decode().strip()
+    guard = _deep_screen_helpers()
+    evidence = guard._judge_evidence(
+        locations, head
+    )
+    if not evidence.get("tree") or any(
+        row.get("status") != "available" for row in evidence["locations"].values()
+    ):
+        raise ValueError("SAST source context unavailable at candidate head")
+    packet = {
+        "scope": "Complete SAST artifact and bounded candidate-head source windows; not execution proof",
+        "head": head,
+        "sast_sha256": hashlib.sha256(raw).hexdigest(),
+        "sast_utf8": text,
+        "source_evidence": evidence,
+    }
+    guard._require_safe_packet(packet)
+    return build_user_message(
+        diff + "\n<review_source_context>\n" + json.dumps(packet, ensure_ascii=True)
+        + "\n</review_source_context>", changed_files
+    )
+
+
 def run_broad_agents(
     manifest_path: Path,
     diff_path: Path,
@@ -1293,10 +1375,32 @@ def run_broad_agents(
 
     runnable = agents_to_run
 
+    messages = {}
+    for agent in list(runnable):
+        context_failure = None
+        if agent.name != "security-deep-dive":
+            continue
+        try:
+            if _review_mode() != "governed":
+                continue
+            messages[agent.name] = _governed_security_message(diff, changed_files)
+        except RouteAdmissionError:
+            context_failure = "route_policy_denied"
+        except (OSError, ValueError, TypeError, KeyError, UnicodeError):
+            context_failure = "source_context_unavailable"
+        if context_failure:
+            marker = {"source": agent.name, "findings": [],
+                      "first_party": False, "skipped": context_failure}
+            (output_dir / f"{agent.name}.json").write_text(
+                json.dumps(_policy_module.bind_review_candidate(marker), indent=2), encoding="utf-8"
+            )
+            results[agent.name] = marker
+            runnable.remove(agent)
+
     with ThreadPoolExecutor(max_workers=3) as executor:
         futures = {
             executor.submit(
-                invoke_agent, agent, api_key, user_message
+                invoke_agent, agent, api_key, messages.get(agent.name, user_message)
             ): agent
             for agent in runnable
         }

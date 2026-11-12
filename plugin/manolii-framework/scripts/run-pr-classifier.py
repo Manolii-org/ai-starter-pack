@@ -70,6 +70,15 @@ def _urlopen_https(req: urllib.request.Request, *, timeout: int, host: str):
 
 
 
+def _review_mode():
+    resolver = getattr(globals().get("_policy_module"), "review_mode", None)
+    if callable(resolver):
+        return resolver()
+    if os.environ.get("SECURITY_REVIEW_MODE", "governed") == "direct":
+        return "direct"
+    raise RouteAdmissionError("compatible governed review policy runtime missing")
+
+
 def _proxy_transport_key() -> str:
     """Credential for a non-Anthropic endpoint.
 
@@ -104,10 +113,12 @@ def _endpoint() -> tuple[str, str, bool]:
     LITELLM_PROXY_URL or ANTHROPIC_BASE_URL points at a non-Anthropic host the
     request goes through that proxy with _proxy_transport_key().
     """
+    if _review_mode() == "governed":
+        return _policy_module.governed_review_endpoint()
     base = (os.environ.get("LITELLM_PROXY_URL") or os.environ.get("ANTHROPIC_BASE_URL") or "").rstrip("/")
     proxied = bool(base) and (urllib.parse.urlparse(base).hostname or "").lower().rstrip(".") != _ANTHROPIC_HOST
-    # CLIENT_AI_POLICY engagements keep every pipeline call Anthropic-direct —
-    # including the classifier, which reads the full PR diff.
+    # This compatibility path is reached only after explicit lane selection.
+    # A restrictive engagement retains its admitted external policy.
     if os.environ.get("CLIENT_AI_POLICY"):
         require_direct_llm_admission()
         key = os.environ.get("ANTHROPIC_DIRECT_API_KEY") or (

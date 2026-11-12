@@ -94,6 +94,15 @@ def _urlopen_https(req: urllib.request.Request, *, timeout: int, host: str):
 
 
 
+def _review_mode():
+    resolver = getattr(globals().get("_policy_module"), "review_mode", None)
+    if callable(resolver):
+        return resolver()
+    if os.environ.get("SECURITY_REVIEW_MODE", "governed") == "direct":
+        return "direct"
+    raise RouteAdmissionError("compatible governed review policy runtime missing")
+
+
 def _proxy_transport_key() -> str:
     """Credential for a non-Anthropic endpoint.
 
@@ -122,17 +131,14 @@ def _proxy_transport_key() -> str:
 
 
 def _endpoint(direct: bool = False, role: Optional[str] = None) -> tuple[str, str, bool]:
-    """Resolve (api_key, url, proxied).
+    """Resolve the configured review lane without a vendor default.
 
-    Transport token: ANTHROPIC_API_KEY when calling Anthropic directly. When
-    LITELLM_PROXY_URL or ANTHROPIC_BASE_URL points at a non-Anthropic host the
-    request goes through that proxy with _proxy_transport_key().
-
-    direct=True forces the Anthropic endpoint regardless of proxy config — used
-    by `first_party` skills, where the eligibility matrix keeps the task class
-    (security review) on first-party models. A proxy credential must never be
-    sent there, so only a real Anthropic key authenticates.
+    The default governed lane ignores the legacy direct hint. An explicitly
+    selected external compatibility lane still requires committed admission
+    before selecting a direct credential. Estate qualification is separate.
     """
+    if _review_mode() == "governed":
+        return _policy_module.governed_review_endpoint()
     proxy_base = (os.environ.get("LITELLM_PROXY_URL") or os.environ.get("ANTHROPIC_BASE_URL") or "").rstrip("/")
     proxy_configured = bool(proxy_base) and (urllib.parse.urlparse(proxy_base).hostname or "").lower().rstrip(".") != _ANTHROPIC_HOST
     if direct:
@@ -395,14 +401,25 @@ def _invoke_skill(skill_name: str, diff: str, output_dir: pathlib.Path) -> tuple
             _write_skipped_marker(skill_name, output_dir, "load_error")
         return skill_name, f"Failed to load skill: {exc}"
 
+    if frontmatter.get("data_sensitivity") == "restricted":
+        _write_skipped_marker(skill_name, output_dir, "restricted_no_ai")
+        return skill_name, "skipped: restricted is a no-AI governance tier"
+
     model_alias = frontmatter.get("model", "haiku")
     model = _MODEL_MAP.get(model_alias, model_alias)
     max_tokens = frontmatter.get("max_tokens", 800)
-    # first_party: the eligibility matrix keeps security review on Anthropic
-    # even when OSS routing is enabled — the proxy route is bypassed entirely.
-    # CLIENT_AI_POLICY engagements extend that to EVERY specialist: no PR
-    # content may cross the OSS/proxy plane at all.
-    first_party = bool(frontmatter.get("first_party")) or bool(os.environ.get("CLIENT_AI_POLICY"))
+    # Required security roles retain estate qualification when explicitly
+    # selected. The default governed lane never infers a vendor from this tag.
+    security_role = bool(frontmatter.get("first_party") or frontmatter.get("required_security_review")) or skill_name in {
+        "security-boundary-test", "shell-security", "sast-scan", "security-deep-dive"
+    }
+    try:
+        mode = _review_mode()
+    except RouteAdmissionError as exc:
+        writer = _write_skip_marker if security_role else _write_skipped_marker
+        writer(skill_name, output_dir, "route_policy_denied")
+        return skill_name, str(exc)
+    first_party = (security_role or bool(os.environ.get("CLIENT_AI_POLICY"))) and mode != "governed"
 
     estate_requested = (first_party and not os.environ.get("CLIENT_AI_POLICY")
                         and os.environ.get("SECURITY_REVIEW_MODE", "direct") != "direct")
@@ -515,6 +532,8 @@ def _invoke_skill(skill_name: str, diff: str, output_dir: pathlib.Path) -> tuple
                 _write_skipped_marker(skill_name, output_dir, "api_error")
             return skill_name, f"'findings' is not a list of objects: {type(data['findings'])}"
 
+        if mode != "estate-ci-v1":
+            data["first_party"] = not proxied_preview
         if first_party and not proxied_preview and data.get("findings"):
             # Marks the candidate set for run-judge: first-party findings must
             # be adjudicated on a first-party model, not the OSS proxy. Empty

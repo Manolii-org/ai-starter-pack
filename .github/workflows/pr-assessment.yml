@@ -41,6 +41,9 @@ permissions:
   contents: read
   pull-requests: write
 
+env:
+  SECURITY_REVIEW_MODE: ${{ vars.SECURITY_REVIEW_MODE || 'governed' }}
+
 jobs:
   classify:
     name: Classify PR
@@ -678,10 +681,10 @@ jobs:
           LITELLM_MASTER_KEY: ${{ secrets.LITELLM_MASTER_KEY || secrets.LLM_API_KEY }}
           LLM_API_KEY: ${{ secrets.LLM_API_KEY || secrets.LITELLM_MASTER_KEY }}
           ANTHROPIC_BASE_URL: ${{ vars.LITELLM_PROXY_URL || vars.ANTHROPIC_BASE_URL }}
-          # first_party specialist skills run Anthropic-direct; without this
-          # key they skip-with-warning under proxy mode.
+          # Optional explicitly admitted external/direct compatibility only;
+          # security specialists use the governed router by default.
           ANTHROPIC_DIRECT_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          # CLIENT_AI_POLICY engagements route EVERY specialist direct.
+          # A restrictive client flag retains its policy hold until configured.
           CLIENT_AI_POLICY: ${{ vars.CLIENT_AI_POLICY }}
           SKILLS: ${{ needs.review-routing.outputs.invoke_skills }}
           PR_TITLE: ${{ github.event.pull_request.title }}
@@ -886,7 +889,7 @@ jobs:
           LITELLM_MASTER_KEY: ${{ secrets.LITELLM_MASTER_KEY || secrets.LLM_API_KEY }}
           LLM_API_KEY: ${{ secrets.LLM_API_KEY || secrets.LITELLM_MASTER_KEY }}
           ANTHROPIC_BASE_URL: ${{ vars.LITELLM_PROXY_URL || vars.ANTHROPIC_BASE_URL }}
-          # Judge adjudicates first_party candidates Anthropic-direct.
+          # Optional explicitly admitted external/direct compatibility only.
           ANTHROPIC_DIRECT_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           CLIENT_AI_POLICY: ${{ vars.CLIENT_AI_POLICY }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

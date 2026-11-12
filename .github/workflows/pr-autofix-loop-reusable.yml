@@ -2,7 +2,7 @@ name: PR Autofix Loop (Reusable)
 # Reusable workflow_call form of pr-autofix-loop.yml.
 # Caller owns `on:` triggers: issue_comment / pull_request_review /
 # pull_request_review_comment / optional workflow_run (CI failures).
-# Dual provider_mode: anthropic | proxy (LiteLLM).
+# Governed proxy is the default; anthropic remains an explicit consumer opt-in.
 #
 # Control-plane contract (pack >= v1.9.1): runs_on default ubuntu-latest.
 # Effectiveness contract (pack >= v1.9.3):
@@ -17,7 +17,7 @@ name: PR Autofix Loop (Reusable)
 on:
   workflow_call:
     inputs:
-      provider_mode: { type: string, default: anthropic, description: 'anthropic | proxy' }
+      provider_mode: { type: string, default: proxy, description: 'proxy (governed router) | anthropic (explicit external direct opt-in)' }
       litellm_proxy_url: { type: string, default: '', description: 'Proxy base URL for proxy mode' }
       model: { type: string, default: '', description: "Model id; empty uses tier-2-agentic-pro in proxy mode (tier-2-agentic when the proxy does not list it), claude-sonnet-5-5 otherwise" }
       # Default hosted. Override only with an operator-approved isolated pool — never shared Fly CI.

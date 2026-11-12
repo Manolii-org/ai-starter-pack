@@ -126,19 +126,27 @@ changes since this section was written:
    (Deployment identifiers live in the private control-plane repo's instance
    doc — not published here per this repo's surface boundary.)
 
-### Review-runner admission (2026-10-17)
+### Governed review default (2026-11-12)
 
-The classifier, specialist, broad-agent and Judge runners check direct-route
-policy **before selecting provider credentials**. A `first_party` reviewer flag
-describes required capability; it never grants direct-credit spending authority.
-An ambient key, a posting target (`--repo`), or missing proxy configuration is
-not admission. Estate policy must select the approved proxy capability; an
-external declaration must come from existing trusted launcher/base-policy custody.
-Committed estate/proxy policy and missing or unknown policy fail closed on a direct
-request; ordinary configured LiteLLM calls retain their existing behavior. A denied protected reviewer leaves
-explicit missing coverage; it is never silently moved to an OSS model or counted
-as a completed review. The existing protected role/capability qualification is
-still required; this guard does not create a compatible alternate review route.
+Classifier, specialist, broad-agent and Judge calls default to the owner's
+configured HTTPS review router (`SECURITY_REVIEW_MODE=governed`). A Messages
+wire envelope does not require an Anthropic account, direct API key or model.
+Legacy `first_party` role metadata is not routing or spending authority. The
+shipped security roles use the approved review alias; they do not claim
+first-party provenance for a proxy result. Missing routes, rejected/truncated
+outputs and missing selected roles remain incomplete coverage.
+
+The framework does not infer client egress authority. A bare legacy
+`CLIENT_AI_POLICY` engagement flag retains a clear policy hold until its owner
+provides a compatible declared lane. It never triggers a provider call or
+requests a new Anthropic credential by default.
+
+The authenticated native Codex security coverage workflow remains available
+without vendor API credentials. Explicit `estate-ci-v1` qualification and its
+independent-evidence requirements are unchanged. An external consumer can
+explicitly select `SECURITY_REVIEW_MODE=direct` with the existing committed
+external `llm-anthropic` grant; that optional compatibility lane is never the
+framework default or a fallback for an unavailable router.
 
 External consumers spending their own account can select the existing
 `llm-anthropic` capability with two nonsecret ownership fields in their existing
@@ -177,7 +185,7 @@ run on the already-configured CI proxy. Any other role, or any manifest
 that resolves a credential, stays denied. The
 shared helper is included in reusable assessment hydration and in
 the normal plugin/registry generation. A mixed/older consumer missing the compatible
-helper retains ordinary proxy calls but cannot admit direct execution. No credential
+helper must hydrate it before governed reviews can run; it cannot infer direct permission. No credential
 provisioning, provider/model
 substitution, output/retry/timeout increase or live configuration change is part
 of this repair.

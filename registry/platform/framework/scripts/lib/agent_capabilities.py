@@ -2,7 +2,8 @@
 """Resolve a session capability manifest to the env-var NAMES it may hold.
 
 Contract: docs/contracts/credential-capabilities.md. Names only — this
-script never sees, fetches or prints a credential value. Fail-closed: an
+CLI never sees, fetches or prints a credential value. Shared review endpoint
+helpers read only the configured router credential and never print it. Fail-closed: an
 unknown capability, a malformed manifest or a broken table exits 2.
 
 Usage:
@@ -14,6 +15,7 @@ import json
 import os
 from pathlib import Path
 import re
+from urllib.parse import urlsplit
 import subprocess
 import sys
 
@@ -33,6 +35,63 @@ READ_ONLY_DIRECT_REVIEWERS = frozenset({
 
 class RouteAdmissionError(ValueError):
     """The requested transport has no admitted consumer policy (no secrets)."""
+
+
+def review_mode(environ=None):
+    """The configured review lane; provider-direct credits are never a default.
+
+    A legacy restrictive engagement flag is not authority to change egress.
+    Such consumers must retain their explicit admitted lane until their owner
+    supplies a compatible policy. Ordinary framework reviews use the router.
+    """
+    env = os.environ if environ is None else environ
+    mode = env.get("SECURITY_REVIEW_MODE", "governed")
+    if mode not in {"governed", "direct", "estate-ci-v1"}:
+        raise RouteAdmissionError("unsupported security review mode")
+    if mode != "direct" and env.get("CLIENT_AI_POLICY"):
+        raise RouteAdmissionError(
+            "client review policy has no compatible declared route; "
+            "the framework will not infer egress permission or require a vendor key"
+        )
+    return mode
+
+
+def governed_review_endpoint(environ=None):
+    """Resolve an explicit HTTPS router without reading any direct credential.
+
+    The Messages wire is compatibility, not a provider selection. A missing
+    router or credential remains missing coverage; no provider is a fallback.
+    """
+    env = os.environ if environ is None else environ
+    base = (env.get("LITELLM_PROXY_URL") or env.get("ANTHROPIC_BASE_URL") or "").strip().rstrip("/")
+    try:
+        parsed = urlsplit(base)
+        host = (parsed.hostname or "").lower().rstrip(".")
+        parsed.port
+    except ValueError:
+        return "", "", True
+    if (parsed.scheme != "https" or not host or parsed.username is not None
+            or parsed.password is not None or parsed.query or parsed.fragment
+            or host in {"api.anthropic.com", "api.openai.com", "generativelanguage.googleapis.com"}
+            or host.endswith((".anthropic.com", ".openai.com", ".openai.azure.com"))):
+        return "", "", True
+    key = ""
+    for name in ("LLM_API_KEY", "LITELLM_MASTER_KEY", "ANTHROPIC_API_KEY"):
+        value = (env.get(name) or "").strip()
+        if value.lower() == "bearer":
+            continue
+        if value.lower().startswith("bearer "):
+            value = value[7:].strip()
+        if value and not value.lower().startswith(("sk-ant-", "sk-proj-", "sk-svcacct-")):
+            key = value
+            break
+    if base.endswith("/v1/messages"):
+        url = base
+    elif base.endswith("/v1"):
+        url = base + "/messages"
+    else:
+        url = base + "/v1/messages"
+    return key, url, True
 
 
 def assessment_context(environ=None):

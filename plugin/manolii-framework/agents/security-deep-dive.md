@@ -4,16 +4,11 @@ version: 1.2.0
 description: "Broad agent: triages SAST findings against actual code flow to produce true-positive likelihood scores. Only findings >= 0.7 are promoted to the judge."
 type: agent
 model: sonnet
+required_security_review: true
 data_sensitivity: restricted_us_oss_ok
-# Demoted 2026-05-15 from claude-sonnet-4-6/restricted -> sonnet/restricted_us_oss_ok. SAST triage reads code, not PII.
-# Set CLIENT_AI_POLICY=1 in the environment when the active engagement's policy
-# forbids non-Anthropic models — run-broad-agents.py then bypasses the proxy and
-# dispatches client_policy_model on the direct Anthropic plane.
-client_policy_model: claude-sonnet-4-6
-# Security review stays first-party per docs/us-oss-eligibility-matrix.md —
-# run-broad-agents.py dispatches this agent Anthropic-direct (never the OSS
-# proxy) and requires ANTHROPIC_DIRECT_API_KEY when a proxy is configured.
-first_party: true
+# Code/SAST review uses the configured governed review route. No vendor key
+# or provider-direct transport is required; restrictive engagements retain
+# their explicit policy hold until a compatible route is declared.
 max_tokens: 2000
 safety_tier: green
 requires_mcp: []
@@ -31,10 +26,11 @@ Broad Stage 2 agent. Triggered by `pr-classifier` when `.ai/sast-findings.json` 
 **SAST producer dependency:** `.ai/sast-findings.json` must be written by an upstream step (e.g. a GitHub Actions job running Bandit, Semgrep, or similar) before this agent runs. If the file is absent, skip cleanly.
 
 ## Model Routing
-| Install | Model | Cost per 1M tokens (in/out) |
-|---|---|---|
-| Claude-only | claude-sonnet-4-6 (Anthropic direct) | $3.00 / $15.00 |
-| Claude + OSS | claude-sonnet-4-6 on Anthropic via `first_party` — never the OSS proxy; requires `ANTHROPIC_DIRECT_API_KEY` | $3.00 / $15.00 |
+
+Use the owner-configured governed `sonnet` review alias. The Messages wire
+format does not select a provider. Native authenticated security coverage and
+explicit estate qualification remain separate supported lanes. Missing route,
+missing input, rejected output or incomplete coverage is never a clean review.
 
 ## Tools
 

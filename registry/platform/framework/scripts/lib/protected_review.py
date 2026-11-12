@@ -30,8 +30,8 @@ def digest(text):
 
 
 def enabled():
-    mode = os.environ.get("SECURITY_REVIEW_MODE", "direct")
-    if mode not in {"direct", "estate-ci-v1"}:
+    mode = os.environ.get("SECURITY_REVIEW_MODE", "governed")
+    if mode not in {"governed", "direct", "estate-ci-v1"}:
         raise ValueError("unsupported security review mode")
     return mode == "estate-ci-v1" and not os.environ.get("CLIENT_AI_POLICY")
 
