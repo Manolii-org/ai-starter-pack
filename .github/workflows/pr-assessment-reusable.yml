@@ -51,7 +51,6 @@ permissions:
 # tests/test_hydrate_assessment.py fails if
 # this list and the runners drift apart.
 env:
-  SECURITY_REVIEW_MODE: ${{ vars.SECURITY_REVIEW_MODE || 'governed' }}
   ASSESSMENT_RUNTIME_FILES: >-
     scripts/run-pr-classifier.py
     scripts/run-specialists.py

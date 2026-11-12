@@ -140,7 +140,7 @@ def test_reusable_workflow_installs_governed_proxy_by_default(name):
     assert call["inputs"]["provider_mode"]["default"] == "proxy"
     assert call["secrets"]["ANTHROPIC_API_KEY"]["required"] is False
     if name == "pr-assessment-reusable.yml":
-        assert "'governed'" in workflow["env"]["SECURITY_REVIEW_MODE"]
+        assert "SECURITY_REVIEW_MODE" not in workflow["env"]
     else:
         # The default selects the already-supported proxy transport and model
         # resolver without changing action authority, success cap or jobs.
@@ -150,6 +150,22 @@ def test_reusable_workflow_installs_governed_proxy_by_default(name):
         model = next(step for step in job["steps"] if step.get("id") == "model")
         assert "tier-2-agentic-pro" in model["run"]
         assert call["inputs"]["max_successful_fixes"]["default"] == "1"
+
+
+@pytest.mark.parametrize("name", ["pr-assessment.yml", "pr-assessment-reusable.yml"])
+def test_trusted_runtime_owns_mode_default_across_bootstrap_versions(name):
+    import yaml
+    workflow = yaml.safe_load((ROOT / ".github/workflows" / name).read_text())
+    # PR jobs restore immutable base runtime; reusable hydration may select an
+    # older pack_ref. Never send a new enum value into that older trusted code.
+    assert "SECURITY_REVIEW_MODE" not in workflow.get("env", {})
+    for job in workflow["jobs"].values():
+        assert "SECURITY_REVIEW_MODE" not in job.get("env", {})
+        for step in job.get("steps", []):
+            assert "SECURITY_REVIEW_MODE" not in step.get("env", {})
+    # After merge/hydration, the shipped runtime itself selects governed review
+    # before any legacy direct hint or credential can be considered.
+    assert load("lib/agent_capabilities.py").review_mode({}) == "governed"
 
 
 @pytest.mark.parametrize("state", ["complete", "file_level", "bandit_path", "missing_sast", "sensitive_source"])

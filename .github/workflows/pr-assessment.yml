@@ -41,9 +41,6 @@ permissions:
   contents: read
   pull-requests: write
 
-env:
-  SECURITY_REVIEW_MODE: ${{ vars.SECURITY_REVIEW_MODE || 'governed' }}
-
 jobs:
   classify:
     name: Classify PR
