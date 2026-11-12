@@ -30,13 +30,19 @@ runs the editor and publisher on separate runners. The standalone caller holds
 its existing per-PR job lock over this entire invocation, after admission;
 reusable callers retain their existing outer lock without a nested lock.
 Unrelated rejected events cannot displace queued admitted work. Copy-installed
-consumers must install the internal workflow together with their caller. Nested
-calls resolve local workflow paths from the calling workflow's repository and
+consumers must install the internal workflow together with their caller. GitHub.com `$/` nested
+calls resolve workflow paths from the calling workflow's repository and
 commit, without loading a consumer PR's controller. Job/check names now include
 `Autofix Editor (standalone|reusable)` and `Autofix Publisher (standalone|reusable)`
 under the existing `Autofix PR` call; review any consumer check-name bindings
 before adopting. The existing 30-minute job allowance is split into 25 minutes
 for editing and five for publication. Queue time is separate from runner time.
+
+After an attempted editor action, inert capture also runs if the editor step
+fails after committing. Successful artifact upload preserves those commits for
+the original owner; it does not authorize publication from a failed editor job.
+A runner loss or hard job timeout can still prevent capture/upload, so durability
+is claimed only from an actual upload receipt.
 
 The editor uploads only a Git bundle and a bounded JSON receipt, named for this
 run and attempt. A fresh publisher downloads that same-run artifact using the
@@ -101,3 +107,15 @@ of their workflow, generator and policy assets. Keep each entity's own secrets,
 provider controls and deployment authority. Policy installation does not install
 an owning client or broker; native same-thread continuation must be qualified on
 the actual host. An unavailable wake holds monitoring, not independent work.
+
+The same-commit `$/` call syntax is documented for GitHub.com, including hosted
+Enterprise Cloud. GitHub Enterprise Server does not support it; those consumers
+need separately reviewed call syntax/adoption. Existing pins are unaffected. The
+pinned actionlint and the latest checked release (1.7.12) do not recognize this
+syntax. `check-pinned-uses.py --actionlint` provides a validation-only view: it
+changes the first byte of valid job-level self-workflow references to the
+documented equivalent `./` syntax on stdin, preserving source paths, columns and
+all lint diagnostics. It neither changes execution source nor suppresses an
+audit. Pin checks recognize only the bounded self-workflow spelling; mutable or
+malformed references still fail. Positive relay admission uses the immutable
+GitHub Actions actor ID rather than a renameable login.

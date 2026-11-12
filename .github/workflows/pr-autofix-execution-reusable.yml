@@ -343,7 +343,7 @@ jobs:
         echo "Agent executed (execution file present)."
     - name: Capture candidate as inert Git data
       id: prepare
-      if: steps.verify_exec.outcome == 'success'
+      if: always() && steps.claude.outcome != 'skipped' && steps.claude.outcome != ''
       env:
         AUTOFIX_MODE: prepare
         PR_NUMBER: ${{ inputs.pr_number }}
@@ -898,7 +898,7 @@ jobs:
               github.actor != 'github-actions[bot]'
             ) ||
             (
-              github.actor == 'github-actions[bot]' &&
+              github.actor_id == '41898282' &&
               startsWith(github.event.comment.body, '**[@')
             )
           )
@@ -1344,7 +1344,7 @@ jobs:
         echo "Agent executed (execution file present)."
     - name: Capture candidate as inert Git data
       id: prepare
-      if: steps.verify_exec.outcome == 'success'
+      if: always() && steps.claude.outcome != 'skipped' && steps.claude.outcome != ''
       env:
         AUTOFIX_MODE: prepare
         PR_NUMBER: ${{ steps.ref.outputs.pr_number }}

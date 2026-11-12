@@ -18,6 +18,7 @@ EDITOR_CONDITIONS = {
     'standalone': "steps.lock.outputs.go == 'true' && steps.custody_dispatch.outputs.skip == 'false'",
     'reusable': "steps.ref.outputs.skip != 'true' && steps.custody.outputs.skip == 'false' && steps.pr.outputs.skip != 'true' && steps.budget.outputs.skip != 'true' && steps.custody_dispatch.outputs.skip == 'false'",
 }
+CAPTURE_CONDITION = "always() && steps.claude.outcome != 'skipped' && steps.claude.outcome != ''"
 ADMISSIONS = {
     'standalone': "${{ steps.lock.outputs.go == 'true' && steps.custody_publish.outputs.skip == 'false' }}",
     'reusable': "${{ steps.ref.outputs.skip == 'false' && steps.pr.outputs.skip == 'false' && steps.budget.outputs.skip == 'false' && steps.custody_publish.outputs.skip == 'false' }}",
@@ -108,7 +109,8 @@ def validate(text, reusable=None):
         if normalized(editor.get('if','')) != EDITOR_CONDITIONS[variant]:
             raise ValueError('editor requires the full affirmative custody condition')
         prepare = next(s for s in steps if s.get('id') == 'prepare')
-        if prepare.get('env',{}).get('AUTOFIX_MODE') != 'prepare' or prepare_source() not in prepare.get('run',''):
+        if (prepare.get('env',{}).get('AUTOFIX_MODE') != 'prepare' or prepare_source() not in prepare.get('run','')
+                or normalized(prepare.get('if','')) != CAPTURE_CONDITION):
             raise ValueError('unprivileged packet preparation is missing')
         if any('secrets.GH_PAT' in str(s) or 'secrets.MN_GH_AUTOMATION_TOKEN' in str(s) for s in steps) or any('PUBLISH_TOKEN' in k for k in editor_job.get('env',{})):
             raise ValueError('publication credentials must not enter the editor job')
@@ -117,7 +119,8 @@ def validate(text, reusable=None):
                 or normalized(publisher.get('env',{}).get('PUBLICATION_ADMITTED','')) != ADMISSIONS[variant]
                 or publisher.get('env',{}).get('AUTOFIX_PACKET_DIR') != '${{ runner.temp }}/autofix-candidate-data'):
             raise ValueError('publisher payload or native admission is missing')
-        if (publisher_job.get('runs-on') != 'ubuntu-latest' or publisher_job.get('needs') != variant+'_editor'
+        if (normalized(publisher_job.get('if','')) != f"needs.{variant}_editor.result == 'success' && needs.{variant}_editor.outputs.activation == 'active'"
+                or publisher_job.get('runs-on') != 'ubuntu-latest' or publisher_job.get('needs') != variant+'_editor'
                 or publisher_job.get('timeout-minutes') != 5 or editor_job.get('timeout-minutes') != 25
                 or any('checkout@' in s.get('uses','') or 'claude-code-action@' in s.get('uses','') for s in pub_steps)
                 or publisher_job.get('env')):
@@ -131,7 +134,7 @@ def validate(text, reusable=None):
 
 def validate_wrapper(text, reusable):
     data = yaml.safe_load(text); job = data['jobs']['autofix']
-    if job.get('uses') != './.github/workflows/'+EXECUTION or job['with'].get('variant') != ('reusable' if reusable else 'standalone'):
+    if job.get('uses') != '$/.github/workflows/'+EXECUTION or job['with'].get('variant') != ('reusable' if reusable else 'standalone'):
         raise ValueError('caller must invoke the complete isolated execution workflow')
     if 'steps' in job or 'runs-on' in job:
         raise ValueError('caller must hold its lock over both execution jobs')

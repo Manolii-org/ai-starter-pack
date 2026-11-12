@@ -78,7 +78,7 @@ jobs:
               github.actor != 'github-actions[bot]'
             ) ||
             (
-              github.actor == 'github-actions[bot]' &&
+              github.actor_id == '41898282' &&
               startsWith(github.event.comment.body, '**[@')
             )
           )
@@ -92,7 +92,7 @@ jobs:
       ) &&
       github.actor != 'dependabot[bot]' &&
       github.actor != 'renovate[bot]'
-    uses: ./.github/workflows/pr-autofix-execution-reusable.yml
+    uses: $/.github/workflows/pr-autofix-execution-reusable.yml
     with:
       variant: reusable
       provider_mode: ${{ inputs.provider_mode }}

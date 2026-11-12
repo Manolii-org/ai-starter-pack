@@ -388,7 +388,11 @@
         "tests/test_routine_ci_repair_policy.py",
         "scripts/gen-reusable-matrix.py",
         ".github/workflows/REUSABLE-WORKFLOWS.md",
-        ".claude/skills/autonomy-follow-through/**"
+        ".claude/skills/autonomy-follow-through/**",
+        "scripts/check-pinned-uses.py",
+        ".github/workflows/workflow-security.yml",
+        ".github/workflows/workflow-security-reusable.yml",
+        "tests/test_workflow_security.py"
       ],
       "tools": [
         "python"
@@ -418,7 +422,8 @@
           "tests/test_autofix_custody.py",
           "tests/test_autofix_reusable_yaml.py",
           "tests/test_reusable_matrix.py",
-          "tests/test_routine_ci_repair_policy.py"
+          "tests/test_routine_ci_repair_policy.py",
+          "tests/test_workflow_security.py"
         ]
       ],
       "ci_sources": [

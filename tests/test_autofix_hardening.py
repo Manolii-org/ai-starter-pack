@@ -167,7 +167,7 @@ def test_standalone_lock_is_on_the_agent_job_and_never_cancels() -> None:
     assert "concurrency" not in spec
     assert "concurrency" not in spec["jobs"]["preflight"]
     lock = spec["jobs"]["autofix"]["concurrency"]
-    assert spec["jobs"]["autofix"]["uses"] == "./.github/workflows/pr-autofix-execution-reusable.yml"
+    assert spec["jobs"]["autofix"]["uses"] == "$/.github/workflows/pr-autofix-execution-reusable.yml"
     assert lock["cancel-in-progress"] is False
     assert "needs.preflight.outputs.pr_number" in lock["group"]
 

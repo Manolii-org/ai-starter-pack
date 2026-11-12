@@ -48,7 +48,7 @@ jobs:
               github.actor != 'github-actions[bot]'
             ) ||
             (
-              github.actor == 'github-actions[bot]' &&
+              github.actor_id == '41898282' &&
               startsWith(github.event.comment.body, '**[@')
             )
           )
@@ -269,7 +269,7 @@ jobs:
     concurrency:
       group: autofix-${{ github.repository }}-${{ needs.preflight.outputs.pr_number }}
       cancel-in-progress: false
-    uses: ./.github/workflows/pr-autofix-execution-reusable.yml
+    uses: $/.github/workflows/pr-autofix-execution-reusable.yml
     with:
       variant: standalone
       skip: ${{ needs.preflight.outputs.skip }}

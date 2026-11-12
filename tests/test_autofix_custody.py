@@ -285,7 +285,7 @@ def test_embedded_controller_source_is_current():
 
 @pytest.mark.parametrize('variant',['standalone','reusable'])
 @pytest.mark.parametrize('defect',['missing','duplicate','late','empty-payload','fail-open','or-bypass',
-    'publisher-payload','publisher-admission','publisher-condition','shared-environment','wrong-artifact','editor-secret'])
+    'publisher-payload','publisher-admission','publisher-condition','shared-environment','wrong-artifact','editor-secret','failure-capture-gate','failed-editor-publication'])
 def test_generator_refuses_partial_or_unsafe_control_wiring(variant,defect):
     spec=importlib.util.spec_from_file_location('autofix_sync',ROOT/'scripts/sync-autofix-control.py')
     m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
@@ -305,6 +305,8 @@ def test_generator_refuses_partial_or_unsafe_control_wiring(variant,defect):
     if defect=='publisher-condition':publisher['if']='always()'
     if defect=='shared-environment':pub_job['env']={'HTTPS_PROXY':'${{ needs.'+variant+'_editor.outputs.proxy }}'}
     if defect=='wrong-artifact':next(s for s in pub_job['steps'] if 'download-artifact@' in s.get('uses',''))['with']['run-id']='other-run'
+    if defect=='failure-capture-gate':next(s for s in steps if s.get('id')=='prepare')['if']="steps.verify_exec.outcome == 'success'"
+    if defect=='failed-editor-publication':pub_job['if']='always()'
     if defect=='editor-secret':editor['env']['PUBLISH_TOKEN']='${{ secrets.GH_PAT }}'
     with pytest.raises(ValueError):m.validate(yaml.safe_dump(workflow))
 
@@ -388,10 +390,15 @@ def test_data_packet_cannot_grant_publication(candidate,monkeypatch,tmp_path,tam
     with pytest.raises(ValueError):m.import_packet(tmp_path/'import')
 
 
-def test_embedded_capture_executes_without_publisher_or_api_credentials(candidate,monkeypatch,tmp_path):
+@pytest.mark.parametrize('editor_failed',[False,True])
+def test_embedded_capture_executes_without_publisher_or_api_credentials(candidate,monkeypatch,tmp_path,editor_failed):
     workflow=yaml.safe_load((ROOT/'.github/workflows/pr-autofix-execution-reusable.yml').read_text())
     step=next(s for s in workflow['jobs']['standalone_editor']['steps'] if s.get('id')=='prepare')
     assert 'PUBLISH_TOKEN' not in step['run'] and 'def api(' not in step['run']
+    assert step['if']=="always() && steps.claude.outcome != 'skipped' && steps.claude.outcome != ''"
+    if editor_failed:
+        failure=subprocess.run(['bash','-c','exit 7'],cwd=candidate[0],capture_output=True)
+        assert failure.returncode==7
     output=tmp_path/'capture-output'
     env={k:v for k,v in os.environ.items() if k not in {'PUBLISH_TOKEN','READ_TOKEN','GITHUB_API_URL'}}
     env['GITHUB_OUTPUT']=str(output)
