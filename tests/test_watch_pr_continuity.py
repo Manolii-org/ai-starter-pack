@@ -135,6 +135,17 @@ def test_foreign_watch_owner_is_not_overwritten(checkpoint):
     assert checkpoint.read_bytes() == before
 
 
+@pytest.mark.parametrize('field,value', [('repository', 'other/project'), ('pr', 8), ('pr', True)])
+def test_foreign_watch_scope_requires_original_owner_reconciliation(checkpoint, field, value):
+    assert run(SOURCES[0], checkpoint.parents[2]).returncode == 0
+    task = json.loads(checkpoint.read_text())
+    task['pr_watches']['sample/project#7'][field] = value
+    checkpoint.write_text(json.dumps(task))
+    before = checkpoint.read_bytes()
+    assert run(SOURCES[0], checkpoint.parents[2]).returncode != 0
+    assert checkpoint.read_bytes() == before
+
+
 def test_checkpoint_link_cannot_redirect_the_writer(checkpoint):
     target = checkpoint.with_name('other-task.json')
     checkpoint.rename(target)

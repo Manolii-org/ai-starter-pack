@@ -83,6 +83,11 @@ with path.with_name(path.name + '.lock').open('a') as lock:
     previous = watches.get(key)
     if previous is not None and (not isinstance(previous, dict) or previous.get('owner') != owner):
         raise ValueError('Retain existing PR owner')
+    if previous is not None and (not isinstance(previous.get('repository', repo), str)
+            or previous.get('repository', repo).casefold() != repo.casefold()
+            or type(previous.get('pr', int(number))) is not int
+            or previous.get('pr', int(number)) != int(number)):
+        raise ValueError('Retain existing PR scope; reconcile in its owner')
     if previous is None and len(watches) >= 100:
         raise ValueError('Watch capacity reached; retain unfinished work')
     observed = dict(previous or {}, owner=owner, repository=repo, pr=int(number), head=head, phase=phase)
@@ -183,7 +188,14 @@ Update scoped observations only when facts change. Skip the model wait loop for 
 | Gemini Code Assist | `user.login` starts with `gemini` OR body starts with `<!-- Gemini Code Assist` |
 | Other bots | `user.type == "Bot"` or `user.login` ends with `[bot]` |
 
-**3d. Dispatch `/pr-resolve` with the collected issue list.**
+**3d. Continue repair in the existing execution owner.** Inspect actual findings,
+repair owned code, run relevant tests and publish the new head under existing
+budgets and protected review/merge controls. Re-read CI and independent review
+for that new full head. Use `/pr-resolve` only within this accepted owner or its
+already accepted repair worker; never start an overlapping editor. Route foreign
+dependencies through their existing owner and retain the handoff receipt.
+Publication/access failure preserves prepared implementation and holds only its
+dependent boundary; it does not make all implementation blocked.
 
 **3e. Retain the qualified event/wake owner.** Use only that host's actual cadence
 and the skill's bounded recovery rule. Do not re-arm an unchanged one-shot chain
@@ -201,7 +213,7 @@ Only after the existing failed-repair budget is exhausted:
    - (a) caused by this PR's changes
    - (b) pre-existing / unrelated
    - (c) environmental / flaky
-3. Notify the user
+3. Notify once for a specific required intervention; unchanged evidence stays quiet
 4. Record the specific exhausted commitment and next action in its existing
    ledger. Do not mark unrelated parent work escalated or discard its custody.
 
