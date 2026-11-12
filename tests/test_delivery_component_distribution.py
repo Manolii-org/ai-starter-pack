@@ -447,6 +447,18 @@ def test_full_copied_platform_verification_refuses_extra_public_file(tmp_path):
         C.verify_copied_platform(target, source)
 
 
+def test_ignored_bytecode_never_becomes_immutable_public_source(tmp_path):
+    public = public_full_pack(tmp_path)
+    assert C.pack_source(public)["component_input_digest"]
+    bytecode = public / "registry/platform/framework/scripts/__pycache__/run-judge.fixture.pyc"
+    bytecode.parent.mkdir(parents=True, exist_ok=True)
+    bytecode.write_bytes(b"synthetic untrusted bytecode")
+    (public / ".git/info/exclude").write_text("__pycache__/\n")
+    assert git(public, "check-ignore", "--", str(bytecode.relative_to(public))).returncode == 0
+    with pytest.raises(C.ComponentError, match="untracked_or_missing_public_platform_input"):
+        C.pack_source(public)
+
+
 def test_source_downgrade_or_unknown_ancestry_holds_existing_component(tmp_path, monkeypatch):
     public = public_full_pack(tmp_path)
     root, slug = mirror(tmp_path, "buro")

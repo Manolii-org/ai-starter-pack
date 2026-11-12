@@ -368,6 +368,7 @@
     },
     {
       "id": "assessment-sast-failure-contract",
+      "environment": "release-contract-python",
       "paths": [
         ".github/workflows/pr-assessment*.yml",
         "tests/test_assessment_sast_failure.py",
@@ -424,7 +425,7 @@
       ],
       "commands": [
         [
-          "python3",
+          ".ai/agent-checks/release-venv/bin/python",
           "-m",
           "pytest",
           "-q",
@@ -452,7 +453,7 @@
           "tests/test_action_pins.py"
         ],
         [
-          "python3",
+          ".ai/agent-checks/release-venv/bin/python",
           "scripts/check-pinned-uses.py"
         ]
       ],
@@ -462,7 +463,7 @@
           "contains": "python3 -m pytest tests/ -q"
         }
       ],
-      "timeout_seconds": 120
+      "timeout_seconds": 180
     },
     {
       "id": "registry-bootstrap-contract",
@@ -480,7 +481,9 @@
         "registry/platform/framework/scripts/lib/native_guidance.py",
         "scripts/bootstrap-mirror.py",
         "scripts/build-plugin.py",
-        "scripts/lib/delivery_component.py"
+        "scripts/lib/delivery_component.py",
+        "tests/test_protected_review.py",
+        ".github/workflows/registry-lint.yml"
       ],
       "tools": [
         "uv"
@@ -490,6 +493,7 @@
           ".ai/agent-checks/release-venv/bin/python",
           "-m",
           "pytest",
+          "tests/test_protected_review.py",
           "tests/test_registry.py",
           "tests/test_native_guidance.py",
           "-q"
@@ -499,7 +503,7 @@
       "ci_sources": [
         {
           "path": ".github/workflows/registry-lint.yml",
-          "contains": "python3 -m pytest tests/test_registry.py tests/test_native_guidance.py -q"
+          "contains": "python3 -m pytest tests/test_protected_review.py tests/test_registry.py tests/test_native_guidance.py -q"
         }
       ]
     },
