@@ -404,8 +404,70 @@ class AdapterDescriptorTests(unittest.TestCase):
             payload = executor._sealed(stack, b"synthetic sealed payload")
             with self.assertRaises(PermissionError):
                 os.write(payload, b"MUTATION")
-            command = executor._AdapterCommand([f"/proc/self/fd/{adapter.fd}"], adapter)
-            self.assertEqual(executor._execution_fds(command, (payload,)), (adapter.fd, payload))
+            command = executor._AdapterCommand([f"/proc/{adapter.owner_pid}/fd/{adapter.fd}"], adapter)
+            self.assertEqual(executor._execution_fds(command, (payload,)), (payload,))
+            self.assertNotIn(adapter.fd, executor._execution_fds(command, (payload,)))
+
+    def test_actual_parent_descriptor_exec_works_without_adapter_inheritance(self):
+        # A host adapter --version observation proves only the proc-FD exec
+        # mechanism, not namespace isolation or source-execution closure.
+        with executor._adapter_scope(self.adapter_pin()) as adapter:
+            command = executor._AdapterCommand(
+                [f"/proc/{adapter.owner_pid}/fd/{adapter.fd}", "--version"], adapter)
+            self.assertEqual(executor._execution_fds(command, ()), ())
+            result = executor._collect(command, (), 3, 1024)
+            self.assertEqual(result["outcome"], "passed", result)
+            self.assertEqual(result["retained_output_bytes"], 0)
+            self.assertTrue(executor.fcntl.fcntl(adapter.fd, executor.fcntl.F_GETFD)
+                            & executor.fcntl.FD_CLOEXEC)
+            executor._verify_adapter(adapter)
+
+    def test_parent_pid_binding_refuses_foreign_or_forked_owners_before_fd_reads(self):
+        from dataclasses import replace
+        with executor._adapter_scope(self.adapter_pin()) as adapter:
+            foreign = replace(adapter, owner_pid=adapter.owner_pid + 1)
+            command = executor._AdapterCommand(
+                [f"/proc/{foreign.owner_pid}/fd/{foreign.fd}"], foreign)
+            with patch.object(executor, "_anchor_identity", side_effect=AssertionError("must not read FD")), \
+                    self.assertRaisesRegex(executor.ExecutionError, "invalid_adapter_owner"):
+                executor._execution_fds(command, ())
+            with patch.object(os, "getpid", return_value=adapter.owner_pid + 1), \
+                    patch.object(executor, "_anchor_identity", side_effect=AssertionError("must not read FD")), \
+                    self.assertRaisesRegex(executor.ExecutionError, "invalid_adapter_owner"):
+                executor._verify_adapter(adapter)
+
+    def test_actual_proc_parent_exec_keeps_executable_and_unrelated_fds_out(self):
+        # Public synthetic ELF control for the kernel exec route. The fixed
+        # adapter's metadata trust and isolated payload remain separate tests.
+        source = self.root / "parent-fd-probe.c"
+        source.write_text("""#include <fcntl.h>
+#include <errno.h>
+int main(void) {
+ for (int fd=3;fd<1024;fd++) {
+  errno=0;
+  if (fcntl(fd,F_GETFD)!=-1 || errno!=EBADF) return 31;
+ }
+ return 0;
+}
+""")
+        binary = self.root / "parent-fd-probe"
+        subprocess.run(["/usr/bin/cc", str(source), "-o", str(binary)], check=True,
+                       capture_output=True, timeout=30, env={"PATH": "/usr/bin:/bin"})
+        executable = os.open(binary, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+        unrelated = os.open("/", os.O_RDONLY | os.O_DIRECTORY)
+        os.set_inheritable(unrelated, True)
+        try:
+            old_route = subprocess.run([f"/proc/self/fd/{executable}"], pass_fds=(executable,),
+                                       close_fds=True, capture_output=True, timeout=3, env={})
+            self.assertEqual(old_route.returncode, 31)
+            parent_route = subprocess.run([f"/proc/{os.getpid()}/fd/{executable}"], pass_fds=(),
+                                          close_fds=True, capture_output=True, timeout=3, env={})
+            self.assertEqual(parent_route.returncode, 0)
+            self.assertTrue(executor.fcntl.fcntl(executable, executor.fcntl.F_GETFD)
+                            & executor.fcntl.FD_CLOEXEC)
+        finally:
+            os.close(unrelated)
+            os.close(executable)
 
     def test_capability_unknown_or_present_metadata_holds_before_launch(self):
         for error in (errno.ENOTSUP, errno.EOPNOTSUPP, errno.EACCES, errno.EPERM, errno.EIO):
@@ -430,9 +492,11 @@ class AdapterDescriptorTests(unittest.TestCase):
 
     def test_plain_or_noncanonical_argv_cannot_establish_fd_trust(self):
         with executor._adapter_scope(self.adapter_pin()) as adapter:
-            valid = f"/proc/self/fd/{adapter.fd}"
+            valid = f"/proc/{adapter.owner_pid}/fd/{adapter.fd}"
             for name in (valid + "/x", valid + " ", valid.replace("/fd/", "/fd/0"),
-                         "/proc/self/fd/0", "/usr/bin/bwrap", f"/dev/fd/{adapter.fd}"):
+                         "/proc/self/fd/0", "/usr/bin/bwrap", f"/dev/fd/{adapter.fd}",
+                         f"/proc/self/fd/{adapter.fd}",
+                         f"/proc/{adapter.owner_pid + 1}/fd/{adapter.fd}"):
                 with self.subTest(name=name), self.assertRaisesRegex(executor.ExecutionError,
                                                                       "invalid_adapter_descriptor"):
                     executor._execution_fds(executor._AdapterCommand([name], adapter), ())
@@ -441,7 +505,7 @@ class AdapterDescriptorTests(unittest.TestCase):
 
     def test_payloads_exclude_adapter_anchors_duplicates_and_unsealed_files(self):
         with executor._adapter_scope(self.adapter_pin()) as adapter, executor.ExitStack() as stack:
-            command = executor._AdapterCommand([f"/proc/self/fd/{adapter.fd}"], adapter)
+            command = executor._AdapterCommand([f"/proc/{adapter.owner_pid}/fd/{adapter.fd}"], adapter)
             sealed = executor._sealed(stack, b"payload")
             for payloads in ((adapter.fd,), (adapter.anchors[0][0],), (sealed, sealed),
                              (True,), [sealed]):
@@ -548,7 +612,11 @@ class AdapterDescriptorTests(unittest.TestCase):
             if isinstance(argv, executor._AdapterCommand):
                 adapter = argv.adapter
                 payloads = tuple(int(argv[i + 1]) for i, arg in enumerate(argv) if arg == "--ro-bind-data")
-                self.assertEqual(kwargs["pass_fds"], (adapter.fd, *payloads))
+                self.assertEqual(kwargs["pass_fds"], payloads)
+                self.assertNotIn(adapter.fd, kwargs["pass_fds"])
+                self.assertEqual(argv[0], f"/proc/{os.getpid()}/fd/{adapter.fd}")
+                self.assertTrue(executor.fcntl.fcntl(adapter.fd, executor.fcntl.F_GETFD)
+                                & executor.fcntl.FD_CLOEXEC)
                 self.assertTrue(kwargs["close_fds"])
                 self.assertEqual(kwargs["env"], {})
                 self.assertNotIn(unrelated, kwargs["pass_fds"])

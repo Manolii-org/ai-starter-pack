@@ -73,9 +73,17 @@ launch and after completion, failure or timeout. Detected path or content drift
 fails closed. Postchecks also run after cleanup failure without masking that
 primary error. Ancestor membership and directory timestamps do not impose a
 global quiet period. The collector receives only sealed payload descriptors;
-its separate private adapter binding supplies the canonical executable FD.
-Only that FD and the sealed payloads are inherited by bubblewrap; host directory
-anchors and unrelated descriptors are excluded.
+its separate private adapter binding supplies the canonical executable FD and
+the PID of its retaining process. Execution uses `/proc/<parent-pid>/fd/<fd>`
+while that exact parent retains the verified descriptor and all anchors through
+owned-child cleanup and postchecks. A different retaining PID is refused.
+Only sealed `--ro-bind-data` payload descriptors are inherited by bubblewrap,
+which consumes them before running the isolated command. The adapter descriptor,
+host directory anchors and unrelated descriptors do not cross exec. Inheriting
+the adapter would clear its close-on-exec flag and could leak it to the payload;
+there is no child trampoline, pre-exec hook or alternate executable fallback.
+A denied parent-proc descriptor route is an unavailable adapter, not permission
+to reopen the installed executable path or weaken the OS policy.
 
 This contract trusts root and the base OS, including its loader and security
 policy. An open read-only descriptor prevents pathname substitution and caller

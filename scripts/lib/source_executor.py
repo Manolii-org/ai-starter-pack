@@ -150,6 +150,7 @@ class _Adapter:
     expected_sha256: str
     details: tuple[int, ...]
     anchors: tuple[tuple[int, tuple[int, ...]], ...]
+    owner_pid: int
 
 
 class _AdapterCommand(list[str]):
@@ -227,6 +228,8 @@ def _adapter_bytes(fd: int, expected: str) -> tuple[int, ...]:
 
 
 def _verify_adapter(adapter: _Adapter) -> None:
+    _require(type(adapter.owner_pid) is int and adapter.owner_pid > 0
+             and adapter.owner_pid == os.getpid(), "invalid_adapter_owner")
     for descriptor, identity in adapter.anchors:
         _require(_anchor_identity(descriptor) == identity, "adapter_ancestor_changed")
     # Reopen only comparison anchors, never an executable pathname. Retained
@@ -253,7 +256,7 @@ def _adapter_scope(expected: str):
         anchors = _adapter_anchors(retained)
         descriptor = os.open("bwrap", projection._FILE | os.O_CLOEXEC, dir_fd=anchors[-1][0])
         retained.callback(os.close, descriptor)
-        adapter = _Adapter(descriptor, expected, _adapter_bytes(descriptor, expected), anchors)
+        adapter = _Adapter(descriptor, expected, _adapter_bytes(descriptor, expected), anchors, os.getpid())
         _verify_adapter(adapter)
         try:
             yield adapter
@@ -270,12 +273,12 @@ def _adapter_scope(expected: str):
 
 def _execution_fds(argv: list[str], payload_fds: tuple[int, ...]) -> tuple[int, ...]:
     _require(isinstance(argv, _AdapterCommand) and bool(argv)
-             and type(argv[0]) is str and re.fullmatch(r"/proc/self/fd/[1-9][0-9]*", argv[0]),
+             and type(argv[0]) is str and re.fullmatch(r"/proc/[1-9][0-9]*/fd/[1-9][0-9]*", argv[0]),
              "invalid_adapter_descriptor")
     assert isinstance(argv, _AdapterCommand)
     adapter = argv.adapter
     _require(type(adapter.fd) is int and adapter.fd > 2
-             and argv[0] == f"/proc/self/fd/{adapter.fd}", "invalid_adapter_descriptor")
+             and argv[0] == f"/proc/{adapter.owner_pid}/fd/{adapter.fd}", "invalid_adapter_descriptor")
     _require(type(payload_fds) is tuple and all(type(fd) is int and fd > 2 for fd in payload_fds),
              "invalid_payload_descriptor")
     _require(len(set(payload_fds)) == len(payload_fds) and adapter.fd not in payload_fds
@@ -285,7 +288,11 @@ def _execution_fds(argv: list[str], payload_fds: tuple[int, ...]) -> tuple[int, 
         _require(fcntl.fcntl(descriptor, getattr(fcntl, "F_GET_SEALS", 1034)) & 15 == 15,
                  "unsealed_payload_descriptor")
     _verify_adapter(adapter)
-    return (adapter.fd, *payload_fds)
+    # Execute through the still-live parent's retained original descriptor.
+    # Passing the adapter FD would clear CLOEXEC in the child; bubblewrap does
+    # not consume it, so it could leak into the untrusted isolated payload.
+    # Only sealed --ro-bind-data inputs cross exec and are consumed by bwrap.
+    return payload_fds
 
 
 
@@ -298,7 +305,7 @@ class _Outcome(TypedDict):
 
 
 def _collect(argv: list[str], fds: tuple[int, ...], timeout: float, output_limit: int) -> _Outcome:
-    """Accept sealed payload FDs; independently bind the original executable FD.
+    """Pass only sealed payload FDs; retain the original executable in the parent.
 
     Count/discard output; kill only this created process group on every exit.
     """
@@ -402,7 +409,7 @@ def execute_committed_source(repository: Path, *, selection: projection.Selectio
             admitted, _ = projection._classify(entries, policy)
             for path, (mode, oid) in admitted.items():
                 files.append(("/source/" + path, _sealed(stack, store.read(oid, "blob")), mode == "100755"))
-            command = [f"/proc/self/fd/{adapter.fd}", "--unshare-all", "--unshare-user", "--die-with-parent", "--new-session",
+            command = [f"/proc/{adapter.owner_pid}/fd/{adapter.fd}", "--unshare-all", "--unshare-user", "--die-with-parent", "--new-session",
                        "--disable-userns", "--cap-drop", "ALL", "--clearenv", "--tmpfs", "/", "--tmpfs", "/source"]
             directories = {"/source", "/tmp", "/dev"}
             for path, _, _ in files:
