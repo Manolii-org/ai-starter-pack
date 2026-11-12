@@ -30,12 +30,14 @@ RESTORE_STEP = "Restore trusted instruction surface from PR base"
 SURFACE = {".claude", ".mcp.json", ".claude.json", ".gitmodules", ".ripgreprc", ".husky",
            "CLAUDE.md", "CLAUDE.local.md", "AGENTS.md"}
 SURFACE_CHECK = "Verify autofix commits left the instruction surface alone"
-GATE = "steps.ref.outputs.skip != 'true' && steps.pr.outputs.skip != 'true' && steps.budget.outputs.skip != 'true'"
+GATE = "steps.ref.outputs.skip != 'true' && steps.custody.outputs.skip == 'false' && steps.pr.outputs.skip != 'true' && steps.budget.outputs.skip != 'true'"
 
 
 def _steps(name: str) -> list[dict]:
     spec = yaml.safe_load(WORKFLOWS[name].read_text(encoding="utf-8"))
-    return [step for job in spec["jobs"].values() for step in job.get("steps", [])]
+    execution = yaml.safe_load((ROOT / ".github/workflows/pr-autofix-execution-reusable.yml").read_text())
+    return ([step for job in spec["jobs"].values() for step in job.get("steps", [])] +
+            execution['jobs'][name+'_editor']['steps'])
 
 
 def _step(name: str, *, uses: str | None = None, title: str | None = None) -> dict:
@@ -154,7 +156,8 @@ def test_reusable_anthropic_model_env_matches_the_model_flag() -> None:
     step = _step("reusable", uses=ACTION)
     assert step["env"]["ANTHROPIC_MODEL"] == f"${{{{ {MODEL_REF['reusable']} }}}}"
     resolver = _step("reusable", title=RESOLVER["reusable"])
-    assert resolver["if"] == step["if"] == GATE
+    assert resolver["if"] == GATE
+    assert step["if"] == GATE+" && steps.custody_dispatch.outputs.skip == 'false'"
 
 
 def test_standalone_lock_is_on_the_agent_job_and_never_cancels() -> None:
@@ -164,6 +167,7 @@ def test_standalone_lock_is_on_the_agent_job_and_never_cancels() -> None:
     assert "concurrency" not in spec
     assert "concurrency" not in spec["jobs"]["preflight"]
     lock = spec["jobs"]["autofix"]["concurrency"]
+    assert spec["jobs"]["autofix"]["uses"] == "$/.github/workflows/pr-autofix-execution-reusable.yml"
     assert lock["cancel-in-progress"] is False
     assert "needs.preflight.outputs.pr_number" in lock["group"]
 
@@ -175,14 +179,15 @@ GO = "steps.lock.outputs.go == 'true'"
 def test_standalone_rechecks_the_head_before_any_queued_work() -> None:
     """Codex review, PR #251: preflight runs before the job waits for the lock,
     so a queued run must re-check the head before checking out or dispatching."""
-    steps = yaml.safe_load(WORKFLOWS["standalone"].read_text(encoding="utf-8"))["jobs"]["autofix"]["steps"]
+    steps = yaml.safe_load((ROOT / '.github/workflows/pr-autofix-execution-reusable.yml').read_text())['jobs']['standalone_editor']['steps']
     assert steps[0]["name"] == LOCK_CHECK and steps[0]["id"] == "lock"
-    assert steps[0]["env"]["VALIDATED"] == "${{ needs.preflight.outputs.head_sha }}"
+    assert steps[0]["env"]["VALIDATED"] == "${{ inputs.head_sha }}"
     agent = next(i for i, s in enumerate(steps) if str(s.get("uses", "")).startswith(ACTION))
     for step in steps[1:agent + 1]:
-        assert step.get("if") == GO, step.get("name") or step.get("uses")
+        assert step.get("if") == (GO if step.get('id')=='custody_dispatch' else
+            GO+" && steps.custody_dispatch.outputs.skip == 'false'"), step.get("name") or step.get("uses")
     for step in steps[agent + 1:]:
-        assert "steps.claude.outcome" in step["if"]
+        assert any(gate in step['if'] for gate in ('steps.claude.outcome','steps.verify_exec.outcome','steps.prepare.outputs.recovery_path'))
 
 
 @pytest.mark.parametrize(("pr", "validated", "go"), [
@@ -491,7 +496,7 @@ def test_trusted_agent_bots_are_opt_in_and_ci_failure_only(name: str) -> None:
     # Never the raw value: only the preflight's sanitised list reaches the action.
     assert src not in allowed
     if name == "standalone":
-        assert allowed == "${{ needs.preflight.outputs.allowed_bots || 'github-actions' }}"
+        assert allowed == "${{ inputs.allowed_bots || 'github-actions' }}"
         spec = yaml.safe_load(WORKFLOWS[name].read_text(encoding="utf-8"))
         assert spec["jobs"]["preflight"]["outputs"]["allowed_bots"] == "${{ steps.pr.outputs.allowed_bots }}"
     else:
@@ -513,7 +518,7 @@ def test_trusted_bot_matcher_is_identical_in_both_workflows() -> None:
     (",,", "github-actions[bot]", False),
 ])
 def test_trusted_bot_matcher(bots: str, who: str, trusted: bool, tmp_path) -> None:
-    script = "set -euo pipefail\n" + _trusted_bot_fn("reusable") + 'trusted_bot "$WHO"\n'
+    script = "set -euo pipefail\nreview_admitted=false\n" + _trusted_bot_fn("reusable") + 'trusted_bot "$WHO"\n'
     env = {**os.environ, "TRUSTED_BOTS": bots, "WHO": who, "EVENT_NAME": "workflow_run",
            "GITHUB_OUTPUT": str(tmp_path / "out")}
     result = subprocess.run(["bash", "-c", script], env=env)
@@ -529,7 +534,7 @@ def test_trusted_bot_matcher(bots: str, who: str, trusted: bool, tmp_path) -> No
 ])
 def test_allowed_bots_output_is_sanitised(bots: str, allowed: str, tmp_path) -> None:
     out = tmp_path / "out"
-    script = "set -euo pipefail\n" + _trusted_bot_fn("reusable")
+    script = "set -euo pipefail\nreview_admitted=false\n" + _trusted_bot_fn("reusable")
     env = {**os.environ, "TRUSTED_BOTS": bots, "EVENT_NAME": "workflow_run", "GITHUB_OUTPUT": str(out)}
     subprocess.run(["bash", "-c", script], env=env, check=True)
     assert out.read_text() == f"allowed_bots={allowed}\n"
@@ -541,7 +546,7 @@ def test_agent_bots_reach_the_action_only_on_workflow_run(name: str, event: str,
     """A trusted bot with write access passes the collaborator check on comment
     and review triggers too; the action's allowed_bots must not accept it there."""
     out = tmp_path / "out"
-    script = "set -euo pipefail\n" + _trusted_bot_fn(name)
+    script = "set -euo pipefail\nreview_admitted=false\n" + _trusted_bot_fn(name)
     env = {**os.environ, "TRUSTED_BOTS": "devin-ai-integration[bot]", "EVENT_NAME": event,
            "GITHUB_OUTPUT": str(out)}
     subprocess.run(["bash", "-c", script], env=env, check=True)

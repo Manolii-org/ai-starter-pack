@@ -284,9 +284,12 @@ def _resolve(args, root, resolver, manifest, registry, index):
     if type(continuation) is not bool:
         raise ValueError("native_guidance_continuation must be boolean")
     names = NAMES + (CONTINUATION,) if continuation else NAMES
-    sources, evals = {}, {}
+    sources, evals, companions = {}, {}, {}
     for name in names:
-        for leaf, destination in (("SKILL.md", sources), ("evals/cases.json", evals)):
+        assets = [("SKILL.md", sources), ("evals/cases.json", evals)]
+        if name == CONTINUATION:
+            assets.append(("review-evidence.md", companions))
+        for leaf, destination in assets:
             rel = f"skills/{name}/{leaf}"
             registry_rel = f"{plugin_relative}/{rel}"
             snapshot = resolver._read_source(registry, registry_rel)
@@ -298,7 +301,7 @@ def _resolve(args, root, resolver, manifest, registry, index):
                                       capture_output=True, timeout=10)
                 if blob.returncode or blob.stdout != data:
                     raise ValueError(f"{rel} differs from the pinned object")
-            destination[name] = data
+            destination[name if destination is not companions else f"{name}/{leaf}"] = data
     metadata = resolver._frontmatter(sources[NAMES[0]])
     version = metadata.get("version")
     if not isinstance(version, str) or not re.fullmatch(r"\d+\.\d+\.\d+", version):
@@ -354,6 +357,8 @@ def _resolve(args, root, resolver, manifest, registry, index):
     for name, data in sources.items():
         add(f"{skill_root}/{name}/SKILL.md", data)
         add(f"{skill_root}/{name}/evals/cases.json", evals[name])
+    for rel, data in companions.items():
+        add(f"{skill_root}/{rel}", data)
     # Never silently abandon a surface that a previous install managed.
     if set(records) - set(outputs):
         raise ValueError("surface selection removes managed files; revert their owning commit explicitly")

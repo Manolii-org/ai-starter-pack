@@ -74,6 +74,12 @@ outcome reporters can tell the two apart:
 | `pr-autofix-loop-reusable` | `active`, `skipped` | never: missing credentials and an agent step that produced no execution already fail the job | none |
 | `secret-scan-reusable` | `npm_audit_activation` and `pip_audit_activation`, each `active`, `inert` | per audit: no root `package-lock.json` (npm), or no `requirements*.txt` / `uv.lock` (pip; a bare `pyproject.toml` still runs a fallback audit of the runner's own packages, so it reports `inert`). The workflow is INERT for dependencies only when both are; Gitleaks always runs | `fail_on_inert` fails the `Dependency Vulnerability Audit` job when neither audit can run |
 
+Autofix `active` establishes only the legacy execution-file signal, not a verified tool action. Inspect its additive
+`publication`/`published_sha` outputs for verified remote publication, then verify
+CI on that head. Held or unknown publication fails its step and retains an
+unfinished task; a no-change turn is not progress. Recovery artifact paths alone
+do not prove upload. Verify the upload receipt before relying on persistence.
+
 `secret-scan-reusable` warns `INERT` only when no dependency audit can run.
 A repository that legitimately has one ecosystem reports the other audit as
 `inert` through its output, without an annotation on every run.

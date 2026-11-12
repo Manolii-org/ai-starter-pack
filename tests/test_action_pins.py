@@ -1,18 +1,22 @@
 """Every remote `uses:` in the pack's workflows and actions is SHA-pinned.
 
 Tag refs are mutable: a moved upstream tag silently changes the code that runs
-with the caller's secrets and write token. Only local `./` paths are exempt;
+with the caller's secrets and write token. Local `./` and bounded same-commit `$/` workflow paths are exempt;
 docs code samples are never parsed (this reads YAML structure, not text).
 """
 
 from __future__ import annotations
 
 import re
+import importlib.util
 from pathlib import Path
 
 import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
+_spec = importlib.util.spec_from_file_location('action_pin_contract', ROOT / 'scripts/check-pinned-uses.py')
+_pin_contract = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_pin_contract)
 SHA = re.compile(r"@[0-9a-f]{40}$")
 DOCKER_DIGEST = re.compile(r"^docker://[^@]+@sha256:[0-9a-f]{64}$")
 
@@ -41,7 +45,7 @@ def unpinned(path: Path) -> list[str]:
     bad = []
     for ref in _uses(spec):
         ref = ref.strip()
-        if ref.startswith("./"):
+        if ref.startswith("./") or _pin_contract.SELF_WORKFLOW_RE.fullmatch(ref):
             continue
         if ref.startswith("docker://"):
             if not DOCKER_DIGEST.match(ref):
@@ -62,7 +66,7 @@ def test_every_remote_uses_is_sha_pinned() -> None:
     failures = {p.relative_to(ROOT).as_posix(): bad for p in _files() if (bad := unpinned(p))}
     assert not failures, (
         "pin these to a full 40-hex commit SHA with a `# vX.Y.Z` comment "
-        f"(local ./ paths are exempt): {failures}"
+        f"(local ./ and bounded same-commit $/ workflow paths are exempt): {failures}"
     )
 
 
@@ -72,6 +76,12 @@ def test_lint_rejects_tags_and_accepts_shas_and_local(tmp_path: Path) -> None:
         "jobs:\n"
         "  a:\n"
         "    uses: org/repo/.github/workflows/x.yml@v1\n"
+        "  self:\n"
+        "    uses: $/.github/workflows/internal.yml\n"
+        "  traversal:\n"
+        "    uses: $/.github/workflows/../outside.yml\n"
+        "  mutable_self:\n"
+        "    uses: $/.github/workflows/internal.yml@main\n"
         "  b:\n"
         "    steps:\n"
         "      - uses: actions/checkout@v4\n"
@@ -82,6 +92,8 @@ def test_lint_rejects_tags_and_accepts_shas_and_local(tmp_path: Path) -> None:
     )
     assert unpinned(wf) == [
         "org/repo/.github/workflows/x.yml@v1",
+        "$/.github/workflows/../outside.yml",
+        "$/.github/workflows/internal.yml@main",
         "actions/checkout@v4",
         "docker://alpine:3",
     ]

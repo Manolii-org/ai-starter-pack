@@ -95,7 +95,7 @@ jobs:
 
       - name: actionlint
         working-directory: caller
-        run: actionlint -shellcheck= -pyflakes=
+        run: python3 ../pack/scripts/check-pinned-uses.py --actionlint
 
       - name: zizmor
         working-directory: caller
