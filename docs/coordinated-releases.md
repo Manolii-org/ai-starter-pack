@@ -70,6 +70,42 @@ qualified version/profile rather than an invented aggregate hash.
 The owning adapter separately verifies real artifact/configuration provenance,
 latest qualification, backup policy and current before-state.
 
+## Exact external code sources (opt-in v2 reader input)
+
+The default v2 reader keeps all component, unchanged-component and database source
+repositories in the owning organization. An owner can compile a reviewed, pinned
+local `schemas/release-source-policy.v1.schema.json` policy and pass it separately
+as the keyword-only `trusted_source_policy` argument to `prepare`, `validate`,
+`validate_native_binding` and `release_state.reserve`. This is an additional reader
+input, not a release manifest field, nested release, service or human decision.
+The action/CLI do not accept candidate-supplied policy. Old readers and default
+calls still reject foreign sources. Version 1 rejects this opt-in input.
+
+The policy binds the owning repository/entity, controller and capability revisions,
+profile version and exact allowed code-source triples (`repo`, `sha`, `tree`). Its
+canonical SHA-256 must equal `subject.policy_sha256`; qualification already binds
+that digest. Wildcards, repository-only or organization-wide grants are invalid.
+Only component and unchanged-component code can use an exact listed foreign
+source, for example a generic shared runner image. Every database source must
+remain in the owning organization, even if the same triple is allowed as code.
+This grants no foreign targets, credentials, tenant/data access or deployment
+authority. The owner still qualifies real Git/artifact provenance and its exact
+entity target allowlist locally; metadata validation does not fetch source code.
+
+For opt-in native binding the trusted executor's exact context additionally carries
+`policy_sha256`, `profile_version`, `capability_sha` and `entity` from compiled
+policy. Both subject `control_sha` and `execution.workflow_sha` must still match
+the independent caller's `expected_controller_sha`. Supplying a matching digest
+or policy is never native human approval. Callers must forward the same pinned
+policy at preparation, admission and every protected revalidation. Foreign code
+without the policy, a supplied policy mismatch or a mismatched native context
+fails closed. A same-organization record still has the default reader's existing
+semantics; the owner adapter must require its compiled profile independently.
+The v1-only `activation_only` constructor still
+rejects v2; prepare fresh v2 combined qualification for continuation/recovery.
+No owner policy allowance, runtime cutover or production operation is installed
+by publication of these generic readers.
+
 ## Approval capability observation
 
 `github_approval.py` reads the documented workflow-run review-history endpoint
