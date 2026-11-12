@@ -43,6 +43,13 @@ checks still run. The cache walker never reads file bytes or directory entries
 outside the owning repository. Dependency identities use the private cache key
 and remain in local evidence.
 
+Ignored dotenv identities share the dependency walk's entry and byte ceilings
+across the selected working directories. Exhaustion is recorded as an unknown
+(`null`) dotenv identity, disables PASS reuse and still permits fresh checks.
+File payloads are streamed and oversized files are refused before reading.
+Text-only attributes on a proven LF checkout need no filtered Git comparison;
+explicit EOL, ident, encoding and global CRLF conversions remain checked.
+
 The portable `READY_IDENTITY_CONTRACT` is `agent-ready-content/v3`; its hash
 domain separates earlier readiness evidence without changing receipt schemas,
 the CLI or the optional private-key call interface.
