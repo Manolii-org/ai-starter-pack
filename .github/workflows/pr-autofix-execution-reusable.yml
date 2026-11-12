@@ -328,8 +328,10 @@ jobs:
           \ action once; finish other already-authorized findings before yielding. Never retry unchanged denials, repeat wait notices or mark\
           \ the parent task done from a partial result.\n7. Commit with message \"[autofix] <what was fixed>\" locally; do not push. The trusted\
           \ controller owns publication\n8. Do NOT push to main/master. Do NOT merge the PR. Never force-push or\n   rewrite history; if the push\
-          \ is rejected, comment and STOP.\n9. Do not modify or commit .claude/, CLAUDE.md, AGENTS.md, .mcp.json or\n   .husky/ \u2014 if a finding\
-          \ needs that, comment and STOP.\n\nX-Originating-Agent: claude-cli\n"
+          \ is rejected, comment and STOP.\n9. Do not modify or commit protected instructions (.claude/, CLAUDE.md,\n   AGENTS.md, .mcp.json,\
+          \ .husky/) or workflow controls (.github/workflows/,\n   .github/actions/). Route only that finding to the existing owner and its\n\
+          \   approved trusted-source publication route. Record the dependency, unblock\n   condition and next action once; finish other authorized\
+          \ findings.\n\nX-Originating-Agent: claude-cli\n"
     - name: Verify the agent executed
       id: verify_exec
       if: steps.claude.outcome == 'success'
@@ -592,7 +594,7 @@ jobs:
         import urllib.request
 
         SHA = re.compile(r"[0-9a-f]{40}")
-        INSTRUCTIONS = re.compile(r"(^|/)(\.claude(?:/|$)|CLAUDE\.md$|CLAUDE\.local\.md$|AGENTS\.md$)|^(\.mcp\.json|\.claude\.json|\.gitmodules|\.ripgreprc)$|^\.husky(?:/|$)")
+        INSTRUCTIONS = re.compile(r"(^|/)(\.claude(?:/|$)|CLAUDE\.md$|CLAUDE\.local\.md$|AGENTS\.md$)|^(\.mcp\.json|\.claude\.json|\.gitmodules|\.ripgreprc)$|^\.husky(?:/|$)|^\.github(?:$|/(workflows|actions)(?:/|$))")
 
 
         def git_env():
@@ -736,7 +738,7 @@ jobs:
                 'publication_credential_unavailable': 'The owning CI-triggering publication credential is unavailable. Restore its approved scoped route before publication.',
                 'publication_admission_held': 'Native custody admission declined. The retained owner must resolve the reported custody/read/hold dependency before publication.',
                 'native_state_held': 'The native PR head/state/repository/hold changed. Reconcile the current native state before recovering or publishing the candidate.',
-                'instruction_surface_held': 'The candidate changed protected instruction paths. Separate the authorized repair and pass the instruction guard before publication.',
+                'instruction_surface_held': 'The candidate changed protected instruction or workflow-control paths. Route this finding to the original owner and its approved trusted-source publication route; finish other authorized findings before recovering or publishing this candidate.',
                 'commit_subject_held': 'The candidate violated the existing [autofix] accounting convention. The original owner must review and recommit the retained repair with valid subjects.',
                 'candidate_ancestry_held': 'The candidate is not verified as a descendant of the admitted head. The original owner must reconcile workspace/head ownership and restore the authorized branch.',
                 'native_state_unverified': 'Native PR readback is unverified. Restore the same approved read route and revalidate current custody/head; do not switch identities.',
@@ -1329,8 +1331,10 @@ jobs:
           \ unblock condition and next action once; finish other already-authorized findings before yielding. Never retry unchanged denials, repeat\
           \ wait notices or mark the parent task done from a partial result.\n7. Commit with message \"[autofix] <what was fixed>\" locally; do\
           \ not push. The trusted controller owns publication\n8. Do NOT push to main/master. Do NOT merge the PR. Never force-push or\n   rewrite\
-          \ history; if the push is rejected, comment and STOP.\n9. Do not modify or commit .claude/, CLAUDE.md, AGENTS.md, .mcp.json or\n   .husky/\
-          \ \u2014 if a finding needs that, comment and STOP.\n\nX-Originating-Agent: claude-cli\n"
+          \ history; if the push is rejected, comment and STOP.\n9. Do not modify or commit protected instructions (.claude/, CLAUDE.md,\n   AGENTS.md,\
+          \ .mcp.json, .husky/) or workflow controls (.github/workflows/,\n   .github/actions/). Route only that finding to the existing owner\
+          \ and its\n   approved trusted-source publication route. Record the dependency, unblock\n   condition and next action once; finish other\
+          \ authorized findings.\n\nX-Originating-Agent: claude-cli\n"
     - name: Verify the agent executed
       id: verify_exec
       if: steps.claude.outcome == 'success'
@@ -1680,7 +1684,7 @@ jobs:
         import urllib.request
 
         SHA = re.compile(r"[0-9a-f]{40}")
-        INSTRUCTIONS = re.compile(r"(^|/)(\.claude(?:/|$)|CLAUDE\.md$|CLAUDE\.local\.md$|AGENTS\.md$)|^(\.mcp\.json|\.claude\.json|\.gitmodules|\.ripgreprc)$|^\.husky(?:/|$)")
+        INSTRUCTIONS = re.compile(r"(^|/)(\.claude(?:/|$)|CLAUDE\.md$|CLAUDE\.local\.md$|AGENTS\.md$)|^(\.mcp\.json|\.claude\.json|\.gitmodules|\.ripgreprc)$|^\.husky(?:/|$)|^\.github(?:$|/(workflows|actions)(?:/|$))")
 
 
         def git_env():
@@ -1824,7 +1828,7 @@ jobs:
                 'publication_credential_unavailable': 'The owning CI-triggering publication credential is unavailable. Restore its approved scoped route before publication.',
                 'publication_admission_held': 'Native custody admission declined. The retained owner must resolve the reported custody/read/hold dependency before publication.',
                 'native_state_held': 'The native PR head/state/repository/hold changed. Reconcile the current native state before recovering or publishing the candidate.',
-                'instruction_surface_held': 'The candidate changed protected instruction paths. Separate the authorized repair and pass the instruction guard before publication.',
+                'instruction_surface_held': 'The candidate changed protected instruction or workflow-control paths. Route this finding to the original owner and its approved trusted-source publication route; finish other authorized findings before recovering or publishing this candidate.',
                 'commit_subject_held': 'The candidate violated the existing [autofix] accounting convention. The original owner must review and recommit the retained repair with valid subjects.',
                 'candidate_ancestry_held': 'The candidate is not verified as a descendant of the admitted head. The original owner must reconcile workspace/head ownership and restore the authorized branch.',
                 'native_state_unverified': 'Native PR readback is unverified. Restore the same approved read route and revalidate current custody/head; do not switch identities.',

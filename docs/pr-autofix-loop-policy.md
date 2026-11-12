@@ -59,6 +59,14 @@ that does not inherit PR hooks, URL rewrites or credentials. It permits only a
 fast-forward candidate based on the admitted head, enforces the existing
 `[autofix]` commit-subject convention and refuses instruction-surface changes in
 any candidate commit, including changes restored later or hidden by a merge.
+Protected publication paths include `.github/workflows/` and `.github/actions/`,
+so an unprivileged editor cannot redefine a later privileged workflow/action.
+GitHub review runs can resolve workflow source at the PR merge ref; separating
+runners alone does not make a future modified controller trustworthy. The
+original owner must use its approved trusted-source publication route for those
+findings; this adds no automatic human-approval requirement and does not hold
+independent authorized fixes. The workflow definition admitted at run start must
+itself be trusted under the consumer's existing source policy.
 An expected-ref lease makes the sole push conditional on the checked head,
 including deletion/reset races; validated ancestry prevents history rewrites.
 Exact remote-ref readback is still required.

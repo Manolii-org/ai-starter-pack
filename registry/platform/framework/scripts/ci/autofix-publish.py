@@ -16,7 +16,7 @@ import urllib.parse
 import urllib.request
 
 SHA = re.compile(r"[0-9a-f]{40}")
-INSTRUCTIONS = re.compile(r"(^|/)(\.claude(?:/|$)|CLAUDE\.md$|CLAUDE\.local\.md$|AGENTS\.md$)|^(\.mcp\.json|\.claude\.json|\.gitmodules|\.ripgreprc)$|^\.husky(?:/|$)")
+INSTRUCTIONS = re.compile(r"(^|/)(\.claude(?:/|$)|CLAUDE\.md$|CLAUDE\.local\.md$|AGENTS\.md$)|^(\.mcp\.json|\.claude\.json|\.gitmodules|\.ripgreprc)$|^\.husky(?:/|$)|^\.github(?:$|/(workflows|actions)(?:/|$))")
 
 
 def git_env():
@@ -160,7 +160,7 @@ def record(result):
         'publication_credential_unavailable': 'The owning CI-triggering publication credential is unavailable. Restore its approved scoped route before publication.',
         'publication_admission_held': 'Native custody admission declined. The retained owner must resolve the reported custody/read/hold dependency before publication.',
         'native_state_held': 'The native PR head/state/repository/hold changed. Reconcile the current native state before recovering or publishing the candidate.',
-        'instruction_surface_held': 'The candidate changed protected instruction paths. Separate the authorized repair and pass the instruction guard before publication.',
+        'instruction_surface_held': 'The candidate changed protected instruction or workflow-control paths. Route this finding to the original owner and its approved trusted-source publication route; finish other authorized findings before recovering or publishing this candidate.',
         'commit_subject_held': 'The candidate violated the existing [autofix] accounting convention. The original owner must review and recommit the retained repair with valid subjects.',
         'candidate_ancestry_held': 'The candidate is not verified as a descendant of the admitted head. The original owner must reconcile workspace/head ownership and restore the authorized branch.',
         'native_state_unverified': 'Native PR readback is unverified. Restore the same approved read route and revalidate current custody/head; do not switch identities.',

@@ -226,7 +226,7 @@ def test_replace_refs_cannot_hide_instruction_changes(candidate,monkeypatch):
     assert m.publish()['outcome']=='instruction_surface_held'
 
 
-@pytest.mark.parametrize('name',['.claude','.husky','nested/.claude'])
+@pytest.mark.parametrize('name',['.claude','.husky','nested/.claude','.github','.github/workflows','.github/actions'])
 def test_new_instruction_directory_symlink_cannot_bypass_object_guard(candidate,monkeypatch,name):
     work,base,head,git=candidate;m=load_publisher()
     path=work/name;path.parent.mkdir(parents=True,exist_ok=True)
@@ -407,3 +407,24 @@ def test_embedded_capture_executes_without_publisher_or_api_credentials(candidat
     packet=Path(output.read_text().strip().split('=',1)[1])
     assert (packet/'implementation.bundle').is_file()
     assert json.loads((packet/'receipt.json').read_text())['candidate_sha']==candidate[2]
+
+
+@pytest.mark.parametrize('path',['.github/workflows/next-run.yml','.github/actions/helper/action.yml'])
+def test_editor_cannot_publish_future_privileged_workflow_controls(candidate,monkeypatch,path):
+    work,base,head,git=candidate;m=load_publisher()
+    target=work/path;target.parent.mkdir(parents=True,exist_ok=True)
+    target.write_text('name: inert fixture control mutation\n')
+    git('add','--',path);git('commit','-qm','[autofix] control fixture')
+    monkeypatch.setattr(m,'api',lambda *a,**kw:pytest.fail('editor workflow-control mutation must hold before publication authority'))
+    assert m.publish()['outcome']=='instruction_surface_held'
+
+
+@pytest.mark.parametrize('variant',['standalone','reusable'])
+def test_protected_source_hold_routes_only_its_finding(variant):
+    workflow=yaml.safe_load((ROOT/'.github/workflows/pr-autofix-execution-reusable.yml').read_text())
+    editor=next(s for s in workflow['jobs'][variant+'_editor']['steps'] if s.get('id')=='claude')
+    prompt=editor['with']['prompt']
+    assert '.github/workflows/' in prompt and '.github/actions/' in prompt
+    assert 'Route only that finding to the existing owner' in prompt
+    assert 'finish other authorized findings' in prompt
+    assert 'if a finding needs that, comment and STOP' not in prompt

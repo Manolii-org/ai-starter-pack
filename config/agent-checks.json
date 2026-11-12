@@ -392,7 +392,8 @@
         "scripts/check-pinned-uses.py",
         ".github/workflows/workflow-security.yml",
         ".github/workflows/workflow-security-reusable.yml",
-        "tests/test_workflow_security.py"
+        "tests/test_workflow_security.py",
+        "tests/test_action_pins.py"
       ],
       "tools": [
         "python"
@@ -423,7 +424,12 @@
           "tests/test_autofix_reusable_yaml.py",
           "tests/test_reusable_matrix.py",
           "tests/test_routine_ci_repair_policy.py",
-          "tests/test_workflow_security.py"
+          "tests/test_workflow_security.py",
+          "tests/test_action_pins.py"
+        ],
+        [
+          "python3",
+          "scripts/check-pinned-uses.py"
         ]
       ],
       "ci_sources": [
