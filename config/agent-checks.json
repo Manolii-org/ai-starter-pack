@@ -351,6 +351,7 @@
     },
     {
       "id": "assessment-sast-failure-contract",
+      "environment": "release-contract-python",
       "paths": [
         ".github/workflows/pr-assessment*.yml",
         "tests/test_assessment_sast_failure.py",
@@ -407,7 +408,7 @@
       ],
       "commands": [
         [
-          "python3",
+          ".ai/agent-checks/release-venv/bin/python",
           "-m",
           "pytest",
           "-q",
@@ -435,7 +436,7 @@
           "tests/test_action_pins.py"
         ],
         [
-          "python3",
+          ".ai/agent-checks/release-venv/bin/python",
           "scripts/check-pinned-uses.py"
         ]
       ],
@@ -445,7 +446,7 @@
           "contains": "python3 -m pytest tests/ -q"
         }
       ],
-      "timeout_seconds": 120
+      "timeout_seconds": 180
     },
     {
       "id": "registry-bootstrap-contract",
