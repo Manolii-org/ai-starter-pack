@@ -276,8 +276,8 @@ jobs:
           LLM_API_KEY: ${{ secrets.LLM_API_KEY || secrets.LITELLM_MASTER_KEY }}
           ANTHROPIC_BASE_URL: ${{ vars.LITELLM_PROXY_URL || vars.ANTHROPIC_BASE_URL }}
           CLIENT_AI_POLICY: ${{ vars.CLIENT_AI_POLICY }}
-          # CLIENT_AI_POLICY routes the classifier Anthropic-direct too — the
-          # proxy credential cannot authenticate api.anthropic.com.
+          # Optional explicitly admitted external/direct compatibility only.
+          # A restrictive client flag alone retains its egress-policy hold.
           ANTHROPIC_DIRECT_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           PR_TITLE: ${{ github.event.pull_request.title }}
           PR_BODY: ${{ github.event.pull_request.body }}
@@ -769,9 +769,8 @@ jobs:
           LITELLM_MASTER_KEY: ${{ secrets.LITELLM_MASTER_KEY || secrets.LLM_API_KEY }}
           LLM_API_KEY: ${{ secrets.LLM_API_KEY || secrets.LITELLM_MASTER_KEY }}
           ANTHROPIC_BASE_URL: ${{ vars.LITELLM_PROXY_URL || vars.ANTHROPIC_BASE_URL }}
-          # Engagement policy gate: when set, agents declaring
-          # client_policy_model escalate Anthropic-direct and need a real key
-          # (the transport slot above carries the proxy token in proxy mode).
+          # Restrictive engagements retain a hold until a compatible route is
+          # declared; legacy model hints never select a vendor or require a key.
           CLIENT_AI_POLICY: ${{ vars.CLIENT_AI_POLICY }}
           ANTHROPIC_DIRECT_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           AGENTS: ${{ needs.review-routing.outputs.invoke_agents }}
