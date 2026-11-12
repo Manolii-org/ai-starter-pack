@@ -216,7 +216,7 @@ class WorkflowContracts(unittest.TestCase):
         self.assertIn("tests/test_native_owner_recipe.py", check["paths"])
         copier = (ROOT / "copier.yml").read_text()
         for path in ("scripts/ci/native_owner_recipe.py", ".github/workflows/native-owner-recipe.yml",
-                     "docs/native-owner-recipe.md"):
+                     "docs/native-owner-recipe.md", "tests/test_native_owner_recipe.py"):
             self.assertIn("  - " + path, copier)
 
 

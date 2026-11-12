@@ -417,7 +417,8 @@ def test_release_capability_distribution_boundary(default_render, branded_render
         assert registry_cases, "the registry case inventory must not become vacuous"
         maintenance_paths += registry_cases
         maintenance_paths += [ROOT / path for path in ("scripts/ci/native_owner_recipe.py",
-                              ".github/workflows/native-owner-recipe.yml", "docs/native-owner-recipe.md")]
+                              ".github/workflows/native-owner-recipe.yml", "docs/native-owner-recipe.md",
+                              "tests/test_native_owner_recipe.py")]
         assert maintenance_paths, "the pack maintenance inventory must not become vacuous"
         for path in maintenance_paths:
             assert not (rendered / path.relative_to(ROOT)).exists()
