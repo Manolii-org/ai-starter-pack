@@ -27,12 +27,12 @@
 | **DOM selection / browser automation** | ✅ Strong fit | Browser-based multi-action flows; model interprets DOM labels. OSS ~1000 tok/s on optimized hardware — 5–10× faster than baseline for latency-critical paths. |
 | **Code boilerplate / scaffolding** | ✅ Acceptable | Low-stakes generation: TypeScript interfaces, SQL stubs, test fixtures. Not for security-sensitive or client-facing code paths. |
 | **Multi-step agentic loops** | ⚠️ Weak fit — stay first-party | Tool-calling reliability drops significantly outside first-party models. In a 10-step loop with 10 tool calls, 85% per-call success = ~20% loop completion rate vs ~95% on Anthropic/OpenAI. Stateful loops do not tolerate per-step failures gracefully. |
-| **Security-sensitive code** | ❌ Keep first-party | Vulnerability assessment, auth logic, cryptography. Model capability gap means material risk of missing subtle security issues. |
+| **Security-sensitive code** | Owner-qualified governed review | Vulnerability assessment, auth logic and cryptography require complete source evidence, security checks and fail-closed adjudication. Use the owner-approved review route; no framework vendor-direct credential is required. |
 | **Long-chain reasoning** | ❌ Keep first-party | Architecture decisions, trade-off analysis, design reviews. Quality degrades non-linearly with chain length outside first-party models. |
 | **Client-facing output** | ❌ Keep first-party | Anything the client reads directly. Tone, accuracy, and hallucination risk matter. |
 | **Standing-order Red-tier dispatch** | ❌ Keep first-party | Red actions (send email, merge contact, bulk delete) require human-level reasoning about intent and consequences. Never delegate to OSS. |
 | **Email enrichment / recommendation** | ❌ Keep first-party | Standing orders evaluate nuanced context. Mis-classification has real-world impact. |
-| **Cross-repo security review** | ❌ Keep first-party | Needs full first-party capability. Gap too large for security review work. |
+| **Cross-repo security review** | Owner-qualified governed review | Preserve entity/data boundaries and complete current-revision evidence. A proxy result must not claim first-party provenance; missing coverage remains a hold. |
 
 ---
 
@@ -48,7 +48,7 @@
 Does your policy permit OSS models?
   NO  → Use first-party models only. Stop.
   YES → Is the task class in the "Keep first-party" list above?
-          YES → Use first-party (Anthropic/OpenAI). Stop.
+          YES → Use the owner-qualified review/model route. Stop.
           NO  → Is the model US-origin?
                   YES → Permitted. Route to OSS model.
                   NO  → Use first-party. Stop.

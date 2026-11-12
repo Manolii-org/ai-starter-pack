@@ -5,8 +5,10 @@ keep their existing lane. No proxy advisor excerpt counts as either review.
 """
 
 import hashlib
+import importlib.util
 import json
 import os
+from pathlib import Path
 import re
 import urllib.error
 import urllib.parse
@@ -30,8 +32,8 @@ def digest(text):
 
 
 def enabled():
-    mode = os.environ.get("SECURITY_REVIEW_MODE", "direct")
-    if mode not in {"direct", "estate-ci-v1"}:
+    mode = os.environ.get("SECURITY_REVIEW_MODE", "governed")
+    if mode not in {"governed", "direct", "estate-ci-v1"}:
         raise ValueError("unsupported security review mode")
     return mode == "estate-ci-v1" and not os.environ.get("CLIENT_AI_POLICY")
 
@@ -58,6 +60,16 @@ def _request(base, key, path, payload=None):
     raw = None if payload is None else json.dumps(payload).encode("utf-8")
     if raw is not None and len(raw) > MAX_BYTES:
         raise ValueError("complete security review exceeds transport limit")
+    if raw is not None:
+        # The optional estate producer uses the same exact-wire privacy screen
+        # as ordinary reviewers; qualifying two lanes never waives disclosure.
+        helper = Path(__file__).with_name("agent_capabilities.py")
+        spec = importlib.util.spec_from_file_location("_protected_wire_policy", helper)
+        if spec is None or spec.loader is None:
+            raise ValueError("review privacy runtime unavailable")
+        policy = importlib.util.module_from_spec(spec)
+        exec(compile(helper.read_bytes(), str(helper), "exec"), policy.__dict__)
+        policy.admit_review_wire(raw)
     req = urllib.request.Request(
         base.rstrip("/") + path,
         data=raw,
