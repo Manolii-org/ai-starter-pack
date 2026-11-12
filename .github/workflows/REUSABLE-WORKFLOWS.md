@@ -317,10 +317,10 @@ So adopting the pipeline in a repo that has no `.claude/` tree at all is a
 conditional on the probe, an unreachable or mistyped `pack_ref` cannot break a
 repo that needs no hydration.
 
-`pack_ref` defaults to the moving `v1` alias, which loads the pack's prompts
-and scripts from wherever `v1` points today — with your secrets — even when the
-`uses:` line is SHA-pinned. **Pass the same commit SHA as your `uses:` pin** so
-prompts and workflow are immutable and move together:
+`pack_ref` retains its legacy `v1` default for old readers. Release publication
+leaves that existing alias unchanged; it no longer upgrades callers implicitly.
+**Pass the same full commit SHA as your `uses:` pin** so prompts and workflow
+are immutable and advance together through the consumer's owning gates:
 
 ```yaml
     with:
@@ -350,11 +350,14 @@ Auto-bump reusable-workflow pins via this custom manager:
 }
 ```
 
-Tag strategy: immutable vX.Y.Z plus a moving alias within the matching major.
-`release-tag.yml` derives that alias from the released tag: a v2 release moves
-only `v2`; it must leave `v1` and all immutable tags unchanged. Production
-consumers adopt an exact version or commit in their own PRs. A floating alias
-does not establish independent consumer qualification.
+Tag strategy: new immutable annotated `vX.Y.Z` tags and retained existing
+aliases. `release-tag.yml` never creates, patches or force-moves `v1`, `v2` or
+any other major alias, and never overwrites an existing release tag. An alias
+write could activate code in consumers that have not qualified that source.
+Consumer automation prepares a grouped PR using matching full commit SHA pins
+for executable `uses:` and `pack_ref` inputs. Existing aliases and version-tag
+readers remain supported without changing the release dispatch interface or
+adding a routine operator action. Publication is not consumer qualification.
 
 The v2 line changes the Playwright and secret-scan Node defaults from 22 to 24;
 `ci-reusable` already used 24. All three retain explicit `node_version` overrides.

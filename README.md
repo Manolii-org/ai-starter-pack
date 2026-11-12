@@ -2,7 +2,7 @@
 
 Canonical home for the AI Starter Pack: a [Copier](https://copier.readthedocs.io) template, Claude Code plugin marketplace, and reusable CI workflows for production-grade AI-assisted development.
 
-- **Render / update an instance:** `copier copy gh:manolii-org/ai-starter-pack <dest>` then `copier update`.
+- **Render / update an instance:** `copier copy --vcs-ref=<release-commit-sha> gh:manolii-org/ai-starter-pack <dest>` then `copier update`.
 - **Full pack docs:** [README-STARTER-PACK.md](./README-STARTER-PACK.md)
 - **License:** [Apache-2.0](./LICENSE) — free to deploy into your own and client environments.
 - **Native Muse subscription tasks:** [isolated executor and read-only smoke check](docs/muse-subscription.md), using only the consumer's own CLI credential.
@@ -14,17 +14,18 @@ Go-forward release: **`v1.25.1`** (annotated tag on `main`).
 
 ```yaml
 # Reusable workflows
-uses: Manolii-org/ai-starter-pack/.github/workflows/ci-reusable.yml@v1.25.1
+uses: Manolii-org/ai-starter-pack/.github/workflows/ci-reusable.yml@321810f558463b2363d3372d669efcd3ea8283ec # v1.25.1
 # Plugin
 # /plugin install manolii-framework@v1.25.1
 ```
 
-Prefer pinning the release commit SHA with a `# v1.25.1` comment
-(`uses: …/ci-reusable.yml@<commit-sha> # v1.25.1`); the Renovate preset's
-`manolii-ai-starter-pack` group proposes every pack bump as one reviewed PR.
-That PR updates `uses:` pins but not `pack_ref` inputs: where a caller passes
-`pack_ref` (for example `backup-kernel-validate-reusable`), change it to the
-same release in that PR, or the workflow keeps loading the previous one.
+Pin executable workflows and their `pack_ref` inputs to the same full
+40-character release commit SHA, with a `# v1.25.1` comment. Version tags are
+immutable release discovery and compatibility identities; they do not replace
+an exact executable source pin. The Renovate preset's `manolii-ai-starter-pack`
+group prepares updates to workflow SHA pins and version-commented `pack_ref`
+inputs together in one PR through the consumer's owning gates. Publication
+alone does not qualify or activate any consumer.
 
 Renovate preset: `extends: ["github>Manolii-org/ai-starter-pack"]` (optionally pin `#v1.25.1`).
 
@@ -32,10 +33,16 @@ Legacy `manolii-org/master@v1` still serves `routing-lint` / `shared-config` unt
 
 ### Tag namespaces
 
-- **Pack releases** are bare `vX.Y.Z` annotated tags, cut only through
-  `.github/workflows/release-tag.yml` (workflow dispatch); that workflow also
-  moves the floating `v1` alias. Never hand-create or move a release tag —
-  consumers pin them, including by mutable tag checkout.
+- **Pack releases** are bare `vX.Y.Z` annotated tags, cut through the existing
+  automatic `.github/workflows/release-tag.yml` dispatch. It creates a new
+  immutable tag and never overwrites a tag or creates/moves a major alias.
+  Its optional source input still resolves `main` once for legacy callers;
+  normal release preparation supplies the exact reviewed commit SHA.
+- **Retained aliases**, including `v1`, keep their existing values for old
+  readers. Moving an alias could activate code in an unqualified consumer,
+  so immutable publication no longer performs that unrelated write. Existing
+  callers remain compatible while owner automation prepares exact SHA-pinned
+  adoption through normal gates; there is no new routine alias task.
 - **Component releases** use prefixed tags: `email-capture-vX.Y.Z` for the
   email-capture CLI and `feature-controls-vX.Y.Z` for the feature-control SDK
   (cut through the same workflow; they never move `v1`). Copier, Renovate and

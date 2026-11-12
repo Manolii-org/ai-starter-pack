@@ -166,12 +166,13 @@ def test_pack_checkout_is_conditional() -> None:
 def test_pack_ref_input_exists_and_defaults_to_major_alias() -> None:
     inputs = _workflow()[True]["workflow_call"]["inputs"]
     assert "pack_ref" in inputs
-    # The moving major alias is only safe because release-tag.yml moves it.
+    # Preserve the existing reader default; release publication no longer
+    # changes it. New/adopted callers supply the same full SHA as their uses pin.
     assert inputs["pack_ref"]["default"] == "v1"
-    release = (REPO_ROOT / ".github/workflows/release-tag.yml").read_text()
-    assert "Move major-version alias" in release, (
-        "pack_ref defaults to the v1 alias, so release-tag.yml must move it"
-    )
+    release = yaml.safe_load((REPO_ROOT / ".github/workflows/release-tag.yml").read_text())
+    assert [step["name"] for step in release["jobs"]["tag"]["steps"]] == [
+        "Validate tag format", "Create tag ref"
+    ]
 
 
 def test_scratch_checkout_is_cleaned_up() -> None:
