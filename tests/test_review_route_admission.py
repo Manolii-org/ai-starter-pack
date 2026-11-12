@@ -635,7 +635,8 @@ def test_admitted_readonly_reviewer_runs_on_proxy_without_direct_key(external, m
     assert denied_marker['skipped'] == 'route_policy_denied'
 
 
-def test_estate_readonly_reviewer_stays_on_proxy_when_direct_key_exists(external, monkeypatch):
+@pytest.mark.parametrize('shipped_role', [False, True])
+def test_estate_readonly_reviewer_stays_on_proxy_when_direct_key_exists(external, monkeypatch, shipped_role):
     """A direct key must not pull an estate reviewer onto api.anthropic.com."""
     root, _manifest, commit = external
     commit({
@@ -683,8 +684,11 @@ def test_estate_readonly_reviewer_stays_on_proxy_when_direct_key_exists(external
         return json.dumps({'content': [{'type': 'text', 'text':
             '{"source":"security-deep-dive","findings":[]}'}]}).encode()
     _Response.read = _read
-    config = broad.AgentConfig(
-        'security-deep-dive', 'sonnet', 'internal', 'sys', 'instructions', first_party=True)
+    config = (broad.parse_agent_file(ROOT / '.claude/agents/security-deep-dive.md')
+              if shipped_role else broad.AgentConfig(
+                  'security-deep-dive', 'sonnet', 'internal', 'sys', 'instructions', first_party=True))
+    monkeypatch.setattr(broad, 'require_direct_llm_admission',
+                        lambda **_: pytest.fail('read-only proxy grant must not request direct credits'))
     result = broad.invoke_agent(config, '', 'diff line\n')
     assert seen == ['proxy.example']
     assert result.get('skipped') is None

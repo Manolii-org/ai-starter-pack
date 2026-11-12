@@ -980,7 +980,7 @@ def invoke_agent(
     # Estate read-only reviewers stay on the CI proxy even when a direct key
     # is present. Decide that before admission and before the key read.
     readonly_proxy = bool(
-        agent_config.first_party
+        (agent_config.first_party or agent_config.required_security_review)
         and proxy
         and not os.environ.get("CLIENT_AI_POLICY")
         and _policy_module.readonly_proxy_fallback(agent_config.name)
