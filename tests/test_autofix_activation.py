@@ -26,7 +26,7 @@ def test_activation_output_is_declared() -> None:
 
 
 def test_activation_covers_the_agent_step_and_every_skip_gate() -> None:
-    job = _spec()["jobs"]["autofix"]
+    job = yaml.safe_load((ROOT / '.github/workflows/pr-autofix-execution-reusable.yml').read_text())['jobs']['reusable_editor']
     expr = job["outputs"]["activation"]
     steps = job["steps"]
     verify = next(s for s in steps if s.get("id") == "verify_exec")

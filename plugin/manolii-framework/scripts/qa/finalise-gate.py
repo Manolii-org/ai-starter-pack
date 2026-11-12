@@ -58,6 +58,9 @@ TAIL_LINE_CHARS = 240
 PR_TOOL = re.compile(r"^mcp__.+__create_pull_request$")
 BYPASS_ENV = "AGENT_FINALISE_GATE"
 SOURCE_SCOPE_POLICY = ".ai/source-scope-policy.json"
+# Capture the host primitive capability, independently of call observation.
+_HOOK_DIRFD_AVAILABLE = (hasattr(os, "O_NOFOLLOW") and hasattr(os, "O_DIRECTORY")
+                         and all(function in os.supports_dir_fd for function in (os.open, os.stat, os.mkdir)))
 
 
 class SourceScopeHeld(ValueError):
@@ -75,18 +78,50 @@ def _source_scope_exists(path: Path) -> bool:
         raise ValueError("source-scope metadata unavailable") from None
 
 
+def _source_scope_resolved_path(path: Path) -> Path:
+    """Resolve raw components; a symlink cycle before .. is still a cycle."""
+    try:
+        return path.resolve(strict=True)
+    except FileNotFoundError:
+        # Keep absent/dangling observations. The original path is used for
+        # payload I/O, so a missing intermediate component cannot open data.
+        return path.resolve()
+
+
 def _source_scope_roots(root: Path) -> tuple[list[Path], bool]:
-    """Inspect enclosing declarations before a nested repository can hide them."""
-    roots = []
-    path = Path(os.path.abspath(root))
-    for parent in (path, *path.parents):
-        if _source_scope_exists(parent / SOURCE_SCOPE_POLICY):
-            return [], True
-        if _source_scope_exists(parent / ".git"):
-            roots.append(parent)
-    # A committed enclosing declaration must hold before a nested repository's
-    # control metadata (itself potentially protected by that owner) is read.
-    return list(reversed(roots)), False
+    """Retain lexical declarations; qualify physical controls outer-owner first."""
+    lexical = Path(os.path.abspath(root))
+    routes = []
+    # Resolving directory names must not erase an enclosing lexical policy.
+    # Conversely, an alias must not hide the actual owner's enclosing policy.
+    # Resolve the raw request: normpath first changes symlink/.. semantics.
+    for path in dict.fromkeys((lexical, _source_scope_resolved_path(root))):
+        roots = []
+        for parent in (path, *path.parents):
+            if _source_scope_exists(parent / SOURCE_SCOPE_POLICY):
+                return [], True
+            if _source_scope_exists(parent / ".git"):
+                roots.append(parent.resolve())
+        routes.append(list(dict.fromkeys(reversed(roots))))
+    owners = dict.fromkeys(owner for route in routes for owner in route)
+    if len(owners) > 256:
+        raise ValueError("source-scope ownership ancestry bound exceeded")
+    before: dict[Path, set[Path]] = {owner: set() for owner in owners}
+    for route in routes:
+        for outer, inner in zip(route, route[1:]):
+            before[inner].add(outer)
+    ordered = []
+    while before:
+        available = next((owner for owner, required in before.items() if not required), None)
+        if available is None:
+            raise ValueError("source-scope ownership ancestry is ambiguous")
+        ordered.append(available)
+        del before[available]
+        for required in before.values():
+            required.discard(available)
+    # Any committed enclosing declaration holds before inner control bytes.
+    # The .git marker itself is deliberately not resolved; aliases still hold.
+    return ordered, False
 
 
 def _source_scope_control_metadata(path: Path, *, optional: bool = False):
@@ -191,6 +226,15 @@ def _source_scope_head_chain(gitdir: Path, common: Path) -> None:
     raise ValueError("symbolic HEAD route bound exceeded")
 
 
+def _source_scope_pointer_path(parent: Path, target: str) -> Path:
+    """Reject raw control aliases before normalization can erase their route."""
+    requested = parent / target
+    for path in (requested, *requested.parents):
+        if path.is_symlink():
+            raise ValueError("unqualified Git metadata alias")
+    return requested.resolve(strict=True)
+
+
 def _source_scope_git_controls(root: Path) -> None:
     """Reject config indirections BEFORE native Git can interpret their targets.
 
@@ -206,7 +250,7 @@ def _source_scope_git_controls(root: Path) -> None:
         if raw is None or not raw.startswith(b"gitdir: ") or len(raw.splitlines()) != 1:
             raise ValueError("unqualified Git directory pointer")
         target = raw.decode("utf-8").strip()[8:]
-        gitdir = Path(os.path.abspath(root / target))
+        gitdir = _source_scope_pointer_path(root, target)
         # Qualify the standard control namespace before opening anything at the
         # pointer target. Arbitrary directories are not metadata read grants.
         if gitdir.parent.name != "worktrees" or not gitdir.parent.parent.name.endswith(".git"):
@@ -214,13 +258,13 @@ def _source_scope_git_controls(root: Path) -> None:
         common_raw = _source_scope_control_bytes(gitdir / "commondir")
         if common_raw is None or len(common_raw.splitlines()) != 1:
             raise ValueError("unqualified linked-worktree metadata")
-        common = Path(os.path.abspath(gitdir / common_raw.decode("utf-8").strip()))
+        common = _source_scope_pointer_path(gitdir, common_raw.decode("utf-8").strip())
         # Only the standard linked-worktree topology is qualified here. An
         # arbitrary Git pointer must not expand this metadata read boundary.
         if gitdir.parent.name != "worktrees" or gitdir.parent.parent != common:
             raise ValueError("unqualified linked-worktree topology")
         backpointer = _source_scope_control_bytes(gitdir / "gitdir")
-        if backpointer is None or Path(os.path.abspath(backpointer.decode("utf-8").strip())) != marker:
+        if backpointer is None or _source_scope_pointer_path(gitdir, backpointer.decode("utf-8").strip()) != marker:
             raise ValueError("linked-worktree ownership differs")
     for path in (common / "config", gitdir / "config.worktree"):
         raw = _source_scope_control_bytes(path, optional=True)
@@ -246,29 +290,56 @@ def _source_scope_git_controls(root: Path) -> None:
         _source_scope_alias_metadata(private_refs)
 
 
+def _source_scope_tree_declared(owner: Path, environment: dict, timeout: int) -> bool:
+    """Use fixed metadata probes; distinguish a verified unborn branch from failure."""
+    def metadata(*arguments):
+        return subprocess.run(["git", "--no-replace-objects", "-c", "protocol.allow=never", *arguments],
+                              cwd=owner, env=environment, capture_output=True, timeout=timeout, check=False)
+    result = metadata("ls-tree", "-z", "HEAD", "--", SOURCE_SCOPE_POLICY)
+    if result.stdout:
+        return True
+    if result.returncode == 0:
+        return False
+    head = metadata("rev-parse", "--verify", "--quiet", "HEAD")
+    symbolic = metadata("symbolic-ref", "--quiet", "HEAD")
+    ref = symbolic.stdout.decode("utf-8").strip()
+    unborn = (head.returncode != 0 and symbolic.returncode == 0
+              and ref.startswith("refs/heads/") and "\0" not in ref and "\n" not in ref
+              and metadata("check-ref-format", ref).returncode == 0
+              and metadata("show-ref", "--verify", "--quiet", ref).returncode == 1)
+    if not unborn:
+        raise ValueError("source-scope metadata unavailable")
+    return False
+
+
+def _source_scope_git_environment() -> dict:
+    """Forward only runtime context to non-authorizing local Git metadata probes."""
+    names = {"PATH", "HOME", "USER", "LOGNAME", "LANG", "LANGUAGE", "LC_ALL", "LC_CTYPE", "TZ",
+             "TMPDIR", "TMP", "TEMP", "SystemRoot", "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT"}
+    environment = {key: value for key, value in os.environ.items() if key in names}
+    environment.update({"GIT_NO_LAZY_FETCH": "1", "GIT_ALLOW_PROTOCOL": "", "GIT_TERMINAL_PROMPT": "0",
+                        "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
+                        "GIT_GRAFT_FILE": os.devnull})
+    return environment
+
+
 def source_scope_declared(root: Path) -> bool:
     """A declared or unproven boundary holds before Git/config/log/hook reads."""
     if "AGENT_SOURCE_SCOPE_SHA256" in os.environ or "AGENT_SOURCE_SCOPE_REPOSITORY" in os.environ:
         return True
     try:
         roots, declared = _source_scope_roots(root)
-    except (OSError, ValueError):
+    except (OSError, ValueError, TypeError, RuntimeError):
         return True
     if declared:
         return True
-    environment = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
-    environment.update({"GIT_NO_LAZY_FETCH": "1", "GIT_ALLOW_PROTOCOL": "",
-                        "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
-                        "GIT_GRAFT_FILE": os.devnull})
+    environment = _source_scope_git_environment()
     for owner in roots:
         try:
             _source_scope_git_controls(owner)
-            result = subprocess.run(["git", "--no-replace-objects", "-c", "protocol.allow=never",
-                                     "ls-tree", "-z", "HEAD", "--", SOURCE_SCOPE_POLICY],
-                                    cwd=owner, env=environment, capture_output=True, timeout=30, check=False)
-        except (OSError, ValueError, TypeError, subprocess.SubprocessError, UnicodeError):
-            return True
-        if result.returncode or result.stdout:
+            if _source_scope_tree_declared(owner, environment, 30):
+                return True
+        except (OSError, ValueError, TypeError, RuntimeError, subprocess.SubprocessError):
             return True
     return False
 
@@ -496,8 +567,9 @@ def classify_command(command: str) -> dict:
 def git_toplevel(start: Path) -> Path | None:
     require_source_scope(start)
     try:
-        proc = subprocess.run(["git", "rev-parse", "--show-toplevel"], cwd=start,
-                              capture_output=True, text=True, timeout=10)
+        proc = subprocess.run(["git", "--no-replace-objects", "-c", "protocol.allow=never",
+                               "rev-parse", "--show-toplevel"], cwd=start,
+                              env=_source_scope_git_environment(), capture_output=True, text=True, timeout=10)
     except (OSError, subprocess.TimeoutExpired):
         return None
     return Path(proc.stdout.strip()) if proc.returncode == 0 and proc.stdout.strip() else None
@@ -732,10 +804,6 @@ def hook_target(adapter: str, payload: dict) -> tuple[str | None, list[str | Non
         command = str(payload.get("command") or "")
         roots = [r for r in payload.get("workspace_roots") or [] if isinstance(r, str) and r]
         start = payload.get("cwd") or None
-        # Cursor may report cwd as "" or "/"; fall back to the first workspace
-        # root that is a repository rather than silently allowing the push.
-        if roots and (not start or git_toplevel(Path(start)) is None):
-            start = next((r for r in roots if git_toplevel(Path(r))), roots[0])
     else:
         tool = str(payload.get("tool_name") or "")
         tool_input = payload.get("tool_input") or {}
@@ -746,6 +814,13 @@ def hook_target(adapter: str, payload: dict) -> tuple[str | None, list[str | Non
             return None, [start], False, ""
         command = str(tool_input.get("command") or "") if isinstance(tool_input, dict) else ""
     info = classify_command(command)
+    # Ordinary shell commands have no hand-off authority to qualify. Classify
+    # them before root discovery so a scope hold cannot deny ls/pytest/status.
+    if adapter == "cursor" and info["trigger"] is not None:
+        # Cursor may report cwd as "" or "/"; preserve the workspace fallback
+        # for actual pushes/PR creation, including inline bypass attempts.
+        if roots and (not start or git_toplevel(Path(start)) is None):
+            start = next((r for r in roots if git_toplevel(Path(r))), roots[0])
     base = start or os.getcwd()
     starts = [os.path.join(base, d) if d else base for d in info["repo_dirs"]] or [base]
     return info["trigger"], starts, info["bypass"], command
@@ -887,30 +962,248 @@ exec python3 "$GATE" --hook git-pre-push "$@"
 """
 
 
+def _native_hook_overrides_unknown() -> bool:
+    """Higher-precedence ambient config is not an admitted hook-routing input."""
+    return (os.environ.get("GIT_CONFIG_COUNT", "0") != "0"
+            or bool(os.environ.get("GIT_CONFIG_PARAMETERS"))
+            or "GIT_CONFIG" in os.environ)
+
+
+def _native_hook_nonlocal_config_absent(root: Path) -> bool:
+    """Prove absence from path metadata only; never open external config bytes.
+
+    Git's compiled system path is not a portable admitted input. An enabled
+    implicit system route is unknown, rather than guessed to be /etc/gitconfig.
+    No new environment override is applied to the user's native Git process.
+    """
+    def absent(path: str | Path) -> bool:
+        if str(path) == os.devnull:
+            return True
+        try:
+            (root / path).lstat()
+        except FileNotFoundError:
+            return True
+        except (OSError, ValueError, TypeError):
+            return False
+        return False
+
+    no_system = os.environ.get("GIT_CONFIG_NOSYSTEM", "").lower()
+    if no_system not in ("1", "true", "yes", "on"):
+        if no_system not in ("", "0", "false", "no", "off"):
+            return False
+        system = os.environ.get("GIT_CONFIG_SYSTEM")
+        if system is None or not absent(system):
+            return False
+    if "GIT_CONFIG_GLOBAL" in os.environ:
+        return absent(os.environ["GIT_CONFIG_GLOBAL"])
+    home = os.environ.get("HOME")
+    if not home:
+        return False
+    xdg = os.environ.get("XDG_CONFIG_HOME") or str(Path(home) / ".config")
+    return absent(Path(home) / ".gitconfig") and absent(Path(xdg) / "git/config")
+
+
+def _native_hook_routing_hold() -> int:
+    print("finalise-gate: native hook routing is unqualified; no hook installed or changed", file=sys.stderr)
+    return UNAVAILABLE_EXIT
+
+
+def _hook_target_hold(*, refresh: bool = False) -> int:
+    reason = ("marked-hook refresh requires a qualified replacement" if refresh
+              else "hook target is unqualified")
+    print(f"finalise-gate: {reason}; installation not confirmed", file=sys.stderr)
+    return UNAVAILABLE_EXIT
+
+
+def _hook_file_identity(details) -> tuple:
+    return (details.st_dev, details.st_ino, details.st_mode, details.st_nlink,
+            details.st_size, details.st_mtime_ns, details.st_ctime_ns)
+
+
+def _hook_directory_identity(details) -> tuple:
+    return (details.st_dev, details.st_ino, details.st_mode, details.st_uid, details.st_gid)
+
+
+def _hook_directory(target: Path, descriptors: list[int]) -> tuple:
+    """Open every physical parent component without following aliases."""
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    parent = os.open(target.anchor, flags)
+    descriptors.append(parent)
+    chain = []
+    parts = target.parent.parts[1:]
+    for index, name in enumerate(parts):
+        try:
+            before = os.stat(name, dir_fd=parent, follow_symlinks=False)
+        except FileNotFoundError:
+            if index != len(parts) - 1:
+                raise ValueError("unqualified hook parent") from None
+            os.mkdir(name, 0o755, dir_fd=parent)
+            before = os.stat(name, dir_fd=parent, follow_symlinks=False)
+        if not stat.S_ISDIR(before.st_mode):
+            raise ValueError("unqualified hook parent")
+        child = os.open(name, flags, dir_fd=parent)
+        descriptors.append(child)
+        identity = _hook_directory_identity(os.fstat(child))
+        if identity != _hook_directory_identity(before):
+            raise ValueError("hook parent changed")
+        chain.append((parent, name, child, identity))
+        parent = child
+    return parent, chain
+
+
+def _hook_directory_unchanged(chain: list) -> None:
+    for parent, name, child, identity in chain:
+        if (_hook_directory_identity(os.fstat(child)) != identity
+                or _hook_directory_identity(os.stat(name, dir_fd=parent, follow_symlinks=False)) != identity):
+            raise ValueError("hook parent changed")
+
+
+def _hook_leaf(parent: int, name: str):
+    try:
+        details = os.stat(name, dir_fd=parent, follow_symlinks=False)
+    except FileNotFoundError:
+        return None
+    if not stat.S_ISREG(details.st_mode) or details.st_nlink != 1 or details.st_size > 65536:
+        raise ValueError("unqualified hook leaf")
+    return details
+
+
+def _install_hook_target(target: Path, body: bytes) -> int:
+    """Never replace an existing namespace or truncate an installed control."""
+    if not _HOOK_DIRFD_AVAILABLE:
+        return _hook_target_hold()
+    descriptors: list[int] = []
+    created = None
+    parent = None
+    try:
+        # Both pathname ownership routes hold before any existing hook bytes.
+        require_source_scope(target.parent)
+        selected = _source_scope_resolved_path(target)
+        require_source_scope(selected.parent)
+        if selected.is_dir():
+            require_source_scope(selected)
+        _source_scope_control_metadata(target, optional=True)
+        parent, chain = _hook_directory(selected, descriptors)
+        require_source_scope(selected.parent)
+        _hook_directory_unchanged(chain)
+        before = _hook_leaf(parent, selected.name)
+        if before is not None:
+            descriptor = os.open(selected.name, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0), dir_fd=parent)
+            descriptors.append(descriptor)
+            if _hook_file_identity(os.fstat(descriptor)) != _hook_file_identity(before):
+                raise ValueError("hook leaf changed")
+            raw = os.read(descriptor, 65537)
+            after = os.fstat(descriptor)
+            current = _hook_leaf(parent, selected.name)
+            _hook_directory_unchanged(chain)
+            if (len(raw) != before.st_size or len(raw) > 65536 or current is None
+                    or _hook_file_identity(after) != _hook_file_identity(before)
+                    or _hook_file_identity(current) != _hook_file_identity(before)):
+                raise ValueError("hook leaf changed")
+            if SHIM_MARKER.encode() not in raw:
+                print("finalise-gate: existing hook is managed elsewhere; leaving it unchanged")
+                return 0
+            if raw != body or stat.S_IMODE(before.st_mode) != 0o755:
+                return _hook_target_hold(refresh=True)
+            print("finalise-gate: marked shim already matches; leaving it unchanged")
+            return 0
+        # An exclusive new leaf remains non-executable until its complete
+        # body and the admitted name/ancestry have been checked. No existing
+        # namespace is ever replaced, truncated or removed during recovery.
+        created = os.open(selected.name, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=parent)
+        descriptors.append(created)
+        offset = 0
+        while offset < len(body):
+            written = os.write(created, body[offset:])
+            if written <= 0:
+                raise OSError("hook write incomplete")
+            offset += written
+        os.fsync(created)
+        require_source_scope(selected.parent)
+        _hook_directory_unchanged(chain)
+        staged = _hook_leaf(parent, selected.name)
+        opened = os.fstat(created)
+        os.lseek(created, 0, os.SEEK_SET)
+        complete = os.read(created, len(body) + 1)
+        if (complete != body or staged is None or _hook_file_identity(staged) != _hook_file_identity(opened)
+                or _hook_file_identity(os.fstat(created)) != _hook_file_identity(opened)
+                or stat.S_IMODE(opened.st_mode) != 0o600 or opened.st_size != len(body)):
+            raise ValueError("hook publication changed")
+        require_source_scope(selected.parent)
+        _hook_directory_unchanged(chain)
+        current = _hook_leaf(parent, selected.name)
+        if current is None or _hook_file_identity(current) != _hook_file_identity(opened):
+            raise ValueError("hook publication changed")
+        os.fchmod(created, 0o755)
+        require_source_scope(selected.parent)
+        _hook_directory_unchanged(chain)
+        installed = _hook_leaf(parent, selected.name)
+        activated = os.fstat(created)
+        # chmod legitimately changes mode/ctime. It cannot qualify a different
+        # inode, link count, size, mtime or body than the prepared bytes.
+        if (installed is None or _hook_file_identity(installed) != _hook_file_identity(activated)
+                or stat.S_IMODE(activated.st_mode) != 0o755
+                or (activated.st_dev, activated.st_ino, activated.st_nlink, activated.st_size, activated.st_mtime_ns)
+                != (opened.st_dev, opened.st_ino, opened.st_nlink, opened.st_size, opened.st_mtime_ns)):
+            raise ValueError("hook publication changed")
+        os.lseek(created, 0, os.SEEK_SET)
+        confirmed = os.read(created, len(body) + 1)
+        require_source_scope(selected.parent)
+        _hook_directory_unchanged(chain)
+        current = _hook_leaf(parent, selected.name)
+        if (confirmed != body or current is None
+                or _hook_file_identity(os.fstat(created)) != _hook_file_identity(activated)
+                or _hook_file_identity(current) != _hook_file_identity(activated)):
+            raise ValueError("hook publication changed")
+        return 0
+    except SourceScopeHeld:
+        raise
+    except (OSError, ValueError, RuntimeError, TypeError):
+        return _hook_target_hold()
+    finally:
+        active_exception = sys.exc_info()[0]
+        close_error = None
+        for descriptor in reversed(descriptors):
+            try:
+                os.close(descriptor)
+            except OSError as error:
+                close_error = error
+        if close_error is not None and active_exception is None:
+            raise close_error
+
+
 def install_git_hook(root: Path) -> int:
-    """Install a marked pre-push shim without displacing any hook manager."""
+    """Install a qualified new shim; retain existing managers and controls."""
     require_source_scope(root)
-    configured = subprocess.run(["git", "config", "--get", "core.hooksPath"], cwd=root,
-                                capture_output=True, text=True).stdout.strip()
-    if configured:
-        print(f"finalise-gate: core.hooksPath={configured} is managed elsewhere; "
-              "call `scripts/qa/finalise-gate.py --hook git-pre-push` from that manager's pre-push")
-        return 0
-    hooks_dir = subprocess.run(["git", "rev-parse", "--git-path", "hooks"], cwd=root,
-                               capture_output=True, text=True).stdout.strip()
-    if not hooks_dir:
-        print("finalise-gate: not a git repository", file=sys.stderr)
-        return 1
-    target = (root / hooks_dir) / "pre-push"
-    if target.exists() and SHIM_MARKER not in target.read_text(encoding="utf-8", errors="replace"):
-        print(f"finalise-gate: {target} exists and is not managed by this gate; leaving it unchanged")
-        return 0
-    target.parent.mkdir(parents=True, exist_ok=True)
-    fallback = shlex.quote(str(Path(__file__).resolve()))
-    target.write_text(SHIM.format(marker=SHIM_MARKER, fallback=fallback), encoding="utf-8")
-    target.chmod(0o755)
-    print(f"finalise-gate: installed {target}")
-    return 0
+    if _native_hook_overrides_unknown():
+        return _native_hook_routing_hold()
+    environment = _source_scope_git_environment()
+    try:
+        configuration = subprocess.run(["git", "--no-replace-objects", "-c", "protocol.allow=never",
+                                        "config", "--get", "core.hooksPath"], cwd=root,
+                                       env=environment, capture_output=True, text=True, timeout=10)
+        if configuration.returncode not in (0, 1):
+            return _native_hook_routing_hold()
+        if configuration.returncode == 0:
+            print("finalise-gate: local core.hooksPath is managed elsewhere; "
+                  "call `scripts/qa/finalise-gate.py --hook git-pre-push` from that manager's pre-push")
+            return 0
+        if not _native_hook_nonlocal_config_absent(root):
+            return _native_hook_routing_hold()
+        location = subprocess.run(["git", "--no-replace-objects", "-c", "protocol.allow=never",
+                                   "rev-parse", "--git-path", "hooks"], cwd=root,
+                                  env=environment, capture_output=True, text=True, timeout=10)
+        hooks_dir = location.stdout.strip()
+        if location.returncode or not hooks_dir or "\0" in hooks_dir or "\n" in hooks_dir:
+            return _hook_target_hold()
+        target = (_source_scope_resolved_path(root) / hooks_dir) / "pre-push"
+        fallback = shlex.quote(str(Path(__file__).resolve()))
+        body = SHIM.format(marker=SHIM_MARKER, fallback=fallback).encode("utf-8")
+        return _install_hook_target(target, body)
+    except SourceScopeHeld:
+        raise
+    except (OSError, ValueError, RuntimeError, TypeError, subprocess.SubprocessError):
+        return _hook_target_hold()
 
 
 def _main(argv: list[str] | None = None) -> int:

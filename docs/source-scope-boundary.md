@@ -20,13 +20,29 @@ files for payload reads. Current linked-worktree private refs and packed/shallow
 controls are included; symbolic HEAD chains stay inside the checked current ref
 namespaces. Graft aliases hold without content reads, and only the fixed metadata
 probe disables graft interpretation (it does not change normal owner Git flows).
+Read-only scope, root-discovery and hook-location queries receive only a fixed
+platform runtime/locale/temp environment plus explicit no-fetch/no-config/
+no-prompt Git controls. Credentials, askpass, tracing and inherited Git selectors
+are absent. The parent still applies independently supplied scope pins first;
+normal owner Git execution retains its existing environment contract. Repository
+hook-manager checks and unmarked hooks remain in place; a local shim file alone
+does not prove which hook route the user's native Git actually executes.
 Ordinary packed metadata uses the same fixed-argv commit/tree/policy-presence
 query, with no blob extraction, filters or fetch.
 A pack mapping alone proves neither an opaque payload scan nor payload isolation.
 Standard linked worktrees require verified control topology and a matching
 backpointer; other control indirections hold without reading their targets.
+Relative backpointers are interpreted from their Git control directory, with
+the same ownership comparison as absolute pointers. Lexical and physical
+enclosing declarations are both checked before inner Git controls. Ordinary
+symlinked directory prefixes do not make the physical owner's regular Git
+metadata an alias; a `.git` marker that is itself a link remains held.
 The tree probe uses a fixed path with lazy fetch and transport disabled. No protected blob or old receipt is inspected to explain a
 hold. Held exits are distinct from generic missing-tool infrastructure.
+Known unsupported topologies expose only a closed set of static diagnostic
+reasons. Arbitrary exception text, filenames and undecodable control bytes are
+never included in a hold. A verified unborn branch has the same undeclared
+scope result in the runner and finalise gate; damaged or unknown HEAD does not.
 
 `validate_source_scope_policy` validates already supplied compiled policy bytes
 against an independent SHA and owner. The policy schema has strict fields and
@@ -41,7 +57,16 @@ query/config/hook reads, installation, logs or starting the runner; the installe
 pre-push launcher also discovers its root from directory metadata without native
 Git. Inaccessible declaration metadata is held as unknown rather than absent; warn/off and inline bypass cannot grant data-read or hand-off
 authority. A late held exit is also handled before stale receipts. The installer
-refuses before reading owner prose, layout or recipe files. v1 defaults and receipt
+refuses before reading owner prose, layout or recipe files. External recipe
+inputs are checked at both their lexical and resolved owning locations before
+any plan snapshot or payload read, including legacy linked recipes. Low-level
+file readers likewise check a followed leaf's owner and a directory input's own
+boundary; dotenv traversal checks a nested directory before enumerating it.
+Ordinary unscoped linked and absent inputs keep their existing observations;
+cycles and inaccessible ownership metadata hold without exposing private paths.
+The Cursor hook classifies commands before repository/scope probes: ordinary
+`ls`, `pytest` and `git status` have no hand-off authority to qualify. Actual
+push/PR hand-offs still hold before warn/off or inline bypass can apply. v1 defaults and receipt
 schemas are preserved for repositories with no declaration; an old unguarded
 binary or external preflight wrapper is **not** made safe by this source alone.
 Each owning caller must install and invoke the guard before its own broad reads.
@@ -97,3 +122,61 @@ tool fingerprint as well as Python: these real-Git checks and metadata semantics
 must bind the actual Git version in the receipt. The helper already supports that
 probe. This adds no tool version override, schema exception or unrelated owner
 profile change; a changed Git probe invalidates reusable evidence normally.
+
+Native hook installation additionally needs an admitted routing result. A local
+`core.hooksPath` retains its manager and is never replaced. Ambient injected
+configuration holds installation. With no local manager, only metadata-proven
+absent or explicitly disabled nonlocal config permits writing the default shim.
+Present or inaccessible HOME/XDG/explicit config and an unknown compiled system
+config route produce exit 3 and a static unqualified-routing diagnostic, without
+reading external config payloads or changing any hooks. A local empty hooksPath
+is still a configured route, not proof that the default shim will run. This
+intentional installation-only limitation replaces the unsafe inference that
+sanitized config absence proves native routing absence. It introduces no native
+Git environment changes, approval or feature-enable action; normal validation
+and ordinary commands are unaffected. A future qualified config-input adapter
+may preserve richer native routing, but no installation or owner-adoption proof
+is inferred while this specific route is unknown.
+
+Lexical ancestry and physical ownership use separate path observations. Physical
+resolution starts from the original requested path, including `..` following a
+symlink; normalizing that path first would select a different owner. Relative
+requests retain the same physical interpretation as native filesystem access.
+Both working and committed enclosing declarations hold before any payload read
+through that route. Ordinary unscoped dot/parent traversals retain their normal
+file observations; unknown or cyclic resolution remains held.
+
+Hook-route metadata uses the requested native Git working directory when a
+GLOBAL/SYSTEM/HOME/XDG config path is relative. The Python process working
+directory cannot prove that input absent. Before any existing hook payload is
+read, both target ownership routes and the physical directory ancestry are
+qualified. Directory descriptors and no-follow leaf opens reject aliases,
+hardlinks, special files and changed controls; existing unmarked hooks remain
+untouched. An exact marked shim with mode 0755 is retained without a write.
+A different marked body or mode holds with exit 3: this helper has no portable
+expected-old atomic replacement primitive and does not replace or truncate an
+installed control. This specific source cutover needs a qualified replacement
+adapter, not an operator enable or approval ritual.
+
+Fresh creation uses exclusive no-follow creation at the qualified directory
+descriptor. Its mode stays 0600 while complete bytes are written, fsynced and
+read back. Scope, inode, link count, entry and ancestry checks precede and follow
+activation to 0755. Unknown routing/target, I/O errors and observed races do not
+claim installation. Failed creation can leave an inactive partial file, or a
+complete file whose publication could not be confirmed; recovery does not unlink
+a public name that another writer may have replaced. These are repeated bounded
+observations, not filesystem expected-old CAS or a hostile-host security proof.
+Existing hooks are conserved through every failure path.
+
+The postactivation observation retains the prepared inode/link/size/mtime and
+expected full body. It separately binds chmod's new mode/ctime, reads back the
+body and rechecks the held descriptor and directory entry; two newly current
+identities alone cannot requalify changed executable bytes.
+
+The installer keeps source qualification separate from writer portability. Its
+legacy writer fallback is tested with an installer-only OS facade while the
+metadata reader retains the actual host primitives. A host missing the reader's
+no-follow or directory-descriptor APIs remains held before payload reads or
+owner enumeration; writer fallback does not qualify that host or withdraw scope.
+The full installer suite retains its baseline coverage and adds actual
+process-global missing-reader controls. No public receipt reader or CLI changes.

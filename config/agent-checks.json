@@ -276,7 +276,12 @@
         "scripts/tests/test_release_vector.py",
         "scripts/tests/fixtures/release-manifest.v2.json",
         "plugin/manolii-framework/schemas/release-manifest.v2.schema.json",
-        "registry/platform/framework/schemas/release-manifest.v2.schema.json"
+        "registry/platform/framework/schemas/release-manifest.v2.schema.json",
+        "schemas/release-source-policy.v1.schema.json",
+        "plugin/manolii-framework/schemas/release-source-policy.v1.schema.json",
+        "registry/platform/framework/schemas/release-source-policy.v1.schema.json",
+        "scripts/tests/test_release_source_policy.py",
+        "scripts/tests/fixtures/release-manifest.c435.py"
       ],
       "tools": [
         "uv"
@@ -300,7 +305,7 @@
         [
           ".ai/agent-checks/release-venv/bin/python",
           "-c",
-          "from pathlib import Path; import sys; names=['release-adoption.v1.schema.json','release-manifest.v1.schema.json','release-manifest.v2.schema.json']; targets=['plugin/manolii-framework/schemas','registry/platform/framework/schemas']; ok=all((Path('schemas')/n).read_bytes()==(Path(t)/n).read_bytes() for t in targets for n in names); sys.exit(0 if ok else 'generated release schemas differ; run owning plugin and registry builders')"
+          "from pathlib import Path; import sys; names=['release-adoption.v1.schema.json','release-manifest.v1.schema.json','release-manifest.v2.schema.json','release-source-policy.v1.schema.json']; targets=['plugin/manolii-framework/schemas','registry/platform/framework/schemas']; ok=all((Path('schemas')/n).read_bytes()==(Path(t)/n).read_bytes() for t in targets for n in names); sys.exit(0 if ok else 'generated release schemas differ; run owning plugin and registry builders')"
         ],
         [
           ".ai/agent-checks/release-venv/bin/python",
@@ -423,7 +428,7 @@
         ".github/workflows/e2e-playwright-reusable.yml",
         ".github/workflows/email-capture-live-conformance.yml",
         ".github/workflows/integration-admission-reusable.yml",
-        ".github/workflows/pr-autofix-loop*.yml",
+        ".github/workflows/pr-autofix*.yml",
         ".github/workflows/setup-env-secret.yml",
         ".github/workflows/static-review.yml",
         "tests/test_autofix_hardening.py",
@@ -438,7 +443,23 @@
         "tests/test_tier_reusables.py",
         "tests/test_coverage_ratchet_activation.py",
         "tests/test_guard_check.py",
-        "tests/test_litellm_product_asset.py"
+        "tests/test_litellm_product_asset.py",
+        "scripts/ci/autofix-*",
+        "scripts/sync-autofix-control.py",
+        "tests/test_autofix_custody.py",
+        "tests/test_autofix_reusable_yaml.py",
+        "tests/test_reusable_matrix.py",
+        "tests/test_routine_ci_repair_policy.py",
+        "scripts/gen-reusable-matrix.py",
+        ".github/workflows/REUSABLE-WORKFLOWS.md",
+        ".claude/skills/autonomy-follow-through/**",
+        "scripts/check-pinned-uses.py",
+        ".github/workflows/workflow-security.yml",
+        ".github/workflows/workflow-security-reusable.yml",
+        "tests/test_workflow_security.py",
+        "tests/test_action_pins.py",
+        "scripts/ci/autofix-event-gate.sh",
+        "tests/fixtures/autofix/**"
       ],
       "tools": [
         "python"
@@ -464,7 +485,17 @@
           "tests/test_tier_reusables.py",
           "tests/test_coverage_ratchet_activation.py",
           "tests/test_guard_check.py",
-          "tests/test_litellm_product_asset.py"
+          "tests/test_litellm_product_asset.py",
+          "tests/test_autofix_custody.py",
+          "tests/test_autofix_reusable_yaml.py",
+          "tests/test_reusable_matrix.py",
+          "tests/test_routine_ci_repair_policy.py",
+          "tests/test_workflow_security.py",
+          "tests/test_action_pins.py"
+        ],
+        [
+          "python3",
+          "scripts/check-pinned-uses.py"
         ]
       ],
       "ci_sources": [
@@ -482,7 +513,13 @@
         "tests/test_registry.py",
         "tests/_registry_cases_*.py",
         "registry/pack-surface-allowlist.txt",
-        "config/agent-checks.json"
+        "config/agent-checks.json",
+        "scripts/lib/native_guidance.py",
+        "scripts/build-registry.py",
+        "tests/test_native_guidance.py",
+        ".claude/skills/autonomy-follow-through/**",
+        "plugin/manolii-framework/scripts/lib/native_guidance.py",
+        "registry/platform/framework/scripts/lib/native_guidance.py"
       ],
       "tools": [
         "uv"
@@ -502,6 +539,42 @@
         {
           "path": ".github/workflows/registry-lint.yml",
           "contains": "python3 -m pytest tests/test_registry.py tests/test_native_guidance.py -q"
+        }
+      ]
+    },
+    {
+      "id": "installer-layout-contract",
+      "paths": [
+        "scripts/install-agent-validation.py",
+        "plugin/manolii-framework/scripts/install-agent-validation.py",
+        "registry/platform/framework/scripts/install-agent-validation.py",
+        "scripts/tests/test_agent_validation_layout.py",
+        "docs/agent-validation-layout.md",
+        "config/agent-checks.json",
+        "config/agent-checks.json.jinja",
+        "copier.yml",
+        "tests/test_copier_render.py",
+        ".github/workflows/plugin-eval-gate.yml"
+      ],
+      "tools": [
+        "uv"
+      ],
+      "environment": "release-contract-python",
+      "timeout_seconds": 360,
+      "commands": [
+        [
+          ".ai/agent-checks/release-venv/bin/python",
+          "-B",
+          "-m",
+          "pytest",
+          "scripts/tests/test_agent_validation_layout.py",
+          "-q"
+        ]
+      ],
+      "ci_sources": [
+        {
+          "path": ".github/workflows/plugin-eval-gate.yml",
+          "contains": "python3 -m pytest scripts/tests/test_agent_validation_layout.py -q"
         }
       ]
     },

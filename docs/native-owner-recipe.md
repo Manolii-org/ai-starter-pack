@@ -12,6 +12,30 @@ execution of every configured check. A job/check success for unselected work is
 not qualification evidence. Individual test logs remain necessary to assess
 coverage and skipped work; this wrapper does not manufacture test counts.
 
+Qualification rejects tracked changes and nonignored untracked files before
+invoking the owner helper. It rechecks the head and both source classes after
+classification, before selecting execution or returning a plan, and before
+publishing a recipe pass. Git-ignored receipts, bytecode, dependency caches and
+build artifacts remain available under the owner's existing ignore policy;
+the wrapper does not expand that policy or qualify ignored source imports.
+Metadata Git queries disable fsmonitor hooks, untracked-cache writes, external
+diff/text-conversion programs and network protocols. The integrated-base query
+uses the same bounded, sanitized Git transport as the other source observations.
+It reads commit-object parents with replace refs, grafts, shallow overlays and
+commit-graph acceleration disabled; missing parent objects fail qualification.
+Before each worktree diff, it inspects effective tracked-file attributes without
+converting file contents and holds filtered or ambiguous inputs. System/global
+attribute files are disabled for these observations. This guard does not enable
+or execute a repository's clean/process filters to qualify them.
+The declaration check includes literal drivers named `unset` or `unspecified`;
+those names are not evidence that a filter is disabled. An explicit `-filter`
+declaration also holds because its text representation shares that ambiguity.
+Ordinary unfiltered files, benign attributes and effective `!filter` resets
+remain supported.
+Each observation also refuses special index states such as `assume-unchanged`
+and `skip-worktree`, which can hide changed tracked bytes from Git diff. It
+leaves the index and source files intact when holding qualification.
+
 The summary grants no independent review, release admission, native human
 approval, mutation credential or production authority. Receivers must still bind
 the reviewed native workflow/job and immutable subject through the owning policy.

@@ -24,7 +24,7 @@ import re
 import secrets
 import stat
 from types import MappingProxyType
-from typing import Iterator, Mapping
+from typing import Callable, Iterator, Mapping
 import unicodedata
 import zlib
 
@@ -45,7 +45,8 @@ _FILE = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0
 class ProjectionError(ValueError):
     """A fixed category; opaque names or payloads never enter the exception."""
 
-    def __init__(self, code: str):
+    def __init__(self, code: str, *, cleanup_root: Path | None = None):
+        self.cleanup_root = cleanup_root
         self.code = code
         super().__init__(code)
 
@@ -55,7 +56,7 @@ def _require(condition: object, code: str) -> None:
         raise ProjectionError(code)
 
 
-def _relative(value: str, *, directory_rule: bool = False) -> str:
+def _relative(value: str, *, directory_rule: bool = False, tree_entry: bool = False) -> str:
     _require(isinstance(value, str), "invalid_path")
     try:
         encoded = value.encode("utf-8")
@@ -66,7 +67,7 @@ def _relative(value: str, *, directory_rule: bool = False) -> str:
                else 0 < len(encoded) <= 1024)
     _require(bounded and not body.startswith("/")
              and not any(ord(char) < 32 or ord(char) == 127 for char in value)
-             and not any(char in value for char in "\\*?[]")
+             and not any(char in value for char in ("\\" if tree_entry else "\\*?[]"))
              and all(part and part not in {".", ".."} and part.casefold() != ".git"
                      for part in body.split("/")), "invalid_path")
     return value
@@ -199,13 +200,13 @@ def _tree(store: _LooseObjects, root: str) -> dict[str, tuple[str, str]]:
             _require(offset < space < zero and zero + 1 + width <= len(raw), "invalid_tree")
             mode = raw[offset:space].decode("ascii")
             name = raw[space + 1:zero].decode("utf-8")
-            _relative(name)
+            _relative(name, tree_entry=True)
             _require("/" not in name and name not in names, "invalid_tree")
             names.add(name)
             value = raw[zero + 1:zero + 1 + width].hex()
             offset = zero + 1 + width
             path = prefix + name
-            _relative(path)
+            _relative(path, tree_entry=True)
             _require(mode in {"40000", "100644", "100755", "120000", "160000"}, "invalid_tree_mode")
             if mode == "40000":
                 stack.append((path + "/", value, depth + 1))
@@ -276,7 +277,7 @@ def _classify(entries: dict[str, tuple[str, str]], policy: dict) -> tuple[dict, 
 
 
 def _write(root_fd: int, name: str, payload: bytes, mode: int = 0o600) -> None:
-    _relative(name)
+    _relative(name, tree_entry=True)
     with ExitStack() as stack:
         directory = root_fd
         for part in name.split("/")[:-1]:
@@ -350,14 +351,19 @@ class Projection:
 
 
 def project_committed_source(repository: Path, *, selection: Selection, repository_name: str,
-                             compiled_policy_sha256: str, destination_parent: Path) -> Projection:
+                             compiled_policy_sha256: str, destination_parent: Path,
+                             _admit_sources: Callable[[Mapping[str, tuple[str, str]]], None] | None = None) -> Projection:
     """Capture committed source only; do not execute commands in the result.
 
     Source and destination paths may not contain symlinks. The destination parent
     must already be private/owned and outside the input repository. Failure may
     leave an unpublished private partial directory; no recursive cleanup of a
-    concurrently replaceable pathname is attempted. No legacy PASS is produced.
+    concurrently replaceable pathname is attempted. Errors expose that newly
+    created root separately as cleanup_root. The internal metadata admission
+    hook can only refuse already-classified source before payload capture; it
+    does not expand policy or grant execution. No legacy PASS is produced.
     """
+    cleanup_root: Path | None = None
     try:
         _require(isinstance(selection, Selection), "exact_object_id_required")
         algorithm = selection.algorithm()
@@ -421,11 +427,16 @@ def project_committed_source(repository: Path, *, selection: Selection, reposito
             opaque_ids = {value[1] for value in opaque.values()}
             _require(not opaque_ids & {value[1] for value in [*old_sources.values(), *sources.values()]},
                      "ambiguous_object_scope")
+            # A trusted executor may only narrow admission using tree metadata.
+            # This runs before source blob reads or any destination creation.
+            if _admit_sources is not None:
+                _admit_sources(MappingProxyType(sources))
             for _, oid in [*old_sources.values(), *sources.values()]:
                 store.read(oid, "blob")
 
             name = "source-projection-" + secrets.token_hex(12)
             os.mkdir(name, 0o700, dir_fd=parent_fd)
+            cleanup_root = parent_path / name
             root_fd = os.open(name, _DIRECTORY, dir_fd=parent_fd)
             stack.callback(os.close, root_fd)
             root_identity = _details(root_fd)[:2]
@@ -490,7 +501,9 @@ def project_committed_source(repository: Path, *, selection: Selection, reposito
             _require((root_current.st_dev, root_current.st_ino) == root_identity, "destination_root_changed")
             root = parent_path / name
             return Projection(root, root / "source", root / "metadata.git", MappingProxyType(record))
-    except ProjectionError:
+    except ProjectionError as exc:
+        if cleanup_root is not None:
+            exc.cleanup_root = cleanup_root
         raise
     except (OSError, UnicodeError, json.JSONDecodeError, zlib.error, TypeError, ValueError) as exc:
-        raise ProjectionError("projection_input_unavailable") from exc
+        raise ProjectionError("projection_input_unavailable", cleanup_root=cleanup_root) from exc

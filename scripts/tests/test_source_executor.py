@@ -611,8 +611,13 @@ int main(void) {
         def process(argv, *args, **kwargs):
             if isinstance(argv, executor._AdapterCommand):
                 adapter = argv.adapter
-                payloads = tuple(int(argv[i + 1]) for i, arg in enumerate(argv) if arg == "--ro-bind-data")
-                self.assertEqual(kwargs["pass_fds"], payloads)
+                self.assertEqual(argv[1], "--args")
+                args_fd = int(argv[2])
+                sealed = executor.fcntl.fcntl(args_fd, getattr(executor.fcntl, "F_GET_SEALS", 1034))
+                self.assertEqual(sealed & 15, 15)
+                options = os.pread(args_fd, executor.MAX_ARGUMENT_BYTES + 1, 0).decode().split("\0")[:-1]
+                payloads = tuple(int(options[i + 1]) for i, arg in enumerate(options) if arg == "--ro-bind-data")
+                self.assertEqual(kwargs["pass_fds"], (*payloads, args_fd))
                 self.assertNotIn(adapter.fd, kwargs["pass_fds"])
                 self.assertEqual(argv[0], f"/proc/{os.getpid()}/fd/{adapter.fd}")
                 self.assertTrue(executor.fcntl.fcntl(adapter.fd, executor.fcntl.F_GETFD)
@@ -734,6 +739,190 @@ int main(void) {
                         self.assertRaisesRegex(executor.ExecutionError, "unsafe_adapter_ancestor"):
                     executor._anchor_identity(adapter.anchors[0][0])
 
+
+
+
+
+class ResourceAdmissionTests(unittest.TestCase):
+    OBJECT_FORMAT = "sha1"
+    setUp = SourceExecutorTests.setUp
+    git = SourceExecutorTests.git
+    write = SourceExecutorTests.write
+    commit = SourceExecutorTests.commit
+    selected = SourceExecutorTests.selected
+    prepare = SourceExecutorTests.prepare
+    add_runtime = SourceExecutorTests.add_runtime
+    run_selected = SourceExecutorTests.run_selected
+
+    def test_real_mid_size_source_executes_modes_and_failure_without_fd_leaks(self):
+        for index in range(1500):
+            self.write(f"src/unit-{index:04}.py", f"unit = {index}\n".encode())
+        self.prepare(b'count=0; for file in /source/src/unit-*.py; do count=$((count+1)); done\n'
+                     b'test "$count" = 1500 || exit 37\n'
+                     b'test -x /source/src/run.sh || exit 38\n'
+                     b'test ! -w /source/src/unit-1499.py || exit 39\n')
+        before = set(os.listdir("/proc/self/fd"))
+        first = self.run_selected()
+        self.assertEqual(first["outcome"], "passed", first)
+        self.assertEqual(set(os.listdir("/proc/self/fd")), before)
+        self.profile["argv"] = ["/bin/sh", "-c", "exit 41"]
+        failed = self.run_selected()
+        self.assertEqual(failed["returncode"], 41)
+        self.assertEqual(failed["outcome"], "command-or-isolation-failed")
+        self.assertFalse(failed["source_execution_closure_verified"])
+        self.assertEqual(set(os.listdir("/proc/self/fd")), before)
+        self.assertNotEqual(first.projection_root, failed.projection_root)
+
+    def test_low_fd_limit_refuses_before_source_capture_or_output_creation(self):
+        for index in range(1050):
+            self.write(f"src/unit-{index:04}.py", f"unit = {index}\n".encode())
+        self.prepare()
+        configuration = {"repository": str(self.repo), "destination": str(self.destination),
+            "runtime": str(self.runtime), "profile": self.profile, "policy_pin": self.pin,
+            "policy_oid": self.git("rev-parse", "HEAD:" + projection.POLICY_PATH),
+            "selection": {key: getattr(self.selection, key) for key in ("source", "tree", "base", "base_tree")}}
+        fixture_path = self.root / "low-limit.json"
+        fixture_path.write_text(json.dumps(configuration))
+        driver = self.root / "low-limit.py"
+        driver.write_text("""import hashlib,json,resource,sys
+from pathlib import Path
+from unittest.mock import patch
+sys.path.insert(0, sys.argv[1])
+import test_source_executor as tested
+executor, projection = tested.executor, tested.projection
+configuration = json.loads(Path(sys.argv[2]).read_text())
+old = resource.getrlimit(resource.RLIMIT_NOFILE)
+resource.setrlimit(resource.RLIMIT_NOFILE, (1024, old[1]))
+read = projection._LooseObjects.read
+requests = []
+def observed(store, oid, kind, limit=projection.MAX_OBJECT):
+    assert kind != 'blob' or oid == configuration['policy_oid'], 'source payload read before refusal'
+    requests.append((oid, kind))
+    return read(store, oid, kind, limit)
+raw = json.dumps(configuration['profile'], sort_keys=True).encode()
+with patch.object(projection._LooseObjects, 'read', observed):
+    try:
+        executor.execute_committed_source(Path(configuration['repository']),
+            selection=projection.Selection(**configuration['selection']),
+            repository_name=configuration['profile']['repository'],
+            compiled_policy_sha256=configuration['policy_pin'],
+            destination_parent=Path(configuration['destination']), profile_bytes=raw,
+            profile_sha256=hashlib.sha256(raw).hexdigest(), runtime_root=Path(configuration['runtime']))
+    except executor.ExecutionError as error:
+        assert str(error) == 'execution_resource_budget_exceeded', str(error)
+        assert error.cleanup_root is None
+    else:
+        raise AssertionError('low descriptor limit admitted')
+assert requests and not list(Path(configuration['destination']).iterdir())
+assert resource.getrlimit(resource.RLIMIT_NOFILE)[0] == 1024
+print('low-limit refusal before any admitted source payload or output')
+""")
+        result = subprocess.run([sys.executable, str(driver), str(Path(__file__).parent), str(fixture_path)],
+                                env={"PATH": "/usr/bin:/bin"}, capture_output=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(b"low-limit refusal before any admitted source payload", result.stdout)
+        self.assertEqual(list(self.destination.iterdir()), [])
+
+    def test_argument_and_file_budget_refuse_without_source_payload_or_partial_root(self):
+        self.prepare()
+        read = projection._LooseObjects.read
+        policy_oid = self.git("rev-parse", "HEAD:" + projection.POLICY_PATH)
+        def no_source(store, oid, kind, limit=projection.MAX_OBJECT):
+            self.assertTrue(kind != "blob" or oid == policy_oid, "source payload before resource refusal")
+            return read(store, oid, kind, limit)
+        for name, value in (("MAX_PAYLOAD_FILES", 2), ("MAX_ARGUMENT_BYTES", 32),
+                            ("MAX_ARGUMENT_COUNT", 20)):
+            with self.subTest(name=name), patch.object(executor, name, value), \
+                    patch.object(projection._LooseObjects, "read", no_source), \
+                    patch.object(projection, "_write", side_effect=AssertionError("no output writes")), \
+                    patch.object(executor, "_capture_file", side_effect=AssertionError("no runtime capture")), \
+                    self.assertRaisesRegex(executor.ExecutionError, "execution_resource_budget_exceeded"):
+                self.run_selected()
+            self.assertEqual(list(self.destination.iterdir()), [])
+
+    def test_real_sealed_options_cross_host_arg_max_without_inherited_control_fd(self):
+        # Repeated valid directory options exceed execve's byte limit without
+        # enlarging the command/environment or introducing an unpinned tool.
+        directory = "/source/" + "/".join(["a" * 200] * 4)
+        self.prepare()
+        mount = executor._mount_arguments
+        observed = []
+        def expanded(paths, descriptors):
+            options = mount(paths, descriptors)
+            before = options.index("--dev")
+            repetitions = os.sysconf("SC_ARG_MAX") // (len(directory) + 7) + 4
+            options[before:before] = [value for _ in range(repetitions) for value in ("--dir", directory)]
+            raw = executor._argument_bytes(options)
+            self.assertGreater(len(raw), os.sysconf("SC_ARG_MAX"))
+            if not observed:
+                with self.assertRaises(OSError) as old_shape:
+                    subprocess.Popen([str(executor.ADAPTER), *options, "--", *self.profile["argv"]],
+                                     env={}, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                     stderr=subprocess.STDOUT, close_fds=True)
+                self.assertEqual(old_shape.exception.errno, errno.E2BIG)
+            observed.append(len(raw))
+            return options
+        with patch.object(executor, "_mount_arguments", expanded):
+            result = self.run_selected()
+        self.assertEqual(result["outcome"], "passed", result)
+        self.assertEqual(len(observed), 2)  # pre-capture upper bound and actual FD stream
+
+    def test_success_and_failure_expose_only_caller_owned_root_outside_json(self):
+        self.prepare()
+        result = self.run_selected()
+        self.assertIsInstance(result, dict)
+        self.assertEqual(json.loads(json.dumps(result)), dict(result))
+        self.assertEqual(result.projection_root.parent, self.destination)
+        self.assertTrue((result.projection_root / "projection.json").is_file())
+        self.assertNotIn(str(self.destination), json.dumps(result))
+        (self.runtime / "bin/sh").unlink()
+        with self.assertRaises(executor.ExecutionError) as raised:
+            self.run_selected()
+        root = raised.exception.cleanup_root
+        self.assertEqual(root.parent, self.destination)
+        self.assertNotEqual(root, result.projection_root)
+        self.assertTrue((root / "projection.json").is_file())
+        self.assertNotIn(str(root), str(raised.exception))
+
+    def test_payload_capture_fd_race_failure_is_closed_and_returns_exact_created_root(self):
+        self.prepare()
+        with patch.object(os, "memfd_create", side_effect=OSError(errno.EMFILE, "synthetic")), \
+                self.assertRaisesRegex(executor.ExecutionError, "execution_input_or_adapter_unavailable") as raised:
+            self.run_selected()
+        self.assertEqual(raised.exception.cleanup_root.parent, self.destination)
+        self.assertEqual(list(self.destination.iterdir()), [raised.exception.cleanup_root])
+
+    def test_real_isolated_command_has_no_source_args_or_adapter_fds(self):
+        self.prepare()
+        source = self.root / "no-extra-fds.c"
+        source.write_text("""#include <fcntl.h>
+#include <errno.h>
+#include <sys/resource.h>
+int main(void){struct rlimit limit;if(getrlimit(RLIMIT_NOFILE,&limit)!=0||limit.rlim_cur>1000000)return 32;
+for(int fd=3;fd<(int)limit.rlim_cur;fd++){errno=0;if(fcntl(fd,F_GETFD)!=-1||errno!=EBADF)return 31;}return 0;}
+""")
+        binary = self.root / "no-extra-fds"
+        subprocess.run(["/usr/bin/cc", str(source), "-o", str(binary)], capture_output=True,
+                       check=True, timeout=30, env={"PATH": "/usr/bin:/bin"})
+        self.add_runtime("bin/no-extra-fds", binary.read_bytes())
+        self.profile["argv"] = ["/bin/no-extra-fds"]
+        result = self.run_selected()
+        self.assertEqual(result["outcome"], "passed", result)
+
+
+
+
+class OversizedMetadataAdmissionTests(unittest.TestCase):
+    def test_oversized_metadata_is_refused_before_path_iteration_or_allocation(self):
+        class MetadataOnly(executor.Mapping):
+            def __len__(self):
+                return executor.MAX_PAYLOAD_FILES + 1
+            def __iter__(self):
+                raise AssertionError("oversized metadata paths must not be expanded")
+            def __getitem__(self, key):
+                raise AssertionError("oversized metadata entries must not be accessed")
+        with self.assertRaisesRegex(executor.ExecutionError, "execution_resource_budget_exceeded"):
+            executor._admit_resources(MetadataOnly(), {"runtime_files": []}, Path("/runtime"), Path("/output"))
 
 
 if __name__ == "__main__":

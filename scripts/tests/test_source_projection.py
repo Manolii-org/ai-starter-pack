@@ -502,5 +502,82 @@ class SourceProjectionSHA256Tests(SourceProjectionTests):
     OBJECT_FORMAT = "sha256"
 
 
+
+
+class LiteralTreeEntryTests(unittest.TestCase):
+    OBJECT_FORMAT = "sha1"
+    setUp = SourceProjectionTests.setUp
+    git = SourceProjectionTests.git
+    write = SourceProjectionTests.write
+    commit = SourceProjectionTests.commit
+    selected = SourceProjectionTests.selected
+    project = SourceProjectionTests.project
+
+    def test_real_nextjs_and_glob_source_names_preserve_bytes_and_modes(self):
+        for name in ("src/[id].tsx", "src/a*b?.py", "src/[...slug]/page.tsx"):
+            self.write(name, (name + "\n").encode(), 0o755)
+        self.commit()
+        result = self.project(selection=self.selected())
+        for name in ("src/[id].tsx", "src/a*b?.py", "src/[...slug]/page.tsx"):
+            self.assertEqual((result.source / name).read_bytes(), (name + "\n").encode())
+            self.assertEqual((result.source / name).stat().st_mode & 0o777, 0o700)
+
+    def test_protected_glob_names_are_metadata_only_with_zero_content_reads(self):
+        names = ("private/[id].tsx", "reports/a*b?.json", "private/[...slug]/item")
+        for name in names:
+            self.write(name, ("OPAQUE_GENERIC_" + name).encode())
+        self.commit()
+        self.base, self.base_tree = self.git("rev-parse", "HEAD"), self.git("rev-parse", "HEAD^{tree}")
+        self.write("src/main.py", b"value = 3\n")
+        self.commit()
+        forbidden = {self.git("rev-parse", "HEAD:" + name) for name in names}
+        read = projection._LooseObjects.read
+        observed = []
+        def guard(store, oid, kind, limit=projection.MAX_OBJECT):
+            self.assertNotIn(oid, forbidden)
+            observed.append(oid)
+            return read(store, oid, kind, limit)
+        with patch.object(projection._LooseObjects, "read", guard):
+            result = self.project(selection=self.selected())
+        self.assertTrue(observed)
+        self.assertFalse((result.source / "private").exists())
+        self.assertFalse((result.source / "reports").exists())
+        for oid in forbidden:
+            self.assertFalse((result.metadata / "objects" / oid[:2] / oid[2:]).exists())
+
+    def test_literal_policy_stays_strict_and_tree_names_keep_unsafe_path_refusals(self):
+        for name in ("src/[id].tsx", "src/a*b", "src/a?b"):
+            with self.subTest(policy=name), self.assertRaises(projection.ProjectionError):
+                projection._relative(name, directory_rule=True)
+            self.assertEqual(projection._relative(name, tree_entry=True), name)
+        for name in ("", ".", "..", ".git", "a/.GIT/b", "/absolute", "a//b", "a/../b", "a\x00b",
+                     "a\nb", "a\x7fb", "a\\b", "x" * 1025, "\ud800"):
+            with self.subTest(tree=name), self.assertRaises(projection.ProjectionError):
+                projection._relative(name, tree_entry=True)
+
+    def test_partial_failure_returns_only_its_created_private_cleanup_root(self):
+        write = projection._write
+        calls = []
+        def fail(root, name, payload, mode=0o600):
+            calls.append(name)
+            if len(calls) == 2:
+                raise OSError("synthetic destination failure")
+            return write(root, name, payload, mode)
+        with patch.object(projection, "_write", fail), self.assertRaises(projection.ProjectionError) as raised:
+            self.project()
+        root = raised.exception.cleanup_root
+        self.assertEqual(root.parent, self.destination)
+        self.assertEqual(list(self.destination.iterdir()), [root])
+        self.assertNotIn(str(root), str(raised.exception))
+        recovered = self.project()
+        self.assertNotEqual(recovered.root, root)
+        self.assertTrue(root.is_dir())
+        self.assertTrue(recovered.root.is_dir())
+
+
+class LiteralTreeEntrySHA256Tests(LiteralTreeEntryTests):
+    OBJECT_FORMAT = "sha256"
+
+
 if __name__ == "__main__":
     unittest.main()

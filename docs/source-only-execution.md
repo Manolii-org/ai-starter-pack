@@ -1,6 +1,6 @@
 # Offline source-only command execution
 
-`source_projection.py` remains an unchanged materializer. The additive
+`source_projection.py` remains a nonexecuting materializer. The additive
 `source_executor.py` library executes one exact reviewed profile through a fixed
 Linux bubblewrap adapter. It does not install a caller, change the normal
 `agent-check` recipe, mint an `agent-check/v1` PASS, reuse its cache, or authorize
@@ -77,8 +77,10 @@ its separate private adapter binding supplies the canonical executable FD and
 the PID of its retaining process. Execution uses `/proc/<parent-pid>/fd/<fd>`
 while that exact parent retains the verified descriptor and all anchors through
 owned-child cleanup and postchecks. A different retaining PID is refused.
-Only sealed `--ro-bind-data` payload descriptors are inherited by bubblewrap,
-which consumes them before running the isolated command. The adapter descriptor,
+Only sealed `--ro-bind-data` payload descriptors and one sealed `--args`
+options descriptor are inherited by bubblewrap, which consumes them before
+running the isolated command. The exact reviewed command remains on the short
+outer argument array; it is not parsed as an option from the descriptor. The adapter descriptor,
 host directory anchors and unrelated descriptors do not cross exec. Inheriting
 the adapter would clear its close-on-exec flag and could leak it to the payload;
 there is no child trampoline, pre-exec hook or alternate executable fallback.
@@ -108,6 +110,80 @@ cannot be recycled into another process group first. Cleanup failure cannot
 produce successful evidence. The bubblewrap namespace supervisor confines and
 settles its command descendants. No PID search, process-name cleanup or unknown
 process termination is used.
+
+## Bounded source and resource admission
+
+Git tree entries are literal filenames. Admitted source supports names such as
+`src/[id].tsx`, `src/[...slug]/page.tsx` and literal `*` or `?`. Protected entries
+with these names are classified from tree metadata without reading their blob
+contents. Policy rules remain literal: wildcard syntax is still rejected in
+`allowed_paths` and `protected_paths`. Empty, dot, dot-dot, `.git` components,
+backslashes, control characters, invalid UTF-8 and oversized paths remain refused.
+Duplicate tree entries and the existing depth and object budgets are unchanged.
+
+The tree parser's 100,000-entry ceiling is a metadata bound, not a promise that
+100,000 files can execute. The executor admits resource use against the actual
+selected source and declared runtime after the necessary unchanged compiled-policy read, before other admitted
+source blob reads or any
+projection directory is created. It enforces all of these independent limits:
+
+- At most 4,096 total source plus runtime payload files, with no OS-limit increase.
+- The current process's observed soft `RLIMIT_NOFILE`, subtracting currently held
+  descriptors, all payload descriptors, runtime/output ancestor descriptors,
+  the maximum confined capture depth and a 32-descriptor control reserve.
+- At most 8 MiB of NUL-separated bubblewrap options in a sealed memory file.
+- At most 9,000 combined option and outer command arguments, matching the public
+  bubblewrap v0.11 parser bound. This often limits file counts before 4,096.
+- The actual host `SC_ARG_MAX` for the short outer command, including pointer
+  overhead and a 32 KiB reserve. Profile command and runtime-row bounds still apply.
+
+A failed bound raises `execution_resource_budget_exceeded`; it is never a
+successful, skipped or reusable qualification. Subsequent descriptor exhaustion
+or input races remain closed failures and expose only the created cleanup root
+to the owner. No descriptor, kernel, namespace, privilege or security limit is
+raised, and no archive bootstrap, host fallback or additional runtime authority
+is introduced. The 64 MiB verified Git-object capture bound and the 128 MiB
+runtime capture bound also remain enforced; these are separate from argv limits.
+
+The tested Linux host admitted a synthetic 1,500-source-file flat layout with
+three declared runtime files under its existing 102,400 descriptor soft limit;
+actual isolated execution passed, preserved executable/read-only modes and
+propagated an intentional exit 41 on the subsequent fixed command. A fresh
+owned test subprocess lowered only its own soft limit to 1,024 and refused
+1,050 additional source files before any non-policy source payload read or output
+creation. These are measured shapes, not universal repository capacities. Many
+unique directories consume additional option arguments, and lower installed
+limits reduce capacity. Larger or unsupported owner targets remain unqualified
+until a separately reviewed representation is implemented and qualified.
+
+A real options-stream boundary control exceeded the host's 2 MiB argv ceiling:
+the equivalent inline invocation failed with `E2BIG`, while the sealed options
+stream ran through the same fixed adapter. Actual isolated C controls check
+that all descriptors above stderr, including source, runtime, args and adapter
+FDs, are absent. Such local proofs do not establish another owner's native
+runner limits, installed adapter, selected dependency runtime or enforcement.
+
+## Caller-owned projection lifecycle
+
+A successful materialization already returns `Projection.root`. A successful
+execution now returns a dict-compatible `ExecutionResult`: its v1 JSON receipt
+fields are unchanged, and its separate `projection_root` attribute identifies
+exactly the newly created private directory beneath `destination_parent`.
+The path is not serialized, exported centrally or included in aggregate evidence.
+Fixed-category projection/execution exceptions expose a separate `cleanup_root`
+attribute when a private root was created before failure; it is `None` when
+admission fails before creation. Command failure and timeout still return their
+own root through `ExecutionResult`, without changing the failed outcome.
+
+The caller owns this destination lifecycle. Preserve the exact root with the
+owner-local evidence needed for the attempt, then remove only that known root
+under the owner's normal confined cleanup procedure. A path alone is not
+permission to follow replacement symlinks or recursively remove arbitrary
+entries in `destination_parent`. The library does not perform pathname-recursive
+cleanup, enumerate other owners' directories or remove a failed attempt during
+restart. A subsequent attempt creates a different private root; abandoned partial
+roots remain explicit caller-owned state. Keep the parent private and coordinate
+its lifecycle through the existing owner mechanism.
 
 ## Result and remaining limits
 
@@ -163,9 +239,10 @@ requested. Raw output is discarded.
 
 `observations_complete` means that observations finished, including denials; it
 never means source, native gate, admission or production qualification. Every
-authority field remains false. The native workflow runs the unchanged 17 real
-executor assertions and the additional adapter-integrity assertions after this
-observation. There is no fallback to an observed
+authority field remains false. The native workflow retains the 17 real executor assertions and the
+additional adapter-integrity assertions after this observation. The collector FD
+assertion now decodes the sealed options stream and additionally requires that
+only its payload descriptors plus the sealed args descriptor are inherited. There is no fallback to an observed
 working route. The executor has one reviewed original-FD subject; the
 observation never selects a fallback or changes host security policy or
 installed credentials. Local observations do not prove another provider's kernel

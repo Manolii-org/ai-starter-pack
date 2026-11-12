@@ -129,14 +129,14 @@ safe_length UNDEFINED_VAR
         """safe_prefix defaults to 6 chars and never exceeds len-4."""
         script = f"""
 set -u
-export API_KEY=sk_live_1234567890abcdef
+export API_KEY=aaaaaabbbbbbbbbbbbbbbbbb
 source {self.safe_env_script}
 safe_prefix API_KEY
 """
         output, _ = self.run_bash(script)
-        self.assertIn("sk_liv", output)
+        self.assertIn("aaaaaa", output)
         # Should NOT contain chars past the 6-char head
-        self.assertNotIn("1234567890", output)
+        self.assertNotIn("bbbbbbbbbb", output)
 
     def test_safe_prefix_with_custom_length(self):
         """safe_prefix with custom N should show first N chars."""
@@ -212,7 +212,7 @@ cat /tmp/test_safe_env_out.txt
         """Multiple safe_* calls should all protect values."""
         script = f"""
 set -u
-export API_TOKEN=secret_key_12345
+export API_TOKEN=aaaaaaaaaaaaaaaa
 source {self.safe_env_script}
 echo "Check 1:"; safe_summary API_TOKEN
 echo "Check 2:"; safe_prefix API_TOKEN 3
@@ -220,7 +220,7 @@ echo "Check 3:"; safe_length API_TOKEN
 """
         output, _ = self.run_bash(script)
         # None of the three checks should leak full value
-        self.assertNotIn("secret_key_12345", output)
+        self.assertNotIn("aaaaaaaaaaaaaaaa", output)
         self.assertIn("Check 1:", output)
         self.assertIn("Check 2:", output)
         self.assertIn("Check 3:", output)

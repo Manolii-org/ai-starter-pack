@@ -35,6 +35,9 @@ SPEC.loader.exec_module(MODULE)
 
 @pytest.fixture(autouse=True)
 def admitted_transport_fixture(monkeypatch):
+    # This module retains explicit direct-lane transport/budget compatibility.
+    # The default governed lane has its own actual-entrypoint regressions.
+    monkeypatch.setenv("SECURITY_REVIEW_MODE", "direct")
     # Unit fixtures must not inherit the CI launcher; hosted cases set explicit context.
     monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
     # These are transport/input unit tests with fake responses, not authority
@@ -244,7 +247,7 @@ def test_complete_868_line_diff_reaches_real_security_role(monkeypatch, tmp_path
     assert sent.urls == ["https://proxy.example/v1/messages"]  # type: ignore[attr-defined]
     assert sent[0]["model"] == "haiku"
     assert sent[0]["max_tokens"] == 800 + MODULE._PROXY_THINKING_HEADROOM
-    assert candidate == {"source": "security-boundary-test", "findings": []}
+    assert candidate == {"source": "security-boundary-test", "findings": [], "first_party": False}
 
 
 def test_complete_multibyte_and_delimiter_input_is_escaped_without_loss(monkeypatch, tmp_path):

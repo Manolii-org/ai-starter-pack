@@ -20,11 +20,13 @@ from __future__ import annotations
 
 import argparse
 import re
+import subprocess
 import sys
 from pathlib import Path
 
 import yaml
 
+SELF_WORKFLOW_RE = re.compile(r"\$/\.github/workflows/[A-Za-z0-9_.-]+\.ya?ml")
 SHA_REF_RE = re.compile(r"@[0-9a-f]{40}$")
 # Mapping keys whose values are data, not step/job definitions: a `uses` key
 # nested under these is an input value, never an action reference.
@@ -46,7 +48,7 @@ def default_targets(root: Path) -> list[Path]:
 
 def classify(ref: str, allow: list[re.Pattern[str]]) -> str | None:
     """Return a violation reason for ``ref``, or None when it is acceptable."""
-    if ref.startswith("./") or "${{" in ref:
+    if ref.startswith("./") or SELF_WORKFLOW_RE.fullmatch(ref) or "${{" in ref:
         return None
     if any(rx.fullmatch(ref) for rx in allow):
         return None
@@ -125,15 +127,73 @@ def scan_file(path: Path, allow: list[re.Pattern[str]]) -> list[tuple[int, str, 
     return sorted(violations)
 
 
+def actionlint_view(text: str) -> str:
+    """Validation-only support for GitHub's documented $/ workflow syntax.
+
+    actionlint 1.7.7 and latest 1.7.12 reject it. Change only the first byte of
+    actual job-level uses scalars to the documented equivalent ./ syntax in
+    stdin, retaining filenames, columns, duplicates, inputs and diagnostics.
+    No source file is rewritten and no scanner finding is ignored.
+    """
+    edits = set()
+    for doc in yaml.compose_all(text):
+        if not isinstance(doc,yaml.MappingNode):
+            continue
+        for key,jobs in doc.value:
+            if key.value != 'jobs' or not isinstance(jobs,yaml.MappingNode):
+                continue
+            for _,job in jobs.value:
+                if not isinstance(job,yaml.MappingNode):
+                    continue
+                for field,value in job.value:
+                    if field.value != 'uses' or not isinstance(value,yaml.ScalarNode):
+                        continue
+                    if not SELF_WORKFLOW_RE.fullmatch(value.value.strip()):
+                        continue  # Invalid or other new syntax still fails actionlint.
+                    start,end = value.start_mark.index,value.end_mark.index
+                    offset = text.find('$/',start,end)
+                    if offset < 0:
+                        raise ValueError('encoded self-workflow reference is unsupported')
+                    edits.add(offset)
+    for offset in sorted(edits,reverse=True):
+        text = text[:offset]+'.'+text[offset+1:]
+    return text
+
+
+def lint_workflows(root: Path, paths: list[Path]) -> int:
+    paths = paths or sorted(p for p in (root/'.github/workflows').glob('*') if p.suffix in {'.yml','.yaml'} and p.is_file())
+    normal = []; status = 0
+    for path in paths:
+        text = path.read_text(encoding='utf-8')
+        view = actionlint_view(text) if '$/' in text else text
+        if view == text:
+            normal.append(str(path))
+            continue
+        result = subprocess.run(['actionlint','-shellcheck=','-pyflakes=','-stdin-filename',str(path),'-'],
+            input=view,text=True,timeout=120)
+        status = max(status,result.returncode if result.returncode >= 0 else 2)
+    if normal:
+        result = subprocess.run(['actionlint','-shellcheck=','-pyflakes=',*normal],timeout=120)
+        status = max(status,result.returncode if result.returncode >= 0 else 2)
+    return status
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("paths", nargs="*", type=Path,
                     help="Files to scan (default: workflows and composite actions under --root)")
+    ap.add_argument("--actionlint",action="store_true",help="Lint workflows with narrow self-reference syntax adaptation; never suppress diagnostics")
     ap.add_argument("--root", type=Path, default=Path("."))
     ap.add_argument("--allow-ref", action="append", default=[],
                     help="Full-match regex for a reference to exempt (repeatable)")
     args = ap.parse_args(argv)
 
+    if args.actionlint:
+        try:
+            return lint_workflows(args.root,args.paths)
+        except (ValueError,yaml.YAMLError,OSError,subprocess.TimeoutExpired) as exc:
+            print(f'actionlint validation failed: {type(exc).__name__}',file=sys.stderr)
+            return 2
     try:
         allow = [re.compile(p) for p in args.allow_ref]
     except re.error as exc:

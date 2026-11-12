@@ -37,6 +37,33 @@ SOURCE_SCOPE_EXIT = 4
 class SourceScopeError(ValueError):
     """Content is outside this runner's qualified scope; never a cached PASS."""
 
+    metadata_reason: str | None = None
+
+
+_SOURCE_SCOPE_METADATA_REASONS = frozenset({
+    "unqualified Git metadata alias", "missing Git control metadata", "unqualified Git control metadata",
+    "no qualified no-follow metadata reader", "Git control metadata changed",
+    "no qualified descriptor metadata reader", "Git metadata directory bound exceeded",
+    "Git metadata entry bound exceeded", "Git metadata directory changed",
+    "Git metadata aliases require a qualified adapter", "unqualified symbolic HEAD route",
+    "symbolic HEAD route bound exceeded", "unqualified Git directory pointer",
+    "unqualified linked-worktree control namespace", "unqualified linked-worktree metadata",
+    "unqualified linked-worktree topology", "linked-worktree ownership differs",
+    "Git config includes require a qualified metadata adapter",
+    "Git object alternates require a qualified metadata adapter",
+    "source-scope ownership ancestry is ambiguous", "source-scope ownership ancestry bound exceeded",
+})
+
+
+def _source_scope_failure(error: BaseException) -> SourceScopeError:
+    """Expose only closed static diagnostics, never exception paths or bytes."""
+    reason = (error.args[0] if type(error) is ValueError and len(error.args) == 1
+              and type(error.args[0]) is str and error.args[0] in _SOURCE_SCOPE_METADATA_REASONS else None)
+    detail = ": " + reason if reason is not None else ""
+    held = SourceScopeError("source-scope metadata unavailable" + detail + "; content reads held")
+    held.metadata_reason = reason
+    return held
+
 
 def _source_scope_exists(path: Path) -> bool:
     """An inaccessible declaration is unknown, never evidence of absence."""
@@ -49,18 +76,50 @@ def _source_scope_exists(path: Path) -> bool:
         raise ValueError("source-scope metadata unavailable") from None
 
 
+def _source_scope_resolved_path(path: Path) -> Path:
+    """Resolve raw components; a symlink cycle before .. is still a cycle."""
+    try:
+        return path.resolve(strict=True)
+    except FileNotFoundError:
+        # Keep absent/dangling observations. The original path is used for
+        # payload I/O, so a missing intermediate component cannot open data.
+        return path.resolve()
+
+
 def _source_scope_roots(root: Path) -> tuple[list[Path], bool]:
-    """Inspect enclosing declarations before a nested repository can hide them."""
-    roots = []
-    path = Path(os.path.abspath(root))
-    for parent in (path, *path.parents):
-        if _source_scope_exists(parent / SOURCE_SCOPE_POLICY):
-            return [], True
-        if _source_scope_exists(parent / ".git"):
-            roots.append(parent)
-    # A committed enclosing declaration must hold before a nested repository's
-    # control metadata (itself potentially protected by that owner) is read.
-    return list(reversed(roots)), False
+    """Retain lexical declarations; qualify physical controls outer-owner first."""
+    lexical = Path(os.path.abspath(root))
+    routes = []
+    # Resolving directory names must not erase an enclosing lexical policy.
+    # Conversely, an alias must not hide the actual owner's enclosing policy.
+    # Resolve the raw request: normpath first changes symlink/.. semantics.
+    for path in dict.fromkeys((lexical, _source_scope_resolved_path(root))):
+        roots = []
+        for parent in (path, *path.parents):
+            if _source_scope_exists(parent / SOURCE_SCOPE_POLICY):
+                return [], True
+            if _source_scope_exists(parent / ".git"):
+                roots.append(parent.resolve())
+        routes.append(list(dict.fromkeys(reversed(roots))))
+    owners = dict.fromkeys(owner for route in routes for owner in route)
+    if len(owners) > 256:
+        raise ValueError("source-scope ownership ancestry bound exceeded")
+    before: dict[Path, set[Path]] = {owner: set() for owner in owners}
+    for route in routes:
+        for outer, inner in zip(route, route[1:]):
+            before[inner].add(outer)
+    ordered = []
+    while before:
+        available = next((owner for owner, required in before.items() if not required), None)
+        if available is None:
+            raise ValueError("source-scope ownership ancestry is ambiguous")
+        ordered.append(available)
+        del before[available]
+        for required in before.values():
+            required.discard(available)
+    # Any committed enclosing declaration holds before inner control bytes.
+    # The .git marker itself is deliberately not resolved; aliases still hold.
+    return ordered, False
 
 
 def _source_scope_control_metadata(path: Path, *, optional: bool = False):
@@ -165,6 +224,15 @@ def _source_scope_head_chain(gitdir: Path, common: Path) -> None:
     raise ValueError("symbolic HEAD route bound exceeded")
 
 
+def _source_scope_pointer_path(parent: Path, target: str) -> Path:
+    """Reject raw control aliases before normalization can erase their route."""
+    requested = parent / target
+    for path in (requested, *requested.parents):
+        if path.is_symlink():
+            raise ValueError("unqualified Git metadata alias")
+    return requested.resolve(strict=True)
+
+
 def _source_scope_git_controls(root: Path) -> None:
     """Reject config indirections BEFORE native Git can interpret their targets.
 
@@ -180,7 +248,7 @@ def _source_scope_git_controls(root: Path) -> None:
         if raw is None or not raw.startswith(b"gitdir: ") or len(raw.splitlines()) != 1:
             raise ValueError("unqualified Git directory pointer")
         target = raw.decode("utf-8").strip()[8:]
-        gitdir = Path(os.path.abspath(root / target))
+        gitdir = _source_scope_pointer_path(root, target)
         # Qualify the standard control namespace before opening anything at the
         # pointer target. Arbitrary directories are not metadata read grants.
         if gitdir.parent.name != "worktrees" or not gitdir.parent.parent.name.endswith(".git"):
@@ -188,13 +256,13 @@ def _source_scope_git_controls(root: Path) -> None:
         common_raw = _source_scope_control_bytes(gitdir / "commondir")
         if common_raw is None or len(common_raw.splitlines()) != 1:
             raise ValueError("unqualified linked-worktree metadata")
-        common = Path(os.path.abspath(gitdir / common_raw.decode("utf-8").strip()))
+        common = _source_scope_pointer_path(gitdir, common_raw.decode("utf-8").strip())
         # Only the standard linked-worktree topology is qualified here. An
         # arbitrary Git pointer must not expand this metadata read boundary.
         if gitdir.parent.name != "worktrees" or gitdir.parent.parent != common:
             raise ValueError("unqualified linked-worktree topology")
         backpointer = _source_scope_control_bytes(gitdir / "gitdir")
-        if backpointer is None or Path(os.path.abspath(backpointer.decode("utf-8").strip())) != marker:
+        if backpointer is None or _source_scope_pointer_path(gitdir, backpointer.decode("utf-8").strip()) != marker:
             raise ValueError("linked-worktree ownership differs")
     for path in (common / "config", gitdir / "config.worktree"):
         raw = _source_scope_control_bytes(path, optional=True)
@@ -220,45 +288,60 @@ def _source_scope_git_controls(root: Path) -> None:
         _source_scope_alias_metadata(private_refs)
 
 
+def _source_scope_tree_declared(owner: Path, environment: dict, timeout: int) -> bool:
+    """Use fixed metadata probes; distinguish a verified unborn branch from failure."""
+    def metadata(*arguments):
+        return subprocess.run(["git", "--no-replace-objects", "-c", "protocol.allow=never", *arguments],
+                              cwd=owner, env=environment, capture_output=True, timeout=timeout, check=False)
+    result = metadata("ls-tree", "-z", "HEAD", "--", SOURCE_SCOPE_POLICY)
+    if result.stdout:
+        return True
+    if result.returncode == 0:
+        return False
+    head = metadata("rev-parse", "--verify", "--quiet", "HEAD")
+    symbolic = metadata("symbolic-ref", "--quiet", "HEAD")
+    ref = symbolic.stdout.decode("utf-8").strip()
+    unborn = (head.returncode != 0 and symbolic.returncode == 0
+              and ref.startswith("refs/heads/") and "\0" not in ref and "\n" not in ref
+              and metadata("check-ref-format", ref).returncode == 0
+              and metadata("show-ref", "--verify", "--quiet", ref).returncode == 1)
+    if not unborn:
+        raise ValueError("source-scope metadata unavailable")
+    return False
+
+
+def _source_scope_git_environment() -> dict:
+    """Forward only runtime context to non-authorizing local Git metadata probes."""
+    names = {"PATH", "HOME", "USER", "LOGNAME", "LANG", "LANGUAGE", "LC_ALL", "LC_CTYPE", "TZ",
+             "TMPDIR", "TMP", "TEMP", "SystemRoot", "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT"}
+    environment = {key: value for key, value in os.environ.items() if key in names}
+    environment.update({"GIT_NO_LAZY_FETCH": "1", "GIT_ALLOW_PROTOCOL": "", "GIT_TERMINAL_PROMPT": "0",
+                        "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
+                        "GIT_GRAFT_FILE": os.devnull})
+    return environment
+
+
 def source_scope_declared(root: Path) -> bool:
     """Check enclosing policy declarations and safely bounded Git metadata."""
     if SOURCE_SCOPE_PIN in os.environ or SOURCE_SCOPE_REPOSITORY in os.environ:
         return True
     try:
         roots, declared = _source_scope_roots(root)
-    except (OSError, ValueError):
-        raise SourceScopeError("source-scope metadata unavailable; content reads held") from None
+    except (OSError, ValueError, TypeError, RuntimeError) as error:
+        raise _source_scope_failure(error) from None
     if declared:
         return True
     # Probe-only environment: inherited Git tracing/config/executable routing
     # must not cause reads or side writes before this non-authorizing hold.
     # Normal owner git_environment()/writers retain their existing behavior.
-    environment = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
-    environment.update({"GIT_NO_LAZY_FETCH": "1", "GIT_ALLOW_PROTOCOL": "",
-                        "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
-                        "GIT_GRAFT_FILE": os.devnull})
+    environment = _source_scope_git_environment()
     for owner in roots:
-        def metadata(*arguments):
-            return subprocess.run(["git", "--no-replace-objects", "-c", "protocol.allow=never", *arguments],
-                                  cwd=owner, env=environment, capture_output=True, timeout=GIT_TIMEOUT, check=False)
         try:
             _source_scope_git_controls(owner)
-            result = metadata("ls-tree", "-z", "HEAD", "--", SOURCE_SCOPE_POLICY)
-            if result.returncode == 0:
-                if result.stdout:
-                    return True
-                continue
-            head = metadata("rev-parse", "--verify", "--quiet", "HEAD")
-            symbolic = metadata("symbolic-ref", "--quiet", "HEAD")
-            ref = symbolic.stdout.decode("utf-8").strip()
-            unborn = (head.returncode != 0 and symbolic.returncode == 0
-                      and ref.startswith("refs/heads/") and "\0" not in ref and "\n" not in ref
-                      and metadata("check-ref-format", ref).returncode == 0
-                      and metadata("show-ref", "--verify", "--quiet", ref).returncode == 1)
-            if not unborn:
-                raise ValueError("source-scope metadata unavailable")
-        except (OSError, ValueError, TypeError, subprocess.SubprocessError, UnicodeError):
-            raise SourceScopeError("source-scope metadata unavailable; content reads held") from None
+            if _source_scope_tree_declared(owner, environment, GIT_TIMEOUT):
+                return True
+        except (OSError, ValueError, TypeError, RuntimeError, subprocess.SubprocessError) as error:
+            raise _source_scope_failure(error) from None
     return False
 
 
@@ -313,10 +396,26 @@ def require_source_scope(root: Path) -> None:
 
 
 def require_content_path_scope(path: Path) -> None:
-    """Guard standalone low-level readers at their lexical owning Git root."""
+    """Check lexical and resolved owners before any linked payload is opened."""
     if SOURCE_SCOPE_PIN in os.environ or SOURCE_SCOPE_REPOSITORY in os.environ:
         raise SourceScopeError("source-scope content reads require a reviewed isolated projection")
-    require_source_scope(Path(os.path.abspath(path)).parent)
+    requested = path.absolute()
+    require_source_scope(requested.parent)
+    try:
+        parent = _source_scope_resolved_path(requested.parent)
+        selected = _source_scope_resolved_path(requested)
+        if selected.parent != parent:
+            require_source_scope(selected.parent)
+        try:
+            details = selected.stat()
+        except FileNotFoundError:
+            return  # Preserve legacy absent/dangling input state observations.
+        if stat.S_ISDIR(details.st_mode):
+            require_source_scope(selected)
+    except SourceScopeError:
+        raise
+    except (OSError, ValueError, TypeError, RuntimeError) as error:
+        raise _source_scope_failure(error) from None
 
 
 TOOLS = {
@@ -1080,6 +1179,7 @@ def dotenv_bytes(path: Path) -> bytes:
         stack = [(path, "")]
         while stack:
             directory, prefix = stack.pop()
+            require_content_path_scope(directory)
             try:
                 entries = sorted(directory.iterdir())
             except OSError:
@@ -1128,11 +1228,15 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
     if args.select_only and not args.plan:
         parser.error("--select-only requires --plan and cannot qualify execution")
-    root = args.repo_root.resolve()
+    requested_root = args.repo_root.absolute()
     inherited = git_environment()
     receipt_path = None
     try:
-        require_source_scope(root)
+        require_source_scope(requested_root)
+        try:
+            root = requested_root.resolve()
+        except (OSError, ValueError, RuntimeError) as error:
+            raise _source_scope_failure(error) from None
         if not args.plan:
             state = inside(root, STATE)
             receipt_path = state / "receipt.json"
@@ -1380,10 +1484,13 @@ def main(argv=None) -> int:
                 ))
         print(f"AGENT-CHECK-{outcome.upper()} {candidate_digest[:12]}")
         return 0 if outcome == "passed" else 1
-    except SourceScopeError:
+    except SourceScopeError as error:
         # Do not read, delete or rewrite stale state under an unqualified
         # boundary. Callers must honor this held exit before any old receipt.
-        print("AGENT-CHECK-SOURCE-SCOPE-HELD: no qualified content projection; no validation authority.", file=sys.stderr)
+        reason = getattr(error, "metadata_reason", None)
+        detail = " Reason: " + reason if type(reason) is str and reason in _SOURCE_SCOPE_METADATA_REASONS else ""
+        print("AGENT-CHECK-SOURCE-SCOPE-HELD: no qualified content projection; no validation authority." + detail,
+              file=sys.stderr)
         return SOURCE_SCOPE_EXIT
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
         if receipt_path is not None:

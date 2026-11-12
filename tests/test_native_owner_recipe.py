@@ -75,6 +75,8 @@ class RealGitExecutionContracts(unittest.TestCase):
         (root / "scripts").mkdir()
         code = """import json,subprocess,sys
 from pathlib import Path
+if MODE=="untracked-import":
+    import unreviewed_recipe_dependency
 def config_for(root):
     return {"checks":[{"id":"fixture"}]}
 def plan_for(root,config,base):
@@ -95,6 +97,16 @@ def main(args):
     p=root/".ai/agent-checks/receipt.json";p.parent.mkdir(parents=True,exist_ok=True)
     p.write_text(json.dumps(receipt))
     if MODE=="drift": (root/"tracked").write_text("changed during qualification")
+    if MODE=="untracked-output": (root/"untracked-output.txt").write_text("synthetic unreviewed output")
+    if MODE=="ignored-output":
+        (root/"dist").mkdir(exist_ok=True)
+        (root/"dist/output.txt").write_text("synthetic ignored build output")
+    if MODE=="recipe-filter":
+        (root/".git/info/attributes").write_text("tracked filter=synthetic\\n")
+        (root/"tracked").touch()
+    if MODE.startswith("recipe-index-"):
+        subprocess.check_call(["git","update-index","--"+MODE[len("recipe-index-"):],"tracked"],cwd=root)
+        (root/"tracked").write_text("synthetic hidden recipe drift")
     return 0
 """.replace("SELECTED", repr(selected)).replace("MODE", repr(mode))
         code += """
@@ -105,12 +117,23 @@ if __name__ == "__main__":
     if "--plan" in args:
         assert "--select-only" in args
         print(json.dumps(plan_for(root,config_for(root),base)))
+        if MODE=="classification-untracked":
+            (root/"classification-output.py").write_text("synthetic unreviewed classification output")
+        if MODE=="classification-filter":
+            (root/".git/info/attributes").write_text("tracked filter=synthetic\\n")
+            (root/"tracked").touch()
+        if MODE.startswith("classification-index-"):
+            subprocess.check_call(["git","update-index","--"+MODE[len("classification-index-"):],"tracked"],cwd=root)
+            (root/"tracked").write_text("synthetic hidden classification drift")
     else:
         raise SystemExit(main(args))
-"""
+""".replace("MODE", repr(mode))
         (root / "config").mkdir()
         (root / "config/agent-checks.json").write_text(json.dumps({"checks": [{"id":"fixture"}]}))
         (root / "scripts/agent-check.py").write_text(code)
+        # Match actual owner output policy; generated receipts, bytecode and
+        # build artifacts are runtime state, not newly admitted source.
+        (root / ".gitignore").write_text(".ai/agent-checks/\n__pycache__/\ndist/\n")
         (root / "tracked").write_text("fixed input")
         def git(*args):
             return subprocess.check_output(["git", *args], cwd=root, text=True, stderr=subprocess.DEVNULL, timeout=15).strip()
@@ -180,6 +203,301 @@ if __name__ == "__main__":
                             clear=True), patch.object(sys, "argv", ["qualification", "--output", str(output)]):
                 self.assertEqual(N.main(), 2)
             self.assertEqual(output.read_text(), "retained")
+
+    def test_stable_untracked_module_is_refused_before_any_owner_execution(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root, native = self.fixture(directory, mode="untracked-import")
+            module = root / "scripts/unreviewed_recipe_dependency.py"
+            module.write_text("from pathlib import Path\n"
+                              "(Path(__file__).parents[1]/'untracked-module-ran').write_text('ran')\n")
+            absent = subprocess.run(["git", "cat-file", "-e", "HEAD:scripts/unreviewed_recipe_dependency.py"],
+                                    cwd=root, capture_output=True, timeout=15)
+            self.assertNotEqual(absent.returncode, 0)
+            with self.assertRaisesRegex(ValueError, "untracked"):
+                N.execute(root, native, environment())
+            self.assertFalse((root / "untracked-module-ran").exists())
+            self.assertFalse((root / ".ai/agent-checks/receipt.json").exists())
+
+    def test_classification_created_untracked_source_is_refused_before_recipe(self):
+        for plan_only in (True, False):
+            for selected in (True, False):
+                with self.subTest(plan_only=plan_only, selected=selected), tempfile.TemporaryDirectory() as directory:
+                    root, native = self.fixture(directory, mode="classification-untracked", selected=selected)
+                    with self.assertRaisesRegex(ValueError, "source changed"):
+                        N.execute(root, native, environment(), plan_only=plan_only)
+                    self.assertTrue((root / "classification-output.py").is_file())
+                    self.assertFalse((root / ".ai/agent-checks/receipt.json").exists())
+
+    def test_untracked_path_bytes_and_symlink_do_not_hide_inputs(self):
+        for kind in ("newline", "nonutf8", "symlink"):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as directory:
+                root, native = self.fixture(directory)
+                if kind == "symlink":
+                    (root / "untracked-link").symlink_to("tracked")
+                else:
+                    name = b"untracked\ninput" if kind == "newline" else b"untracked-\xff"
+                    fd = os.open(os.fsencode(root) + b"/" + name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                    os.close(fd)
+                with self.assertRaisesRegex(ValueError, "untracked"):
+                    N.execute(root, native, environment())
+                self.assertFalse((root / ".ai/agent-checks/receipt.json").exists())
+
+    def test_untracked_inventory_failure_never_becomes_success(self):
+        for failed_probe in (1, 2, 3):
+            with self.subTest(failed_probe=failed_probe), tempfile.TemporaryDirectory() as directory:
+                root, native = self.fixture(directory)
+                original_git = N.git
+                seen = 0
+
+                def failing_git(owner, *args, **kwargs):
+                    nonlocal seen
+                    if args == ("ls-files", "--others", "--exclude-standard", "-z"):
+                        seen += 1
+                        if seen == failed_probe:
+                            raise subprocess.CalledProcessError(128, ["git", "ls-files"])
+                    return original_git(owner, *args, **kwargs)
+
+                with patch.object(N, "git", side_effect=failing_git):
+                    with self.assertRaises(subprocess.CalledProcessError):
+                        N.execute(root, native, environment())
+                self.assertEqual(seen, failed_probe)
+                self.assertEqual((root / ".ai/agent-checks/receipt.json").exists(), failed_probe == 3)
+
+    def test_metadata_queries_cannot_execute_local_fsmonitor_or_write_index(self):
+        with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as controls:
+            root, native = self.fixture(directory)
+            marker = Path(controls) / "fsmonitor-ran"
+            hook = Path(controls) / "fsmonitor"
+            hook.write_text("#!" + sys.executable + "\nfrom pathlib import Path\n"
+                            "Path(" + repr(str(marker)) + ").write_text('executed')\n")
+            hook.chmod(0o700)
+            subprocess.run(["git", "config", "core.fsmonitor", str(hook)], cwd=root, check=True)
+            subprocess.run(["git", "config", "core.untrackedCache", "true"], cwd=root, check=True)
+            before = (root / ".git/index").read_bytes()
+            summary, code = N.execute(root, native, environment())
+            self.assertEqual(code, 0)
+            self.assertTrue(summary["recipe_passed"])
+            self.assertFalse(marker.exists())
+            self.assertEqual((root / ".git/index").read_bytes(), before)
+
+    def test_every_metadata_query_ignores_foreign_git_selectors_and_trace(self):
+        with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as controls:
+            root, native = self.fixture(directory)
+            trace = Path(controls) / "foreign-trace"
+            foreign = Path(controls) / "not-this-repository"
+            overrides = {"GIT_DIR": str(foreign), "GIT_WORK_TREE": str(foreign),
+                         "GIT_OBJECT_DIRECTORY": str(foreign), "GIT_COMMON_DIR": str(foreign),
+                         "GIT_ALTERNATE_OBJECT_DIRECTORIES": str(foreign),
+                         "GIT_TRACE": str(trace), "GIT_TRACE2_EVENT": str(trace),
+                         "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "core.fsmonitor",
+                         "GIT_CONFIG_VALUE_0": str(foreign)}
+            # Selection executes no owner Git command: this isolates all wrapper
+            # metadata queries, including merge-base, from recipe behavior.
+            with patch.dict(os.environ, overrides):
+                summary, code = N.execute(root, native, environment(), plan_only=True)
+            self.assertEqual(code, 0)
+            self.assertEqual(summary["status"], "selected-pending-execution")
+            self.assertFalse(summary["recipe_passed"])
+            self.assertFalse(trace.exists())
+            self.assertFalse((root / ".ai/agent-checks/receipt.json").exists())
+
+    def test_integrated_base_negative_and_transport_error_remain_distinct(self):
+        for failed_code in (1, 128):
+            with self.subTest(failed_code=failed_code), tempfile.TemporaryDirectory() as directory:
+                root, native = self.fixture(directory)
+                original_git = N.git
+
+                def failing_git(owner, *args, **kwargs):
+                    if args[0] == "merge-base":
+                        raise subprocess.CalledProcessError(failed_code, ["git", "merge-base"])
+                    return original_git(owner, *args, **kwargs)
+
+                expected = ValueError if failed_code == 1 else subprocess.CalledProcessError
+                with patch.object(N, "git", side_effect=failing_git), self.assertRaises(expected):
+                    N.execute(root, native, environment())
+                self.assertFalse((root / ".ai/agent-checks/receipt.json").exists())
+
+    def test_local_graft_and_replace_cannot_forge_integrated_base(self):
+        for kind in ("graft", "replace"):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as directory:
+                root, native = self.fixture(directory)
+
+                def git(*args):
+                    return subprocess.check_output(["git", "-c", "user.name=Fixture", "-c",
+                        "user.email=fixture@example.invalid", *args], cwd=root, text=True,
+                        stderr=subprocess.DEVNULL, timeout=15).strip()
+
+                head = native["pull_request"]["head"]["sha"]
+                tree = git("rev-parse", "HEAD^{tree}")
+                unrelated = git("commit-tree", tree, "-m", "synthetic unrelated root")
+                native["pull_request"]["base"]["sha"] = unrelated
+                self.assertEqual(subprocess.run(["git", "merge-base", "--is-ancestor", unrelated, head],
+                    cwd=root, capture_output=True, timeout=15).returncode, 1)
+                if kind == "graft":
+                    (root / ".git/info/grafts").write_text(head + " " + unrelated + "\n")
+                else:
+                    replacement = git("commit-tree", tree, "-p", unrelated, "-m", "synthetic replacement")
+                    git("replace", head, replacement)
+                # Prove the fixture really forges the ordinary effective graph.
+                self.assertEqual(subprocess.run(["git", "merge-base", "--is-ancestor", unrelated, head],
+                    cwd=root, capture_output=True, timeout=15).returncode, 0)
+                with self.assertRaisesRegex(ValueError, "current base must be integrated"):
+                    N.execute(root, native, environment(), plan_only=True)
+                self.assertFalse((root / ".ai/agent-checks/receipt.json").exists())
+
+    def test_shallow_overlay_cannot_replace_available_raw_parent_graph(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root, native = self.fixture(directory)
+            head = native["pull_request"]["head"]["sha"]
+            base = native["pull_request"]["base"]["sha"]
+            (root / ".git/shallow").write_text(head + "\n")
+            self.assertEqual(subprocess.run(["git", "merge-base", "--is-ancestor", base, head],
+                cwd=root, capture_output=True, timeout=15).returncode, 1)
+            summary, code = N.execute(root, native, environment(), plan_only=True)
+            self.assertEqual(code, 0)
+            self.assertEqual(summary["status"], "selected-pending-execution")
+            self.assertFalse(summary["recipe_passed"])
+            self.assertEqual((root / ".git/shallow").read_text(), head + "\n")
+
+    def test_missing_raw_parent_object_cannot_qualify_a_shallow_checkout(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root, native = self.fixture(directory)
+            head = native["pull_request"]["head"]["sha"]
+            base = native["pull_request"]["base"]["sha"]
+            (root / ".git/shallow").write_text(head + "\n")
+            (root / ".git/objects" / base[:2] / base[2:]).unlink()
+            with self.assertRaises(subprocess.CalledProcessError):
+                N.execute(root, native, environment(), plan_only=True)
+            self.assertFalse((root / ".ai/agent-checks/receipt.json").exists())
+
+    def test_effective_clean_filters_hold_before_diff_at_every_stage(self):
+        for stage in ("tracked-attributes", "local-attributes", "classification-filter", "recipe-filter"):
+            with self.subTest(stage=stage), tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as controls:
+                root, native = self.fixture(directory, mode=stage)
+                marker = Path(controls) / "clean-filter-ran"
+                hook = Path(controls) / "clean-filter"
+                hook.write_text("#!" + sys.executable + "\nimport sys\nfrom pathlib import Path\n"
+                    "Path(" + repr(str(marker)) + ").write_text('executed')\n"
+                    "sys.stdout.buffer.write(sys.stdin.buffer.read())\n")
+                hook.chmod(0o700)
+                if stage == "tracked-attributes":
+                    (root / ".gitattributes").write_text("tracked filter=synthetic\n")
+                    subprocess.run(["git", "add", ".gitattributes"], cwd=root, check=True)
+                    subprocess.run(["git", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                        "commit", "-qm", "synthetic filter attribute"], cwd=root, check=True)
+                    native["pull_request"]["head"]["sha"] = subprocess.check_output(
+                        ["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+                elif stage == "local-attributes":
+                    (root / ".git/info/attributes").write_text("tracked filter=synthetic\n")
+                subprocess.run(["git", "config", "filter.synthetic.clean", str(hook)], cwd=root, check=True)
+                (root / "tracked").touch()
+                with self.assertRaisesRegex(ValueError, "filtered or ambiguous source"):
+                    N.execute(root, native, environment())
+                self.assertFalse(marker.exists())
+                self.assertEqual((root / ".ai/agent-checks/receipt.json").exists(), stage == "recipe-filter")
+
+    def test_nonlocal_attribute_file_is_not_loaded_or_used(self):
+        with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as controls:
+            root, native = self.fixture(directory)
+            attributes = Path(controls) / "foreign-attributes"
+            # A directory cannot be read as an attributes file. Overriding the
+            # nonlocal route keeps it outside both guard and diff observations.
+            attributes.mkdir()
+            subprocess.run(["git", "config", "core.attributesFile", str(attributes)], cwd=root, check=True)
+            summary, code = N.execute(root, native, environment())
+            self.assertEqual(code, 0)
+            self.assertTrue(summary["recipe_passed"])
+
+    def test_filter_metadata_failure_or_ambiguity_cannot_become_pass(self):
+        for failure in ("transport", "truncated", "wrong-path", "empty-attribute", "filter-literal", "duplicate"):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as directory:
+                root, native = self.fixture(directory)
+                original_git = N.git
+
+                def failing_git(owner, *args, **kwargs):
+                    if args[0] == "check-attr":
+                        if failure == "transport":
+                            raise subprocess.CalledProcessError(128, ["git", "check-attr"])
+                        if failure == "truncated": return b"tracked"
+                        if failure == "wrong-path": return b"foreign\0text\0set\0"
+                        if failure == "empty-attribute": return b"tracked\0\0set\0"
+                        if failure == "duplicate": return b"tracked\0text\0set\0" * 2
+                        return b"tracked\0filter\0unspecified\0"
+                    return original_git(owner, *args, **kwargs)
+
+                expected = subprocess.CalledProcessError if failure == "transport" else ValueError
+                with patch.object(N, "git", side_effect=failing_git), self.assertRaises(expected):
+                    N.execute(root, native, environment())
+                self.assertFalse((root / ".ai/agent-checks/receipt.json").exists())
+
+    def test_filter_sentinel_driver_names_and_disabled_declarations_hold(self):
+        for driver in ("unset", "unspecified", "set", "synthetic", "-filter"):
+            with self.subTest(driver=driver), tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as controls:
+                root, native = self.fixture(directory)
+                marker = Path(controls) / "reserved-filter-ran"
+                hook = Path(controls) / "reserved-filter"
+                hook.write_text("#!" + sys.executable + "\nimport sys\nfrom pathlib import Path\n"
+                    "Path(" + repr(str(marker)) + ").write_text('executed')\n"
+                    "sys.stdout.buffer.write(sys.stdin.buffer.read())\n")
+                hook.chmod(0o700)
+                attribute = "-filter" if driver == "-filter" else "filter=" + driver
+                (root / ".git/info/attributes").write_text("tracked " + attribute + "\n")
+                if driver != "-filter":
+                    subprocess.run(["git", "config", "filter." + driver + ".clean", str(hook)], cwd=root, check=True)
+                (root / "tracked").touch()
+                with self.assertRaisesRegex(ValueError, "filtered or ambiguous source"):
+                    N.execute(root, native, environment())
+                self.assertFalse(marker.exists())
+                self.assertFalse((root / ".ai/agent-checks/receipt.json").exists())
+
+    def test_benign_attributes_and_actual_filter_reset_remain_supported(self):
+        for attribute in ("text eol=lf", "!filter", "text eol=lf !filter"):
+            with self.subTest(attribute=attribute), tempfile.TemporaryDirectory() as directory:
+                root, native = self.fixture(directory)
+                (root / ".git/info/attributes").write_text("tracked " + attribute + "\n")
+                summary, code = N.execute(root, native, environment())
+                self.assertEqual(code, 0)
+                self.assertTrue(summary["recipe_passed"])
+
+    def test_special_index_flags_cannot_hide_tracked_drift_at_any_stage(self):
+        for flag in ("assume-unchanged", "skip-worktree"):
+            for stage in ("before", "classification", "recipe"):
+                with self.subTest(flag=flag, stage=stage), tempfile.TemporaryDirectory() as directory:
+                    mode = stage + "-index-" + flag if stage != "before" else "pass"
+                    root, native = self.fixture(directory, mode=mode)
+                    if stage == "before":
+                        subprocess.run(["git", "update-index", "--" + flag, "tracked"], cwd=root, check=True)
+                        (root / "tracked").write_text("synthetic hidden initial drift")
+                    with self.assertRaisesRegex(ValueError, "source index flags"):
+                        N.execute(root, native, environment())
+                    self.assertEqual(subprocess.check_output(["git", "diff", "--name-only", "HEAD"], cwd=root), b"")
+                    raw = subprocess.check_output(["git", "hash-object", "--no-filters", "tracked"], cwd=root)
+                    committed = subprocess.check_output(["git", "rev-parse", "HEAD:tracked"], cwd=root)
+                    self.assertNotEqual(raw, committed)
+                    entry = subprocess.check_output(["git", "ls-files", "-v", "tracked"], cwd=root)
+                    self.assertTrue(entry.startswith(b"h " if flag == "assume-unchanged" else b"S "))
+                    self.assertEqual((root / ".ai/agent-checks/receipt.json").exists(), stage == "recipe")
+
+    def test_recipe_created_untracked_output_cannot_publish_a_pass(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root, native = self.fixture(directory, mode="untracked-output")
+            with self.assertRaisesRegex(ValueError, "source changed"):
+                N.execute(root, native, environment())
+            self.assertTrue((root / "untracked-output.txt").is_file())
+            self.assertTrue((root / ".ai/agent-checks/receipt.json").is_file())
+
+    def test_ignored_artifacts_and_caches_remain_permitted(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root, native = self.fixture(directory, mode="ignored-output")
+            (root / "dist").mkdir()
+            (root / "dist/existing.txt").write_text("synthetic ignored input artifact")
+            (root / "scripts/__pycache__").mkdir()
+            (root / "scripts/__pycache__/fixture.pyc").write_bytes(b"synthetic ignored cache")
+            summary, code = N.execute(root, native, environment())
+            self.assertEqual(code, 0)
+            self.assertTrue(summary["recipe_passed"])
+            self.assertTrue(summary["whole_configured_recipe_passed"])
+            self.assertTrue((root / "dist/output.txt").is_file())
 
 
 class WorkflowContracts(unittest.TestCase):

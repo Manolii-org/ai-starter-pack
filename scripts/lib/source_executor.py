@@ -17,6 +17,7 @@ import math
 import os
 from pathlib import Path
 import re
+import resource
 import selectors
 import signal
 import stat
@@ -32,10 +33,31 @@ MAX_PROFILE = 65536
 MAX_RUNTIME = 128 * 1024 * 1024
 MAX_ADAPTER = 16 * 1024 * 1024
 ADAPTER = Path("/usr/bin/bwrap")
+# Explicit tested scope, separate from tree metadata parser bounds.
+MAX_PAYLOAD_FILES = 4096
+MAX_ARGUMENT_BYTES = 8 * 1024 * 1024
+MAX_ARGUMENT_COUNT = 9000
+FD_RESERVE = 32
 
 
 class ExecutionError(ValueError):
-    """Fixed categories only; never include command output or private paths."""
+    """Fixed categories only; cleanup_root is separate caller-owned state."""
+
+    def __init__(self, code: str, *, cleanup_root: Path | None = None):
+        self.cleanup_root = cleanup_root
+        super().__init__(code)
+
+
+class ExecutionResult(dict):
+    """Legacy JSON-compatible aggregate receipt plus explicit cleanup ownership.
+
+    The path is not a receipt field and is never serialized into aggregate data.
+    The caller owns this newly created private root; this library never removes it.
+    """
+
+    def __init__(self, record: dict, *, projection_root: Path):
+        super().__init__(record)
+        self.projection_root = projection_root
 
 
 def _require(condition: object, code: str) -> None:
@@ -362,6 +384,66 @@ def _collect(argv: list[str], fds: tuple[int, ...], timeout: float, output_limit
                 result["elapsed_ms"] = round((time.monotonic() - start) * 1000)
 
 
+def _mount_arguments(paths: list[tuple[str, bool]], descriptors: list[int]) -> list[str]:
+    command = ["--unshare-all", "--unshare-user", "--die-with-parent", "--new-session",
+               "--disable-userns", "--cap-drop", "ALL", "--clearenv", "--tmpfs", "/", "--tmpfs", "/source"]
+    _require(len(paths) * 5 <= MAX_ARGUMENT_COUNT, "execution_resource_budget_exceeded")
+    directories = {"/source", "/tmp", "/dev"}
+    for path, _ in paths:
+        for parent in Path(path).parents:
+            if str(parent) != "/":
+                directories.add(str(parent))
+                _require(len(directories) * 2 + len(paths) * 5 <= MAX_ARGUMENT_COUNT,
+                         "execution_resource_budget_exceeded")
+    for directory in sorted(directories, key=lambda value: (value.count("/"), value)):
+        command.extend(["--dir", directory])
+    command.extend(["--dev", "/dev", "--tmpfs", "/tmp", "--chdir", "/source",
+                    "--setenv", "PATH", "/bin", "--setenv", "HOME", "/tmp"])
+    for (path, executable), fd in zip(paths, descriptors, strict=True):
+        command.extend(["--perms", "0555" if executable else "0444", "--ro-bind-data", str(fd), path])
+    command.extend(["--remount-ro", "/source", "--remount-ro", "/"])
+    return command
+
+
+def _argument_bytes(arguments: list[str]) -> bytes:
+    raw = b"\0".join(value.encode("utf-8") for value in arguments) + b"\0"
+    _require(len(raw) <= MAX_ARGUMENT_BYTES and len(arguments) <= MAX_ARGUMENT_COUNT,
+             "execution_resource_budget_exceeded")
+    return raw
+
+
+def _admit_resources(entries: Mapping[str, tuple[str, str]], profile: Mapping,
+                     runtime_root: Path, destination_parent: Path) -> None:
+    _require(len(entries) + len(profile["runtime_files"]) <= MAX_PAYLOAD_FILES,
+             "execution_resource_budget_exceeded")
+    paths = [("/" + row["path"], row["executable"]) for row in profile["runtime_files"]]
+    paths.extend(("/source/" + path, mode == "100755") for path, (mode, _) in entries.items())
+    _require(len(paths) <= MAX_PAYLOAD_FILES, "execution_resource_budget_exceeded")
+    # Observe only this process's descriptor inventory. The derived reserve
+    # covers retained directory/adapter anchors, maximum capture depth, pipes
+    # and the args memfd. Build options incrementally with the parser count bound.
+    # No process-global OS limits or security settings are changed.
+    soft, _ = resource.getrlimit(resource.RLIMIT_NOFILE)
+    open_fds = len(os.listdir("/proc/self/fd"))
+    capture_depth = max(128, *(row["path"].count("/") for row in profile["runtime_files"]))
+    reserve = FD_RESERVE + capture_depth + len(runtime_root.parts) + len(destination_parent.parts)
+    _require(soft == resource.RLIM_INFINITY or len(paths) + open_fds + reserve <= soft,
+             "execution_resource_budget_exceeded")
+    # Upper-bound the decimal FD width before opening any payload descriptors.
+    largest = max(soft if soft != resource.RLIM_INFINITY else 2**31, 2**31)
+    arguments = _mount_arguments(paths, [largest] * len(paths))
+    _argument_bytes(arguments)
+    # Bubblewrap v0.11 also bounds parsed arguments from --args to 9000,
+    # including the outer argv. Keep the command outside the options stream.
+    outer = ["/proc/" + "9" * 20 + "/fd/" + str(largest), "--args", str(largest),
+             "--", *profile["argv"]]
+    _require(len(arguments) + len(outer) <= MAX_ARGUMENT_COUNT,
+             "execution_resource_budget_exceeded")
+    host_bytes = sum(len(value.encode()) + 1 for value in outer) + len(outer) * 8
+    _require(host_bytes + 32768 <= os.sysconf("SC_ARG_MAX"),
+             "execution_resource_budget_exceeded")
+
+
 def execute_committed_source(repository: Path, *, selection: projection.Selection, repository_name: str,
                              compiled_policy_sha256: str, destination_parent: Path,
                              profile_bytes: bytes, profile_sha256: str, runtime_root: Path) -> dict:
@@ -376,16 +458,25 @@ def execute_committed_source(repository: Path, *, selection: projection.Selectio
                                repository=repository_name, policy_sha256=compiled_policy_sha256)
     _require(sys.platform == "linux" and hasattr(os, "memfd_create") and Path("/proc/self/fd").is_dir(),
              "isolation_adapter_unavailable")
+    root = Path(runtime_root)
+    _require(root.is_absolute() and ".." not in root.parts, "invalid_runtime_root")
+
+    def admit(entries):
+        try:
+            _admit_resources(entries, profile, root, Path(destination_parent))
+        except ExecutionError as exc:
+            raise projection.ProjectionError("execution_resource_budget_exceeded") from exc
+
+    projected = None
     try:
         projected = projection.project_committed_source(repository, selection=selection,
             repository_name=repository_name, compiled_policy_sha256=compiled_policy_sha256,
-            destination_parent=destination_parent)
+            destination_parent=destination_parent,
+            _admit_sources=admit)
         with ExitStack() as stack:
             # Fixed original-inode execution respects the installed OS policy.
             # Only payloads are sealed; adapter root/OS trust is explicit.
             adapter = stack.enter_context(_adapter_scope(profile["adapter_sha256"]))
-            root = Path(runtime_root)
-            _require(root.is_absolute() and ".." not in root.parts, "invalid_runtime_root")
             runtime_fd = stack.enter_context(projection._directory(root))
             _require(not os.fstat(runtime_fd).st_mode & 0o077, "runtime_root_not_private")
             files = []
@@ -409,29 +500,33 @@ def execute_committed_source(repository: Path, *, selection: projection.Selectio
             admitted, _ = projection._classify(entries, policy)
             for path, (mode, oid) in admitted.items():
                 files.append(("/source/" + path, _sealed(stack, store.read(oid, "blob")), mode == "100755"))
-            command = [f"/proc/{adapter.owner_pid}/fd/{adapter.fd}", "--unshare-all", "--unshare-user", "--die-with-parent", "--new-session",
-                       "--disable-userns", "--cap-drop", "ALL", "--clearenv", "--tmpfs", "/", "--tmpfs", "/source"]
-            directories = {"/source", "/tmp", "/dev"}
-            for path, _, _ in files:
-                directories.update(str(parent) for parent in Path(path).parents if str(parent) != "/")
-            for directory in sorted(directories, key=lambda value: (value.count("/"), value)):
-                command.extend(["--dir", directory])
-            command.extend(["--dev", "/dev", "--tmpfs", "/tmp", "--chdir", "/source",
-                            "--setenv", "PATH", "/bin", "--setenv", "HOME", "/tmp"])
-            for path, fd, executable in files:
-                command.extend(["--perms", "0555" if executable else "0444", "--ro-bind-data", str(fd), path])
-            command.extend(["--remount-ro", "/source", "--remount-ro", "/", "--", *profile["argv"]])
-            outcome = _collect(_AdapterCommand(command, adapter), tuple(fd for _, fd, _ in files),
+            arguments = _mount_arguments([(path, executable) for path, _, executable in files],
+                                         [fd for _, fd, _ in files])
+            arguments_fd = _sealed(stack, _argument_bytes(arguments))
+            command = [f"/proc/{adapter.owner_pid}/fd/{adapter.fd}", "--args", str(arguments_fd),
+                       "--", *profile["argv"]]
+            outcome = _collect(_AdapterCommand(command, adapter),
+                               (*tuple(fd for _, fd, _ in files), arguments_fd),
                                profile["timeout_seconds"], profile["max_output_bytes"])
-        return {"schema": "source-execution/v1", "scope": "committed-source-only", **outcome,
+        return ExecutionResult({"schema": "source-execution/v1", "scope": "committed-source-only", **outcome,
                 "repository": repository_name, "source_sha": selection.source, "source_tree": selection.tree,
                 "base_sha": selection.base, "base_tree": selection.base_tree,
                 "compiled_policy_sha256": compiled_policy_sha256, "profile_sha256": profile_sha256,
                 "profile_id": profile["id"], "adapter_sha256": profile["adapter_sha256"],
                 "source_execution_closure_verified": outcome["outcome"] == "passed",
                 "full_repository_qualified": False, "native_gate_qualified": False,
-                "admission_authorized": False, "production_authorized": False, "cache_reusable": False}
-    except ExecutionError:
+                "admission_authorized": False, "production_authorized": False, "cache_reusable": False},
+                               projection_root=projected.root)
+    except ExecutionError as exc:
+        if projected is not None:
+            exc.cleanup_root = projected.root
         raise
-    except (OSError, subprocess.SubprocessError, projection.ProjectionError, KeyError) as exc:
-        raise ExecutionError("execution_input_or_adapter_unavailable") from exc
+    except projection.ProjectionError as exc:
+        code = ("execution_resource_budget_exceeded" if exc.code == "execution_resource_budget_exceeded"
+                else "execution_input_or_adapter_unavailable")
+        raise ExecutionError(code, cleanup_root=projected.root if projected is not None
+                             else exc.cleanup_root) from exc
+    except (OSError, subprocess.SubprocessError, KeyError) as exc:
+        raise ExecutionError("execution_input_or_adapter_unavailable",
+                             cleanup_root=projected.root if projected is not None
+                             else getattr(exc, "cleanup_root", None)) from exc
