@@ -1,3 +1,4 @@
+#!/usr/bin/env bash
 # Historical negative fixture. Never used by runtime workflows.
 set -euo pipefail
 echo "number=$PR_NUM" >> "$GITHUB_OUTPUT"

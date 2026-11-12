@@ -399,7 +399,8 @@
         ".github/workflows/workflow-security-reusable.yml",
         "tests/test_workflow_security.py",
         "tests/test_action_pins.py",
-        "scripts/ci/autofix-event-gate.sh"
+        "scripts/ci/autofix-event-gate.sh",
+        "tests/fixtures/autofix/**"
       ],
       "tools": [
         "python"
