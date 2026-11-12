@@ -217,7 +217,12 @@
         "scripts/tests/test_release_vector.py",
         "scripts/tests/fixtures/release-manifest.v2.json",
         "plugin/manolii-framework/schemas/release-manifest.v2.schema.json",
-        "registry/platform/framework/schemas/release-manifest.v2.schema.json"
+        "registry/platform/framework/schemas/release-manifest.v2.schema.json",
+        "schemas/release-source-policy.v1.schema.json",
+        "plugin/manolii-framework/schemas/release-source-policy.v1.schema.json",
+        "registry/platform/framework/schemas/release-source-policy.v1.schema.json",
+        "scripts/tests/test_release_source_policy.py",
+        "scripts/tests/fixtures/release-manifest.c435.py"
       ],
       "tools": [
         "uv"
@@ -241,7 +246,7 @@
         [
           ".ai/agent-checks/release-venv/bin/python",
           "-c",
-          "from pathlib import Path; import sys; names=['release-adoption.v1.schema.json','release-manifest.v1.schema.json','release-manifest.v2.schema.json']; targets=['plugin/manolii-framework/schemas','registry/platform/framework/schemas']; ok=all((Path('schemas')/n).read_bytes()==(Path(t)/n).read_bytes() for t in targets for n in names); sys.exit(0 if ok else 'generated release schemas differ; run owning plugin and registry builders')"
+          "from pathlib import Path; import sys; names=['release-adoption.v1.schema.json','release-manifest.v1.schema.json','release-manifest.v2.schema.json','release-source-policy.v1.schema.json']; targets=['plugin/manolii-framework/schemas','registry/platform/framework/schemas']; ok=all((Path('schemas')/n).read_bytes()==(Path(t)/n).read_bytes() for t in targets for n in names); sys.exit(0 if ok else 'generated release schemas differ; run owning plugin and registry builders')"
         ],
         [
           ".ai/agent-checks/release-venv/bin/python",
@@ -443,6 +448,42 @@
         {
           "path": ".github/workflows/registry-lint.yml",
           "contains": "python3 -m pytest tests/test_registry.py tests/test_native_guidance.py -q"
+        }
+      ]
+    },
+    {
+      "id": "installer-layout-contract",
+      "paths": [
+        "scripts/install-agent-validation.py",
+        "plugin/manolii-framework/scripts/install-agent-validation.py",
+        "registry/platform/framework/scripts/install-agent-validation.py",
+        "scripts/tests/test_agent_validation_layout.py",
+        "docs/agent-validation-layout.md",
+        "config/agent-checks.json",
+        "config/agent-checks.json.jinja",
+        "copier.yml",
+        "tests/test_copier_render.py",
+        ".github/workflows/plugin-eval-gate.yml"
+      ],
+      "tools": [
+        "uv"
+      ],
+      "environment": "release-contract-python",
+      "timeout_seconds": 360,
+      "commands": [
+        [
+          ".ai/agent-checks/release-venv/bin/python",
+          "-B",
+          "-m",
+          "pytest",
+          "scripts/tests/test_agent_validation_layout.py",
+          "-q"
+        ]
+      ],
+      "ci_sources": [
+        {
+          "path": ".github/workflows/plugin-eval-gate.yml",
+          "contains": "python3 -m pytest scripts/tests/test_agent_validation_layout.py -q"
         }
       ]
     }

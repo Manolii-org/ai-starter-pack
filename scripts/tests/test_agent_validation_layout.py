@@ -1530,3 +1530,173 @@ def test_explicit_layout_never_downgrades_with_directory_descriptors_only(tmp_pa
         assert plan._link_handles == {}
     finally:
         plan.close()
+
+
+@pytest.mark.parametrize("directory", [".", "scripts", "docs", ".ai/agent-checks"])
+def test_retained_temporary_context_locates_same_basename_across_selected_directories(
+        replacement_kernel, tmp_path, monkeypatch, capsys, directory):
+    module = replacement_kernel
+    root = tmp_path / "selected-directory"
+    root.mkdir()
+    parent = root if directory == "." else root / directory
+    parent.mkdir(parents=True, exist_ok=True)
+    path = parent / "owner.txt"
+    path.write_bytes(b"Owner bytes.\n")
+    path.chmod(0o644)
+    plan = module.OutputPlan(root)
+    plan.add(path, b"Replacement.\n", "fixture")
+    original = module.os.replace
+    failures = []
+    monkeypatch.setattr(module.os, "urandom", lambda count: bytes([23] * count))
+
+    def actual_basename_error(src, dst, **kwargs):
+        path.rename(parent / "owner-saved.txt")
+        path.mkdir()
+        try:
+            return original(src, dst, **kwargs)
+        except OSError as error:
+            failures.append(error)
+            raise
+
+    monkeypatch.setattr(module.os, "replace", actual_basename_error)
+    with pytest.raises(IsADirectoryError) as caught:
+        plan.apply([path])
+    assert caught.value is failures[0]
+    assert Path(caught.value.filename).name == caught.value.filename
+    assert caught.value.filename2 == "owner.txt"
+    error = capsys.readouterr().err
+    record = json.loads(error.split("AGENT-VALIDATION-TEMPORARY-RECOVERY: ", 1)[1].splitlines()[0])
+    assert "selected_parent" in record, record
+    assert record["selected_parent"] == str(parent)
+    assert record["selected_parent_observation"] == "historical_selection"
+    assert record["held_parent_identity"] == {"device": parent.stat().st_dev, "inode": parent.stat().st_ino}
+    assert record["name"] == ".agent-validation-" + bytes([23] * 16).hex()
+    orphan = Path(record["selected_parent"]) / record["name"]
+    assert orphan.read_bytes() == b"Replacement.\n"
+    assert record["held_identity"] == {"device": orphan.stat().st_dev, "inode": orphan.stat().st_ino}
+    assert record["private"] is True and record["held_mode"] == "0600"
+    assert record["name_observation"] == "owned_at_check"
+    assert path.is_dir() and (parent / "owner-saved.txt").read_bytes() == b"Owner bytes.\n"
+
+
+def test_retained_temporary_selected_parent_remains_historical_after_rename(
+        replacement_kernel, tmp_path, monkeypatch, capsys):
+    module = replacement_kernel
+    root = tmp_path / "selected-parent-rename"
+    parent = root / "scripts"
+    parent.mkdir(parents=True)
+    path = parent / "owner.txt"
+    path.write_bytes(b"Owner bytes.\n")
+    moved = root / "moved-scripts"
+    plan = module.OutputPlan(root)
+    plan.add(path, b"Replacement.\n", "fixture")
+    original = module.os.replace
+    observed = {}
+
+    def rename_parent_before_actual_error(src, dst, **kwargs):
+        parent.rename(moved)
+        parent.mkdir()
+        decoy = parent / src
+        decoy.write_bytes(b"Other writer temporary.\n")
+        decoy.chmod(0o644)
+        observed["decoy"] = decoy
+        observed["identity"] = (decoy.stat().st_dev, decoy.stat().st_ino)
+        (moved / "owner.txt").rename(moved / "owner-saved.txt")
+        (moved / "owner.txt").mkdir()
+        return original(src, dst, **kwargs)
+
+    monkeypatch.setattr(module.os, "replace", rename_parent_before_actual_error)
+    with pytest.raises(IsADirectoryError):
+        plan.apply([path])
+    record = json.loads(capsys.readouterr().err.split("AGENT-VALIDATION-TEMPORARY-RECOVERY: ", 1)[1].splitlines()[0])
+    assert "selected_parent" in record, record
+    assert record["selected_parent"] == str(parent)
+    assert record["selected_parent_observation"] == "historical_selection"
+    assert record["held_parent_identity"] == {"device": moved.stat().st_dev, "inode": moved.stat().st_ino}
+    assert record["held_parent_identity"] != {"device": parent.stat().st_dev, "inode": parent.stat().st_ino}
+    orphan = moved / record["name"]
+    assert orphan.read_bytes() == b"Replacement.\n" and orphan.stat().st_mode & 0o777 == 0o600
+    assert record["held_identity"] == {"device": orphan.stat().st_dev, "inode": orphan.stat().st_ino}
+    decoy = observed["decoy"]
+    assert (decoy.stat().st_dev, decoy.stat().st_ino) == observed["identity"]
+    assert decoy.read_bytes() == b"Other writer temporary.\n" and decoy.stat().st_mode & 0o777 == 0o644
+    assert record["private"] is True
+
+
+def test_retained_temporary_context_survives_privacy_cleanup_failure(
+        replacement_kernel, tmp_path, monkeypatch, capsys):
+    module = replacement_kernel
+    root = tmp_path / "selected-cleanup-denied"
+    parent = root / "docs"
+    parent.mkdir(parents=True)
+    path = parent / "owner.txt"
+    path.write_bytes(b"Owner bytes.\n")
+    path.chmod(0o644)
+    plan = module.OutputPlan(root)
+    plan.add(path, b"Replacement.\n", "fixture")
+    replace, chmod = module.os.replace, module.os.fchmod
+
+    def actual_error(src, dst, **kwargs):
+        path.rename(parent / "owner-saved.txt")
+        path.mkdir()
+        return replace(src, dst, **kwargs)
+
+    def privacy_denied(handle, mode):
+        if mode == 0o600:
+            raise PermissionError(errno.EACCES, "synthetic privacy cleanup denial")
+        return chmod(handle, mode)
+
+    monkeypatch.setattr(module.os, "replace", actual_error)
+    monkeypatch.setattr(module.os, "fchmod", privacy_denied)
+    with pytest.raises(IsADirectoryError) as caught:
+        plan.apply([path])
+    assert caught.value.filename2 == "owner.txt"
+    error = capsys.readouterr().err
+    assert "synthetic privacy cleanup denial" in error
+    record = json.loads(error.split("AGENT-VALIDATION-TEMPORARY-RECOVERY: ", 1)[1].splitlines()[0])
+    assert "selected_parent" in record, record
+    assert record["selected_parent"] == str(parent)
+    orphan = parent / record["name"]
+    assert orphan.read_bytes() == b"Replacement.\n" and orphan.stat().st_mode & 0o777 == 0o644
+    assert record["held_mode"] == "0644" and record["private"] is False
+    assert record["held_identity"] == {"device": orphan.stat().st_dev, "inode": orphan.stat().st_ino}
+
+
+def test_retained_temporary_legacy_helper_call_preserves_name_and_unknown_path(
+        replacement_kernel, tmp_path, capsys):
+    module = replacement_kernel
+    name = ".agent-validation-legacy"
+    path = tmp_path / name
+    path.write_bytes(b"Owned temporary.\n")
+    parent = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    handle = os.open(path, os.O_WRONLY | os.O_NOFOLLOW)
+    try:
+        module.cleanup_owned_temporary(name, handle, parent, OSError("primary"))
+    finally:
+        os.close(handle)
+        os.close(parent)
+    record = json.loads(capsys.readouterr().err.split("AGENT-VALIDATION-TEMPORARY-RECOVERY: ", 1)[1].splitlines()[0])
+    assert record["name"] == name and record["name_observation"] == "owned_at_check"
+    assert "selected_parent" in record, record
+    assert record["selected_parent"] is None and record["selected_parent_observation"] == "unknown"
+    assert record["held_parent_identity"] == {"device": tmp_path.stat().st_dev, "inode": tmp_path.stat().st_ino}
+    assert record["private"] is True and path.stat().st_mode & 0o777 == 0o600
+
+
+def test_installer_layout_suite_has_automatic_full_owner_recipe_and_native_coverage():
+    config = json.loads((ROOT / "config/agent-checks.json").read_text())
+    checks = [value for value in config["checks"] if value["id"] == "installer-layout-contract"]
+    assert len(checks) == 1, "the complete installer layout suite needs an automatic owner check"
+    check = checks[0]
+    assert check["commands"] == [[".ai/agent-checks/release-venv/bin/python", "-B", "-m", "pytest",
+                                  "scripts/tests/test_agent_validation_layout.py", "-q"]]
+    assert check["environment"] == "release-contract-python" and check["tools"] == ["uv"]
+    assert check["timeout_seconds"] == 360
+    assert {"scripts/install-agent-validation.py", "scripts/tests/test_agent_validation_layout.py",
+            "docs/agent-validation-layout.md", "config/agent-checks.json"} <= set(check["paths"])
+    workflow = yaml.safe_load((ROOT / ".github/workflows/plugin-eval-gate.yml").read_text())
+    assert workflow["jobs"]["eval-gate"]["timeout-minutes"] == 15
+    command = "python3 -m pytest scripts/tests/test_agent_validation_layout.py -q"
+    assert any(command in step.get("run", "").splitlines()
+               for step in workflow["jobs"]["eval-gate"]["steps"])
+    assert check["ci_sources"] == [{"path": ".github/workflows/plugin-eval-gate.yml", "contains": command}]

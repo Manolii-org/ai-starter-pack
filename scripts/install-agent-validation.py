@@ -198,7 +198,8 @@ def state(path: Path):
 
 
 
-def cleanup_owned_temporary(name: str, handle: int, parent: int, primary_error):
+def cleanup_owned_temporary(name: str, handle: int, parent: int, primary_error,
+                            *, selected_parent: Path | None = None):
     """Privatise only our held inode; retain it without pathname deletion."""
     privacy_error = None
     try:
@@ -222,7 +223,11 @@ def cleanup_owned_temporary(name: str, handle: int, parent: int, primary_error):
         mode = stat.S_IMODE(held.st_mode)
         # POSIX has no inode-CAS unlink. A name can be replaced after stat,
         # so keep this failed write rather than risk removing another writer.
+        held_parent = os.fstat(parent)
         record = {"name": name, "name_observation": "owned_at_check",
+                  "selected_parent": str(selected_parent) if selected_parent is not None else None,
+                  "selected_parent_observation": "historical_selection" if selected_parent is not None else "unknown",
+                  "held_parent_identity": {"device": held_parent.st_dev, "inode": held_parent.st_ino},
                   "held_identity": {"device": held.st_dev, "inode": held.st_ino},
                   "held_mode": f"{mode:04o}", "private": mode == 0o600,
                   "held_links": held.st_nlink}
@@ -402,7 +407,8 @@ class OutputPlan:
             primary_error = sys.exc_info()[1]
             try:
                 if temporary is not None and handle is not None:
-                    cleanup_owned_temporary(temporary, handle, descriptor, primary_error)
+                    cleanup_owned_temporary(temporary, handle, descriptor, primary_error,
+                                            selected_parent=path.parent)
             finally:
                 try:
                     if handle is not None:
