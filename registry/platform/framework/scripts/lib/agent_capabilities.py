@@ -2,7 +2,8 @@
 """Resolve a session capability manifest to the env-var NAMES it may hold.
 
 Contract: docs/contracts/credential-capabilities.md. Names only — this
-script never sees, fetches or prints a credential value. Fail-closed: an
+CLI never sees, fetches or prints a credential value. Shared review endpoint
+helpers read only the configured router credential and never print it. Fail-closed: an
 unknown capability, a malformed manifest or a broken table exits 2.
 
 Usage:
@@ -10,10 +11,12 @@ Usage:
       [--names-only | --report]
 """
 import argparse
+import importlib.util
 import json
 import os
 from pathlib import Path
 import re
+from urllib.parse import urlsplit
 import subprocess
 import sys
 
@@ -33,6 +36,63 @@ READ_ONLY_DIRECT_REVIEWERS = frozenset({
 
 class RouteAdmissionError(ValueError):
     """The requested transport has no admitted consumer policy (no secrets)."""
+
+
+def review_mode(environ=None):
+    """The configured review lane; provider-direct credits are never a default.
+
+    A legacy restrictive engagement flag is not authority to change egress.
+    Such consumers must retain their explicit admitted lane until their owner
+    supplies a compatible policy. Ordinary framework reviews use the router.
+    """
+    env = os.environ if environ is None else environ
+    mode = env.get("SECURITY_REVIEW_MODE", "governed")
+    if mode not in {"governed", "direct", "estate-ci-v1"}:
+        raise RouteAdmissionError("unsupported security review mode")
+    if mode != "direct" and env.get("CLIENT_AI_POLICY"):
+        raise RouteAdmissionError(
+            "client review policy has no compatible declared route; "
+            "the framework will not infer egress permission or require a vendor key"
+        )
+    return mode
+
+
+def governed_review_endpoint(environ=None):
+    """Resolve an explicit HTTPS router without reading any direct credential.
+
+    The Messages wire is compatibility, not a provider selection. A missing
+    router or credential remains missing coverage; no provider is a fallback.
+    """
+    env = os.environ if environ is None else environ
+    base = (env.get("LITELLM_PROXY_URL") or env.get("ANTHROPIC_BASE_URL") or "").strip().rstrip("/")
+    try:
+        parsed = urlsplit(base)
+        host = (parsed.hostname or "").lower().rstrip(".")
+        parsed.port
+    except ValueError:
+        return "", "", True
+    if (parsed.scheme != "https" or not host or parsed.username is not None
+            or parsed.password is not None or parsed.query or parsed.fragment
+            or host in {"api.anthropic.com", "api.openai.com", "generativelanguage.googleapis.com"}
+            or host.endswith((".anthropic.com", ".openai.com", ".openai.azure.com"))):
+        return "", "", True
+    key = ""
+    for name in ("LLM_API_KEY", "LITELLM_MASTER_KEY", "ANTHROPIC_API_KEY"):
+        value = (env.get(name) or "").strip()
+        if value.lower() == "bearer":
+            continue
+        if value.lower().startswith("bearer "):
+            value = value[7:].strip()
+        if value and not value.lower().startswith(("sk-ant-", "sk-proj-", "sk-svcacct-")):
+            key = value
+            break
+    if base.endswith("/v1/messages"):
+        url = base
+    elif base.endswith("/v1"):
+        url = base + "/messages"
+    else:
+        url = base + "/v1/messages"
+    return key, url, True
 
 
 def assessment_context(environ=None):
@@ -434,6 +494,189 @@ def main():
         for name in sorted(resolved):
             print(name)
     return 0
+
+
+
+
+REVIEW_ROUTING_ROOT = Path(__file__).resolve().parents[2]
+
+def _declared_route_reason(model, sensitivity, config=None):
+    order = {'public': 0, 'internal': 1, 'restricted_us_oss_ok': 2}
+    if sensitivity == 'restricted':
+        return 'restricted_no_ai'
+    if not isinstance(sensitivity, str) or sensitivity not in order:
+        return 'invalid_sensitivity'
+    if not isinstance(model, str) or not model:
+        return 'route_clearance_unavailable'
+    if config is None:
+        try:
+            candidates = [Path.cwd() / '.claude/model-routing.json',
+                          REVIEW_ROUTING_ROOT / '.claude/model-routing.json',
+                          REVIEW_ROUTING_ROOT / 'data/model-routing.json']
+            path = next((p for p in candidates if p.is_file()), None)
+            config = json.loads(path.read_text()) if path else {}
+        except (OSError, ValueError, TypeError):
+            return 'route_clearance_unavailable'
+    if not isinstance(config, dict):
+        return 'route_clearance_unavailable'
+
+    def ceiling(meta):
+        if not isinstance(meta, dict):
+            return None
+        if 'data_sensitivity_max' in meta:
+            value = meta['data_sensitivity_max']
+            return value if isinstance(value, str) and value in order else None
+        if 'data_clearance' not in meta:
+            return 'internal'
+        levels = meta['data_clearance']
+        if (not isinstance(levels, list) or not levels
+                or any(not isinstance(v, str) or v not in order for v in levels)):
+            return None
+        return max(levels, key=order.get)
+
+    def resolve():
+        # This is resolution precedence, not a least-clearance rule across
+        # unrelated transport namespaces: the proxy explicitly intercepts aliases.
+        for section in ('proxy_intercepted_models', 'tier_aliases'):
+            mapping = config.get(section, {})
+            if not isinstance(mapping, dict):
+                return None
+            if model in mapping:
+                return ceiling(mapping[model])
+        tiers = config.get('tier_definitions', {})
+        if not isinstance(tiers, dict):
+            return None
+        if model in tiers:
+            return ceiling(tiers[model])
+        matches = [ceiling(meta) for meta in tiers.values() if isinstance(meta, dict)
+                   and model in (meta.get('model'), meta.get('litellm_alias'))]
+        platforms = config.get('platforms', {})
+        if not isinstance(platforms, dict):
+            return None
+        for platform in platforms.values():
+            if not isinstance(platform, dict):
+                continue
+            aliases = platform.get('available_models', [])
+            resolution = platform.get('alias_resolution', {})
+            if (not isinstance(aliases, list) or not isinstance(resolution, dict)
+                    or any(not isinstance(v, str) or not v for v in aliases)):
+                continue
+            names = set(aliases)
+            valid = True
+            for alias in aliases:
+                target = resolution.get(alias)
+                if target is not None:
+                    if not isinstance(target, str) or not target:
+                        valid = False
+                        break
+                    names.add(target)
+            if valid and model in names:
+                matches.append(ceiling(platform))
+        return min(matches, key=lambda v: order.get(v, -1)) if matches else 'internal'
+
+    maximum = resolve()
+    if maximum is None:
+        return 'route_clearance_unavailable'
+    return None if order[maximum] >= order[sensitivity] else 'route_clearance_insufficient'
+
+
+def route_reason(model, sensitivity, config=None):
+    """Use immutable consumer-base routing policy under an Actions launcher.
+
+    Reusable hydration owns runtime/prompts but must not trust PR-edited route
+    ceilings or replace the consumer's committed policy with pack defaults.
+    """
+    if config is None and os.environ.get("GITHUB_ACTIONS") == "true":
+        try:
+            context = assessment_context()
+            root = Path.cwd()
+            path = ".claude/model-routing.json"
+            entries = _git_bytes(root, "ls-tree", "-z", context["base"], "--", path)
+            if not entries:
+                config = {}  # Successful absence retains only internal/public.
+            else:
+                rows = entries.rstrip(b"\0").split(b"\0")
+                if len(rows) != 1:
+                    raise ValueError("ambiguous route policy")
+                metadata, name = rows[0].decode("ascii").split("\t", 1)
+                mode, kind, oid = metadata.split()
+                if (name != path or mode not in {"100644", "100755"} or kind != "blob"
+                        or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", oid)):
+                    raise ValueError("invalid route policy source")
+                config = json.loads(_git_bytes(root, "cat-file", "blob", oid).decode("utf-8"))
+                if not isinstance(config, dict):
+                    raise ValueError("invalid route policy")
+        except (OSError, ValueError, TypeError, KeyError, AttributeError):
+            return "route_clearance_unavailable"
+    return _declared_route_reason(model, sensitivity, config)
+
+
+class ReviewInputError(ValueError):
+    """A complete serialized review input cannot be safely exported."""
+
+
+_REVIEW_PACKET_GUARD = None
+_REVIEW_SOURCE_TYPE = None
+_REVIEW_TEXT_JOIN = None
+
+
+def admit_review_wire(payload, *, proved_value=None):
+    """Screen actual JSON request values using the existing canonical catalog.
+
+    A caller may preserve existing local AST identifier spans through known
+    serialization. Freeze those values, bind their exact JSON bytes, and screen
+    the frozen snapshot. JSON/model fields can never supply proof objects.
+    Unproved text stays strict; catalog matches are never exempt.
+    """
+    if not isinstance(payload, bytes) or len(payload) > 32_000_000:
+        raise ReviewInputError("input_limit")
+    try:
+        def unique(pairs):
+            result = {}
+            for key, child in pairs:
+                if key in result:
+                    raise ValueError("duplicate review wire key")
+                result[key] = child
+            return result
+        value = json.loads(payload.decode("utf-8"), object_pairs_hook=unique)
+        global _REVIEW_PACKET_GUARD, _REVIEW_SOURCE_TYPE, _REVIEW_TEXT_JOIN
+        if _REVIEW_PACKET_GUARD is None:
+            path = REVIEW_ROUTING_ROOT / "scripts/run-judge.py"
+            spec = importlib.util.spec_from_file_location("_review_wire_guard", path)
+            if spec is None or spec.loader is None:
+                raise ValueError("guard unavailable")
+            module = importlib.util.module_from_spec(spec)
+            exec(compile(path.read_bytes(), str(path), "exec"), module.__dict__)
+            _REVIEW_SOURCE_TYPE = module._VerifiedSourceText
+            _REVIEW_TEXT_JOIN = module._join_review_text
+            # Broad roles run concurrently. Publish the readiness sentinel
+            # only after both immutable companion references are available.
+            _REVIEW_PACKET_GUARD = module._require_safe_packet
+        if proved_value is not None:
+            def freeze(item):
+                if isinstance(item, str):
+                    spans = getattr(item, "reference_spans", None)
+                    if spans is None:
+                        return str(item)
+                    if not isinstance(spans, frozenset):
+                        raise ValueError("unsupported source proof")
+                    return _REVIEW_TEXT_JOIN(_REVIEW_SOURCE_TYPE(str(item), spans))
+                if type(item) is dict:
+                    return {freeze(key): freeze(child) for key, child in item.items()}
+                if type(item) in (list, tuple):
+                    return [freeze(child) for child in item]
+                if item is None or type(item) in (bool, int, float):
+                    return item
+                raise ValueError("unsupported review value")
+            value = freeze(proved_value)
+            # Exact encoding rejects duplicate keys, substitutions and mutated
+            # caller objects. The guard sees an isolated, immutable-string copy.
+            if payload != json.dumps(value).encode("utf-8"):
+                raise ValueError("review wire/proof mismatch")
+        _REVIEW_PACKET_GUARD(value)
+    except (OSError, ValueError, TypeError, UnicodeError, ImportError, AttributeError, RecursionError, RuntimeError):
+        raise ReviewInputError("unsafe_review_input") from None
+    return payload
 
 
 if __name__ == "__main__":

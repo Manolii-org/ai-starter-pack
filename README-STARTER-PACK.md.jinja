@@ -222,7 +222,7 @@ The starter pack ships with a production-ready 8-tier LLM routing framework that
 - `restricted` — governance no-AI → routed to NO model (lint fails closed)
 - `internal` — own codebase, scripts → all tiers allowed
 - `public` — open-source, boilerplate → all tiers allowed
-- (the retired `anthropic_only` tier migrated to `restricted_us_oss_ok` 2026-09-26; client-policy engagements needing Anthropic-direct set `CLIENT_AI_POLICY` + `client_policy_model`)
+- The retired `anthropic_only` tier migrated to `restricted_us_oss_ok` 2026-09-26. Automated review defaults to the owner-configured governed route; a restrictive `CLIENT_AI_POLICY` flag remains a hold until compatible egress is declared. Optional external direct review requires explicit `SECURITY_REVIEW_MODE=direct` and committed external admission; no vendor credential is required by the default review lane.
 
 **Claude Code routing** (no proxy needed): Claude Max subscription models (`haiku`/`sonnet`/`opus`) via the Agent tool. Tier suggestions are emitted on every prompt by the `UserPromptSubmit` hook via `classify-message.py`.
 

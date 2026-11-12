@@ -1108,6 +1108,7 @@
   "platforms": {
     "claude_code": {
       "subscription": "Claude Max",
+      "data_clearance": ["restricted_us_oss_ok", "internal", "public"],
       "docs_url": "https://code.claude.com/docs/en/model-config",
       "available_models": [
         "opus",

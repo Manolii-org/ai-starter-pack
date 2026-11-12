@@ -379,17 +379,66 @@ def _model_sensitivity_max(model_name: str | None, cfg: dict) -> str | None:
     if not model_name or model_name in ("", "default"):
         return None
     for section in ("proxy_intercepted_models", "tier_aliases"):
-        meta = cfg.get(section, {}).get(model_name)
-        if isinstance(meta, dict):
-            return meta.get("data_sensitivity_max", "internal")
-    tier = cfg.get("tier_definitions", {}).get(model_name)
-    if isinstance(tier, dict):
-        if tier.get("provider") == "anthropic":
-            return "restricted_us_oss_ok"
-        return tier.get("data_sensitivity_max", "internal")
-    if model_name in ANTHROPIC_MODELS:
-        return "restricted_us_oss_ok"
+        mapping = cfg.get(section, {})
+        if not isinstance(mapping, dict):
+            return "unknown"
+        if model_name in mapping:
+            meta = mapping[model_name]
+            return _declared_sensitivity_max(meta) if isinstance(meta, dict) else "unknown"
+    tiers = cfg.get("tier_definitions", {})
+    if not isinstance(tiers, dict):
+        return "unknown"
+    if model_name in tiers:
+        return _declared_sensitivity_max(tiers[model_name]) if isinstance(tiers[model_name], dict) else "unknown"
+    matched = [_declared_sensitivity_max(tier) for tier in tiers.values()
+               if isinstance(tier, dict) and model_name in (tier.get("model"), tier.get("litellm_alias"))]
+    # Raw backend names may also name native platform models. Until an explicit
+    # route/alias is selected, they cannot borrow a higher namespace's clearance.
+    platform_matches = matched
+    platforms = cfg.get("platforms", {})
+    if not isinstance(platforms, dict):
+        return "unknown"
+    for platform in platforms.values():
+        if not isinstance(platform, dict):
+            continue
+        registered = _registered_platform_models(platform)
+        if model_name in registered:
+            platform_matches.append(_declared_sensitivity_max(platform))
+    if platform_matches:
+        return min(platform_matches, key=lambda level: SENSITIVITY_ORDER.get(level, 0))
     return None
+
+
+def _registered_platform_models(platform: dict) -> set[str]:
+    aliases = platform.get("available_models", [])
+    resolution = platform.get("alias_resolution", {})
+    if (not isinstance(aliases, list) or not isinstance(resolution, dict)
+            or any(not isinstance(alias, str) or not alias for alias in aliases)):
+        return set()
+    registered = set(aliases)
+    for alias in aliases:
+        target = resolution.get(alias)
+        if target is not None:
+            if not isinstance(target, str) or not target:
+                return set()
+            registered.add(target)
+    return registered
+
+
+def _declared_sensitivity_max(meta: dict) -> str:
+    """Only owner-declared route metadata grants clearance, never vendor identity."""
+    # restricted is no-AI, so it cannot be a runnable route's clearance ceiling.
+    permitted = {"public", "internal", "restricted_us_oss_ok"}
+    if "data_sensitivity_max" in meta:
+        value = meta["data_sensitivity_max"]
+        return value if isinstance(value, str) and value in permitted else "unknown"
+    if "data_clearance" not in meta:
+        return "internal"
+    levels = meta["data_clearance"]
+    if (not isinstance(levels, list) or not levels
+            or any(not isinstance(level, str) or level not in permitted for level in levels)):
+        return "unknown"
+    return max(levels, key=SENSITIVITY_ORDER.get)
 
 
 def _has_clearance(model_name: str | None, required: str, cfg: dict) -> bool:
@@ -411,6 +460,13 @@ agent_sensitivity = _load_agent_sensitivity(_agent_key)
 agent_sensitivity_rank = SENSITIVITY_ORDER.get(agent_sensitivity, SENSITIVITY_ORDER["internal"])
 model_omitted = model is None or model == "" or model == "default"
 
+if agent_sensitivity == "restricted":
+    print(json.dumps({"decision": "block", "reason":
+        "[OSS-GUARD] data_sensitivity=restricted is governance no-AI; no model dispatch is permitted."}))
+    sys.exit(0)
+
+model_registered = model in VALID_MODELS or _model_sensitivity_max(model, routing_config) is not None
+
 if agent_sensitivity_rank > SENSITIVITY_ORDER["internal"] and not routing_config_loaded:
     print(json.dumps({
         "decision": "block",
@@ -422,7 +478,7 @@ if agent_sensitivity_rank > SENSITIVITY_ORDER["internal"] and not routing_config
     }))
     sys.exit(0)
 
-if model and model not in VALID_MODELS and agent_sensitivity_rank > SENSITIVITY_ORDER["internal"]:
+if model and not model_registered and agent_sensitivity_rank > SENSITIVITY_ORDER["internal"]:
     print(json.dumps({
         "decision": "block",
         "reason": (
@@ -452,7 +508,7 @@ if (
 # Protected agents may use approved OSS routes, but only when the alias advertises
 # enough data_sensitivity_max clearance. This preserves the 2026-05 policy update
 # (OSS approved for most work) without letting secret-bearing flows fall to haiku.
-if model and model in VALID_MODELS and not _has_clearance(model, agent_sensitivity, routing_config):
+if model and model_registered and not _has_clearance(model, agent_sensitivity, routing_config):
     print(json.dumps({
         "decision": "block",
         "reason": (
@@ -464,27 +520,8 @@ if model and model in VALID_MODELS and not _has_clearance(model, agent_sensitivi
     }))
     sys.exit(0)
 
-# Anthropic-only routes may omit model= because default behaviour is safe.
-if agent_sensitivity_rank >= SENSITIVITY_ORDER["restricted"]:
-    if model in OSS_TIER_ALIASES:
-        print(json.dumps({
-            "decision": "block",
-            "reason": (
-                f"[OSS-GUARD] Agent dispatch blocked: {subagent_type!r} is Anthropic-only "
-                f"(data_sensitivity={agent_sensitivity!r}) and cannot use OSS alias model={model!r}. "
-                f"Use model=\"{recommended}\" or omit model=."
-            ),
-        }))
-    elif model is not None and model not in ANTHROPIC_MODELS and model not in ("", "default"):
-        print(
-            f"[OSS-GUARD WARN] Anthropic-only agent {subagent_type!r} uses unrecognised "
-            f"model={model!r}. Expected one of: {sorted(ANTHROPIC_MODELS)}",
-            file=sys.stderr,
-        )
-    sys.exit(0)
-
 # ── OSS-eligible agents: model= must be explicit ─────────────────────────────
-if model and model in VALID_MODELS:
+if model and model_registered:
     sys.exit(0)
 
 OSS_DISPATCH_NOTE = (
