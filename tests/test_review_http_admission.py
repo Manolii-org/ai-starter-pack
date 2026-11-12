@@ -222,3 +222,28 @@ def test_actions_route_ceiling_uses_committed_base_not_pr_working_tree(tmp_path,
     monkeypatch.setenv('GITHUB_RUN_ID', '1')
     monkeypatch.setenv('GITHUB_RUN_ATTEMPT', '1')
     assert policy.route_reason('sonnet', 'restricted_us_oss_ok') == expected
+
+
+def test_privacy_runtime_initialization_publishes_complete_companions():
+    judge, policy = load('run-judge.py'), load('lib/agent_capabilities.py')
+    text = judge._source_text('import os\nTOKEN = os.getenv("ROUTER_KEY")\n', 'safe.py')
+    body = {'messages': [{'content': text}]}
+    wire = json.dumps(body).encode()
+    nested = []
+    previous = sys.gettrace()
+    def trace(frame, event, arg):
+        if (event == 'line' and frame.f_code is policy.admit_review_wire.__code__
+                and policy._REVIEW_PACKET_GUARD is not None and not nested):
+            nested.append(True)
+            assert policy._REVIEW_SOURCE_TYPE is not None
+            assert policy._REVIEW_TEXT_JOIN is not None
+            # Equivalent to a second broad role entering at the first
+            # scheduler boundary after the readiness sentinel is visible.
+            assert policy.admit_review_wire(wire, proved_value=body) == wire
+        return trace
+    try:
+        sys.settrace(trace)
+        assert policy.admit_review_wire(wire, proved_value=body) == wire
+    finally:
+        sys.settrace(previous)
+    assert nested == [True]

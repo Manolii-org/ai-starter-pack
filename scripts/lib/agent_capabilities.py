@@ -647,9 +647,11 @@ def admit_review_wire(payload, *, proved_value=None):
                 raise ValueError("guard unavailable")
             module = importlib.util.module_from_spec(spec)
             exec(compile(path.read_bytes(), str(path), "exec"), module.__dict__)
-            _REVIEW_PACKET_GUARD = module._require_safe_packet
             _REVIEW_SOURCE_TYPE = module._VerifiedSourceText
             _REVIEW_TEXT_JOIN = module._join_review_text
+            # Broad roles run concurrently. Publish the readiness sentinel
+            # only after both immutable companion references are available.
+            _REVIEW_PACKET_GUARD = module._require_safe_packet
         if proved_value is not None:
             def freeze(item):
                 if isinstance(item, str):
