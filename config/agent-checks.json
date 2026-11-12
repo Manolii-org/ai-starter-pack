@@ -154,7 +154,9 @@
         "scripts/lib/source_executor.py",
         "scripts/tests/test_source_executor.py",
         "docs/source-only-execution.md",
-        ".github/workflows/plugin-eval-gate.yml"
+        ".github/workflows/plugin-eval-gate.yml",
+        "scripts/source-adapter-probe.py",
+        "scripts/tests/test_source_adapter_probe.py"
       ],
       "tools": [
         "python",
@@ -210,6 +212,17 @@
           "scripts/tests",
           "-p",
           "test_source_executor.py",
+          "-v"
+        ],
+        [
+          "python3",
+          "-m",
+          "unittest",
+          "discover",
+          "-s",
+          "scripts/tests",
+          "-p",
+          "test_source_adapter_probe.py",
           "-v"
         ]
       ]

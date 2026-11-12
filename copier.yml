@@ -339,6 +339,8 @@ _exclude:
   # Portable installations do not contain its OS/runtime adapter or tests.
   - scripts/lib/source_executor.py
   - scripts/tests/test_source_executor.py
+  - scripts/source-adapter-probe.py
+  - scripts/tests/test_source_adapter_probe.py
   - docs/source-only-execution.md
   # Release capability consumers use the portable action and their own product
   # qualification. These suites require the Pack-only registry/build machinery.

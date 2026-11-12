@@ -112,3 +112,22 @@ Distribution is additive: publish the reviewed projection and executor readers
 before installing any owner caller. Keep all old controls until that owner's
 actual selected runtime and transport pass qualification. Removing this unused
 library is reversible and does not alter any v1 control or receipt.
+
+## Public adapter observations
+
+The Pack-only `scripts/source-adapter-probe.py` compares the installed root-owned
+adapter path, its validated opened descriptor and a sealed copy of the same
+bytes. It uses only the existing three-public-ELF namespace prerequisite command,
+clears the child environment, bounds time/output and emits byte counts plus fixed
+error categories. It accepts no paths, commands, URLs or other caller inputs.
+Set-id or file-capability adapters are refused; no elevated execution route is
+requested. Raw output is discarded.
+
+`observations_complete` means that observations finished, including denials; it
+never means source, native gate, admission or production qualification. Every
+authority field remains false. The native workflow runs the unchanged 17 real
+executor assertions after this observation. There is no fallback to an observed
+working route and no change to the sealed executor, host security policy or
+installed credentials. Local observations do not prove another provider's kernel
+or security-policy behavior. The diagnostic and its tests are excluded from
+portable consumer exports.

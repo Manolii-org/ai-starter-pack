@@ -5,11 +5,12 @@
 {# These exact Pack-maintenance commands require optional QA/projection code.
    The Linux executor tools/commands never become portable Mac dependencies.
    Preserve every portable command and the stable owner check identity. #}
-{% set pack_only_paths = ['scripts/tests/test_source_scope_boundary.py', 'scripts/tests/test_source_projection.py', 'scripts/lib/source_projection.py', 'scripts/lib/source_executor.py', 'scripts/tests/test_source_executor.py', 'docs/source-only-execution.md', '.github/workflows/plugin-eval-gate.yml'] %}
+{% set pack_only_paths = ['scripts/tests/test_source_scope_boundary.py', 'scripts/tests/test_source_projection.py', 'scripts/lib/source_projection.py', 'scripts/lib/source_executor.py', 'scripts/tests/test_source_executor.py', 'docs/source-only-execution.md', '.github/workflows/plugin-eval-gate.yml', 'scripts/source-adapter-probe.py', 'scripts/tests/test_source_adapter_probe.py'] %}
 {% set pack_only_commands = [
   ['python3', '-m', 'unittest', 'discover', '-s', 'scripts/tests', '-p', 'test_source_scope_boundary.py', '-v'],
   ['python3', '-m', 'unittest', 'discover', '-s', 'scripts/tests', '-p', 'test_source_projection.py', '-v'],
-  ['python3', '-m', 'unittest', 'discover', '-s', 'scripts/tests', '-p', 'test_source_executor.py', '-v']
+  ['python3', '-m', 'unittest', 'discover', '-s', 'scripts/tests', '-p', 'test_source_executor.py', '-v'],
+  ['python3', '-m', 'unittest', 'discover', '-s', 'scripts/tests', '-p', 'test_source_adapter_probe.py', '-v']
 ] %}
 {% set portable = namespace(checks=[]) %}
 {% for check in checks %}

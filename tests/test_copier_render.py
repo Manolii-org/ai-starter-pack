@@ -326,7 +326,8 @@ def test_validation_layout_distribution_boundary(default_render, branded_render)
         assert not (rendered / "scripts/tests/test_agent_validation_layout.py").exists()
         for pack_only in ("scripts/tests/test_source_scope_boundary.py", "scripts/tests/test_source_projection.py",
                           "scripts/lib/source_projection.py", "scripts/lib/source_executor.py",
-                          "scripts/tests/test_source_executor.py", "docs/source-only-execution.md"):
+                          "scripts/tests/test_source_executor.py", "docs/source-only-execution.md",
+                          "scripts/source-adapter-probe.py", "scripts/tests/test_source_adapter_probe.py"):
             assert not (rendered / pack_only).exists()
         assert not (rendered / "tests/test_assessment_sast_failure.py").exists()
         # The existing default validation bundle remains available to callers.
@@ -515,9 +516,11 @@ def test_agent_validation_base_uses_owner_ref(tmp_path, default_render, base_ref
     pack_only_paths = {"scripts/tests/test_source_scope_boundary.py", "scripts/tests/test_source_projection.py",
                        "scripts/lib/source_projection.py", "scripts/lib/source_executor.py",
                        "scripts/tests/test_source_executor.py", "docs/source-only-execution.md",
-                       ".github/workflows/plugin-eval-gate.yml"}
+                       ".github/workflows/plugin-eval-gate.yml", "scripts/source-adapter-probe.py",
+                       "scripts/tests/test_source_adapter_probe.py"}
     pack_only_commands = [["python3", "-m", "unittest", "discover", "-s", "scripts/tests", "-p", name, "-v"]
-                          for name in ("test_source_scope_boundary.py", "test_source_projection.py", "test_source_executor.py")]
+                          for name in ("test_source_scope_boundary.py", "test_source_projection.py", "test_source_executor.py",
+                                       "test_source_adapter_probe.py")]
     owner_check = next(check for check in canonical["checks"] if check["id"] == "agent-validation-contract")
     owner_check["paths"] = [path for path in owner_check["paths"] if path not in pack_only_paths]
     owner_check["commands"] = [command for command in owner_check["commands"] if command not in pack_only_commands]
@@ -1154,7 +1157,8 @@ def test_executor_pack_recipe_renders_without_linux_consumer_dependencies():
     copier = yaml.safe_load((ROOT / "copier.yml").read_text())
     for path in ("scripts/lib/source_executor.py", "scripts/tests/test_source_executor.py",
                  "docs/source-only-execution.md", "scripts/lib/source_projection.py",
-                 "scripts/tests/test_source_projection.py", "scripts/tests/test_release_validation_gate.py"):
+                 "scripts/tests/test_source_projection.py", "scripts/tests/test_release_validation_gate.py",
+                 "scripts/source-adapter-probe.py", "scripts/tests/test_source_adapter_probe.py"):
         assert path in copier["_exclude"]
 
 
@@ -1180,6 +1184,11 @@ def test_executor_native_linux_gate_declares_tools_and_preserves_qualification()
         assert "if" not in step
         assert "continue-on-error" not in step
         assert "|| true" not in step["run"]
+    observation = steps["Observe public adapter subjects (not qualification)"]
+    assert observation["run"] == "python3 scripts/source-adapter-probe.py"
+    ordered = [step.get("name") for step in job["steps"]]
+    assert ordered.index(observation["name"]) < ordered.index(execution["name"])
+    assert "if" not in observation and "continue-on-error" not in observation
     # The established portable contract is still called independently.
     assert "test_agent_check.py" in steps["Local agent validation contract"]["run"]
 

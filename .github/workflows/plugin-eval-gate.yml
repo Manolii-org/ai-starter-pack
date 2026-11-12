@@ -103,6 +103,9 @@ jobs:
             exit 2
           fi
 
+      - name: Observe public adapter subjects (not qualification)
+        run: python3 scripts/source-adapter-probe.py
+
       - name: Linux source-executor contracts
         run: python3 -m unittest discover -s scripts/tests -p test_source_executor.py -v
 
