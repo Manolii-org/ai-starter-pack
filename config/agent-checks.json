@@ -506,6 +506,36 @@
           "contains": "python3 -m pytest tests/ -q"
         }
       ]
+    },
+    {
+      "id": "native-owner-recipe-contract",
+      "paths": [
+        "scripts/ci/native_owner_recipe.py",
+        ".github/workflows/native-owner-recipe.yml",
+        "tests/test_native_owner_recipe.py",
+        "docs/native-owner-recipe.md",
+        "scripts/agent-check.py",
+        "config/agent-checks.json"
+      ],
+      "tools": [
+        "uv"
+      ],
+      "environment": "release-contract-python",
+      "timeout_seconds": 120,
+      "commands": [
+        [
+          ".ai/agent-checks/release-venv/bin/python",
+          "-B",
+          "-m",
+          "unittest",
+          "discover",
+          "-s",
+          "tests",
+          "-p",
+          "test_native_owner_recipe.py",
+          "-v"
+        ]
+      ]
     }
   ]
 }
