@@ -246,10 +246,11 @@ def validate_state(state: dict) -> None:
         raise StateUnavailable("invalid active release state")
 
 
-def reserve(state: dict, manifest: dict, *, now: datetime | None = None) -> dict:
+def reserve(state: dict, manifest: dict, *, now: datetime | None = None,
+            trusted_source_policy: dict | None = None) -> dict:
     """Construct next admission state; only a successful store CAS reserves it."""
     validate_state(state)
-    validate(manifest)
+    validate(manifest, trusted_source_policy=trusted_source_policy)
     active = state["active"]
     subject = manifest["subject"]
     if manifest["schema_version"] == 2 and state["schema_version"] != 2:
