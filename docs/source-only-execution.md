@@ -54,8 +54,36 @@ payload rules run first. The executor reopens only its admitted, hash-verified
 Git object copies. It never treats a mutable projected working file as source
 authority. Explicit runtime files are captured through no-follow directory/file
 descriptors, checked for ownership, hard links, permissions, size, stability and
-digest. Source, runtime and adapter bytes become sealed memory files before
-execution; there are no pathname binds into the original host.
+digest. Source and runtime bytes become sealed memory files before execution;
+there are no pathname binds into the original host.
+
+The fixed executable subject is the independently hash-verified original
+`/usr/bin/bwrap` inode, retained through an `O_RDONLY | O_CLOEXEC` descriptor.
+The adapter is not copied to a memory file, and no mutable executable pathname
+is reopened for execution. Every ancestor, including `/`, is retained and
+reobserved as a root-owned directory without group/other write permission.
+The regular adapter file must be root-owned, singly linked, publicly readable
+and executable, bounded to 16 MiB, without group/other write, set-id bits or file
+capabilities. Denied, unsupported or unknown capability metadata fails closed;
+only an explicit absent attribute proves absence.
+
+No-follow path and retained-descriptor identity, mode, ownership, size,
+timestamps, hash and capability checks run during capture, immediately before
+launch and after completion, failure or timeout. Detected path or content drift
+fails closed. Postchecks also run after cleanup failure without masking that
+primary error. Ancestor membership and directory timestamps do not impose a
+global quiet period. The collector receives only sealed payload descriptors;
+its separate private adapter binding supplies the canonical executable FD.
+Only that FD and the sealed payloads are inherited by bubblewrap; host directory
+anchors and unrelated descriptors are excluded.
+
+This contract trusts root and the base OS, including its loader and security
+policy. An open read-only descriptor prevents pathname substitution and caller
+writes, but does not seal the installed inode against trusted-root writes.
+Repeated hash/path observations are not atomic immutability: privileged
+transient changes or changes fully reverted between observations cannot be
+excluded. The adapter is never described as sealed. Platform denial is a hard
+hold, with no retry through another subject or security-policy change.
 
 Bubblewrap creates user, PID, mount, network, IPC, UTS and cgroup namespaces,
 drops all capabilities, disables nested user namespaces and clears the inherited
@@ -105,8 +133,10 @@ unavailable isolation is a failure, never a skipped successful proof. Synthetic
 host controls demonstrate that the same network probe reaches the host TCP and
 Unix listeners outside isolation but cannot reach either inside it. Other tests
 cover omitted inputs, host sentinel reads/writes, environment and `/proc`
-escapes, read-only directories, sealed bytes, changed pins, symlink/hard-link
-refusal, timeout/output failure and unrelated-neighbor preservation.
+escapes, read-only directories, sealed payload bytes, original read-only adapter identity, strict capability
+metadata, FD inheritance, changed pins, symlink/hard-link refusal, timeout/output
+failure and unrelated-neighbor preservation. Injected negative integrity/drift
+controls are separate from actual namespace execution assertions.
 
 Distribution is additive: publish the reviewed projection and executor readers
 before installing any owner caller. Keep all old controls until that owner's
@@ -126,8 +156,10 @@ requested. Raw output is discarded.
 `observations_complete` means that observations finished, including denials; it
 never means source, native gate, admission or production qualification. Every
 authority field remains false. The native workflow runs the unchanged 17 real
-executor assertions after this observation. There is no fallback to an observed
-working route and no change to the sealed executor, host security policy or
+executor assertions and the additional adapter-integrity assertions after this
+observation. There is no fallback to an observed
+working route. The executor has one reviewed original-FD subject; the
+observation never selects a fallback or changes host security policy or
 installed credentials. Local observations do not prove another provider's kernel
 or security-policy behavior. The diagnostic and its tests are excluded from
 portable consumer exports.

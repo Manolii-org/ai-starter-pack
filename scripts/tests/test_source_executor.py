@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 import copy
+import errno
 import hashlib
 import importlib.util
 import json
 import os
 from pathlib import Path
 import socket
+import stat
 import subprocess
 import sys
 import types
@@ -367,6 +369,303 @@ int main(int n,char **v){
         with patch.object(os, "killpg", denied), self.assertRaisesRegex(executor.ExecutionError,
                                                                          "owned_group_cleanup_failed"):
             self.run_selected()
+
+
+
+class AdapterDescriptorTests(unittest.TestCase):
+    """Actual original-inode checks and explicitly synthetic negative controls."""
+
+    OBJECT_FORMAT = "sha1"
+    setUp = SourceExecutorTests.setUp
+    git = SourceExecutorTests.git
+    write = SourceExecutorTests.write
+    commit = SourceExecutorTests.commit
+    selected = SourceExecutorTests.selected
+    prepare = SourceExecutorTests.prepare
+    add_runtime = SourceExecutorTests.add_runtime
+    run_selected = SourceExecutorTests.run_selected
+
+    def adapter_pin(self):
+        return hashlib.sha256(executor.ADAPTER.read_bytes()).hexdigest()
+
+    def test_actual_original_is_readonly_nonsealed_and_payload_is_sealed(self):
+        with executor._adapter_scope(self.adapter_pin()) as adapter, executor.ExitStack() as stack:
+            self.assertEqual(os.fstat(adapter.fd).st_uid, 0)
+            self.assertEqual(executor.fcntl.fcntl(adapter.fd, executor.fcntl.F_GETFL) & os.O_ACCMODE,
+                             os.O_RDONLY)
+            self.assertTrue(executor.fcntl.fcntl(adapter.fd, executor.fcntl.F_GETFD)
+                            & executor.fcntl.FD_CLOEXEC)
+            with self.assertRaises(OSError) as written:
+                os.write(adapter.fd, b"MUTATION")
+            self.assertEqual(written.exception.errno, errno.EBADF)
+            with self.assertRaises(OSError) as sealed:
+                executor.fcntl.fcntl(adapter.fd, getattr(executor.fcntl, "F_GET_SEALS", 1034))
+            self.assertEqual(sealed.exception.errno, errno.EINVAL)
+            payload = executor._sealed(stack, b"synthetic sealed payload")
+            with self.assertRaises(PermissionError):
+                os.write(payload, b"MUTATION")
+            command = executor._AdapterCommand([f"/proc/self/fd/{adapter.fd}"], adapter)
+            self.assertEqual(executor._execution_fds(command, (payload,)), (adapter.fd, payload))
+
+    def test_capability_unknown_or_present_metadata_holds_before_launch(self):
+        for error in (errno.ENOTSUP, errno.EOPNOTSUPP, errno.EACCES, errno.EPERM, errno.EIO):
+            with self.subTest(error=error), patch.object(os, "getxattr", side_effect=OSError(error, "")), \
+                    patch.object(executor.subprocess, "Popen") as launch, \
+                    self.assertRaisesRegex(executor.ExecutionError, "adapter_capability_metadata_unavailable"):
+                with executor._adapter_scope(self.adapter_pin()):
+                    self.fail("unknown capability metadata admitted")
+            launch.assert_not_called()
+        for value in (b"", b"synthetic capability"):
+            with self.subTest(value=value), patch.object(os, "getxattr", return_value=value), \
+                    self.assertRaisesRegex(executor.ExecutionError, "unsafe_adapter_capabilities"):
+                with executor._adapter_scope(self.adapter_pin()):
+                    self.fail("present capability metadata admitted")
+
+    def test_wrong_hash_never_launches_or_retries_another_subject(self):
+        with patch.object(executor.subprocess, "Popen") as launch, \
+                self.assertRaisesRegex(executor.ExecutionError, "runtime_digest_changed"):
+            with executor._adapter_scope("1" * 64):
+                self.fail("changed adapter admitted")
+        launch.assert_not_called()
+
+    def test_plain_or_noncanonical_argv_cannot_establish_fd_trust(self):
+        with executor._adapter_scope(self.adapter_pin()) as adapter:
+            valid = f"/proc/self/fd/{adapter.fd}"
+            for name in (valid + "/x", valid + " ", valid.replace("/fd/", "/fd/0"),
+                         "/proc/self/fd/0", "/usr/bin/bwrap", f"/dev/fd/{adapter.fd}"):
+                with self.subTest(name=name), self.assertRaisesRegex(executor.ExecutionError,
+                                                                      "invalid_adapter_descriptor"):
+                    executor._execution_fds(executor._AdapterCommand([name], adapter), ())
+            with self.assertRaisesRegex(executor.ExecutionError, "invalid_adapter_descriptor"):
+                executor._execution_fds([valid], ())
+
+    def test_payloads_exclude_adapter_anchors_duplicates_and_unsealed_files(self):
+        with executor._adapter_scope(self.adapter_pin()) as adapter, executor.ExitStack() as stack:
+            command = executor._AdapterCommand([f"/proc/self/fd/{adapter.fd}"], adapter)
+            sealed = executor._sealed(stack, b"payload")
+            for payloads in ((adapter.fd,), (adapter.anchors[0][0],), (sealed, sealed),
+                             (True,), [sealed]):
+                with self.subTest(payloads=payloads), self.assertRaisesRegex(executor.ExecutionError,
+                                                                            "invalid_payload_descriptor"):
+                    executor._execution_fds(command, payloads)
+            unsealed = os.memfd_create("synthetic-unsealed", os.MFD_CLOEXEC | os.MFD_ALLOW_SEALING)
+            stack.callback(os.close, unsealed)
+            with self.assertRaisesRegex(executor.ExecutionError, "unsealed_payload_descriptor"):
+                executor._execution_fds(command, (unsealed,))
+
+    def test_writable_or_noncloexec_descriptor_is_refused(self):
+        fd = os.memfd_create("synthetic-writable", os.MFD_CLOEXEC)
+        try:
+            with self.assertRaisesRegex(executor.ExecutionError, "adapter_descriptor_not_readonly"):
+                executor._adapter_bytes(fd, self.adapter_pin())
+        finally:
+            os.close(fd)
+        with executor._adapter_scope(self.adapter_pin()) as adapter:
+            flags = executor.fcntl.fcntl(adapter.fd, executor.fcntl.F_GETFD)
+            try:
+                executor.fcntl.fcntl(adapter.fd, executor.fcntl.F_SETFD, 0)
+                with self.assertRaisesRegex(executor.ExecutionError, "adapter_descriptor_not_readonly"):
+                    executor._verify_adapter(adapter)
+            finally:
+                executor.fcntl.fcntl(adapter.fd, executor.fcntl.F_SETFD, flags)
+
+    def test_unsafe_file_metadata_refuses_before_reading_bytes(self):
+        with executor._adapter_scope(self.adapter_pin()) as adapter:
+            actual = os.fstat(adapter.fd)
+            fields = ("st_dev", "st_ino", "st_mode", "st_uid", "st_gid", "st_nlink",
+                      "st_size", "st_mtime_ns", "st_ctime_ns")
+            changes = ({"st_uid": 1000}, {"st_nlink": 2}, {"st_size": 0},
+                       {"st_size": executor.MAX_ADAPTER + 1},
+                       *({"st_mode": actual.st_mode | bits} for bits in (0o002, 0o020, 0o4000, 0o2000)),
+                       *({"st_mode": actual.st_mode & ~bits} for bits in (0o004, 0o001)),
+                       {"st_mode": stat.S_IFDIR | 0o755})
+            for change in changes:
+                synthetic = types.SimpleNamespace(**{**{k: getattr(actual, k) for k in fields}, **change})
+                with self.subTest(change=change), patch.object(os, "fstat", return_value=synthetic), \
+                        patch.object(os, "pread") as read, \
+                        self.assertRaisesRegex(executor.ExecutionError, "unsafe_adapter_file"):
+                    executor._adapter_bytes(adapter.fd, self.adapter_pin())
+                read.assert_not_called()
+
+    def test_named_inode_and_retained_ancestor_drift_refuse(self):
+        with executor._adapter_scope(self.adapter_pin()) as adapter:
+            real_stat = os.stat
+            def changed(name, *args, **kwargs):
+                actual = real_stat(name, *args, **kwargs)
+                if name != "bwrap" or "dir_fd" not in kwargs:
+                    return actual
+                fields = ("st_dev", "st_ino", "st_mode", "st_uid", "st_gid", "st_nlink",
+                          "st_size", "st_mtime_ns", "st_ctime_ns")
+                return types.SimpleNamespace(**{**{k: getattr(actual, k) for k in fields},
+                                                "st_ino": actual.st_ino + 1})
+            with patch.object(os, "stat", changed), \
+                    self.assertRaisesRegex(executor.ExecutionError, "adapter_path_changed"):
+                executor._verify_adapter(adapter)
+            original = executor._anchor_identity
+            def ancestor(fd):
+                identity = original(fd)
+                return (identity[0], identity[1] + 1, *identity[2:])
+            with patch.object(executor, "_anchor_identity", ancestor), \
+                    self.assertRaisesRegex(executor.ExecutionError, "adapter_ancestor_changed"):
+                executor._verify_adapter(adapter)
+
+    def test_postcheck_detects_drift_preserving_primary_failure_or_timeout(self):
+        real = executor._verify_adapter
+        for primary in (None, executor.ExecutionError("synthetic_command_failed"), TimeoutError()):
+            count = 0
+            def verify(adapter):
+                nonlocal count
+                count += 1
+                if count == 2:
+                    raise executor.ExecutionError("adapter_identity_changed")
+                return real(adapter)
+            with self.subTest(primary=type(primary).__name__), patch.object(executor, "_verify_adapter", verify):
+                if primary is None:
+                    with self.assertRaisesRegex(executor.ExecutionError, "adapter_identity_changed"):
+                        with executor._adapter_scope(self.adapter_pin()):
+                            pass
+                else:
+                    with self.assertRaises(type(primary)) as raised:
+                        with executor._adapter_scope(self.adapter_pin()):
+                            raise primary
+                    self.assertIs(raised.exception, primary)
+                    self.assertIn("adapter_postcheck_failed", raised.exception.__notes__)
+                self.assertEqual(count, 2)
+
+    def test_actual_command_rechecks_and_passes_only_required_fds(self):
+        self.prepare(b"exit 7\n")
+        unrelated = os.open("/", os.O_RDONLY | os.O_DIRECTORY)
+        os.set_inheritable(unrelated, True)
+        self.addCleanup(os.close, unrelated)
+        launch = executor.subprocess.Popen
+        verify = executor._verify_adapter
+        calls = []
+        reobserved = []
+        def checked(adapter):
+            reobserved.append(adapter.fd)
+            return verify(adapter)
+        def process(argv, *args, **kwargs):
+            if isinstance(argv, executor._AdapterCommand):
+                adapter = argv.adapter
+                payloads = tuple(int(argv[i + 1]) for i, arg in enumerate(argv) if arg == "--ro-bind-data")
+                self.assertEqual(kwargs["pass_fds"], (adapter.fd, *payloads))
+                self.assertTrue(kwargs["close_fds"])
+                self.assertEqual(kwargs["env"], {})
+                self.assertNotIn(unrelated, kwargs["pass_fds"])
+                self.assertTrue(set(kwargs["pass_fds"]).isdisjoint(fd for fd, _ in adapter.anchors))
+                calls.append(adapter.fd)
+            return launch(argv, *args, **kwargs)
+        with patch.object(executor, "_verify_adapter", checked), \
+                patch.object(executor.subprocess, "Popen", process):
+            result = self.run_selected()
+        self.assertEqual(len(calls), 1)
+        self.assertGreaterEqual(len(reobserved), 3)
+        self.assertFalse(result["source_execution_closure_verified"])
+        self.assertEqual(result["retained_output_bytes"], 0)
+
+    def test_actual_cleanup_error_remains_primary_if_postcheck_also_fails(self):
+        self.prepare()
+        verify = executor._verify_adapter
+        signal_group = os.killpg
+        count = 0
+        def checked(adapter):
+            nonlocal count
+            count += 1
+            if count == 3:
+                raise executor.ExecutionError("adapter_identity_changed")
+            return verify(adapter)
+        def denied(pid, sig):
+            try:
+                signal_group(pid, sig)
+            except ProcessLookupError:
+                pass
+            raise PermissionError("synthetic cleanup denial")
+        with patch.object(executor, "_verify_adapter", checked), patch.object(os, "killpg", denied), \
+                self.assertRaisesRegex(executor.ExecutionError, "owned_group_cleanup_failed") as raised:
+            self.run_selected()
+        self.assertEqual(count, 3)
+        self.assertIn("adapter_postcheck_failed", raised.exception.__notes__)
+
+    def test_actual_isolated_payload_cannot_inherit_host_anchors_or_unrelated_fds(self):
+        self.prepare()
+        source = self.root / "fd-probe.c"
+        source.write_text("""#include <fcntl.h>
+#include <errno.h>
+int main(void) {
+ for (int fd=3;fd<1024;fd++) {
+  errno=0;
+  if (fcntl(fd,F_GETFD)!=-1 || errno!=EBADF) return 31;
+ }
+ return 0;
+}
+""")
+        binary = self.root / "fd-probe"
+        subprocess.run(["/usr/bin/cc", str(source), "-o", str(binary)], check=True,
+                       capture_output=True, timeout=30, env={"PATH": "/usr/bin:/bin"})
+        self.add_runtime("bin/fd-probe", binary.read_bytes())
+        self.profile["argv"] = ["/bin/fd-probe"]
+        unrelated = os.open("/", os.O_RDONLY | os.O_DIRECTORY)
+        os.set_inheritable(unrelated, True)
+        try:
+            host_control = subprocess.run([str(binary)], pass_fds=(unrelated,),
+                                          capture_output=True, timeout=3, env={})
+            self.assertEqual(host_control.returncode, 31)
+            result = self.run_selected()
+        finally:
+            os.close(unrelated)
+        self.assertEqual(result["outcome"], "passed", result)
+
+
+    def test_real_capture_uses_nofollow_anchors_and_never_reopens_exec_leaf(self):
+        opened = []
+        real = os.open
+        def observed(path, flags, *args, **kwargs):
+            opened.append((path, flags))
+            return real(path, flags, *args, **kwargs)
+        with patch.object(os, "open", observed):
+            with executor._adapter_scope(self.adapter_pin()) as adapter:
+                executor._verify_adapter(adapter)
+        self.assertEqual(sum(path == "bwrap" for path, _ in opened), 1)
+        for path, flags in opened:
+            self.assertIn(path, ("/", "usr", "bin", "bwrap"))
+            self.assertTrue(flags & os.O_NOFOLLOW)
+            self.assertTrue(flags & os.O_CLOEXEC)
+            if path != "bwrap":
+                self.assertTrue(flags & os.O_DIRECTORY)
+
+    def test_changed_content_or_new_capability_is_refused_during_reobservation(self):
+        with executor._adapter_scope(self.adapter_pin()) as adapter:
+            real_pread = os.pread
+            def changed(fd, amount, offset):
+                raw = real_pread(fd, amount, offset)
+                return bytes([raw[0] ^ 1]) + raw[1:] if raw else raw
+            with patch.object(os, "pread", changed), \
+                    self.assertRaisesRegex(executor.ExecutionError, "runtime_digest_changed"):
+                executor._adapter_bytes(adapter.fd, self.adapter_pin())
+            observed = 0
+            def capability(fd, name):
+                nonlocal observed
+                observed += 1
+                if observed == 1:
+                    raise OSError(errno.ENODATA, "")
+                return b""
+            with patch.object(os, "getxattr", capability), \
+                    self.assertRaisesRegex(executor.ExecutionError, "unsafe_adapter_capabilities"):
+                executor._adapter_bytes(adapter.fd, self.adapter_pin())
+            self.assertEqual(observed, 2)
+
+    def test_unsafe_or_replaced_root_ancestor_is_refused(self):
+        with executor._adapter_scope(self.adapter_pin()) as adapter:
+            observed = os.fstat(adapter.anchors[0][0])
+            for change in ({"st_uid": 1000}, {"st_mode": observed.st_mode | 0o002},
+                           {"st_mode": observed.st_mode | 0o020},
+                           {"st_mode": stat.S_IFREG | 0o755}):
+                metadata = types.SimpleNamespace(**{**{key: getattr(observed, key)
+                    for key in ("st_dev", "st_ino", "st_mode", "st_uid", "st_gid")}, **change})
+                with self.subTest(change=change), patch.object(os, "fstat", return_value=metadata), \
+                        self.assertRaisesRegex(executor.ExecutionError, "unsafe_adapter_ancestor"):
+                    executor._anchor_identity(adapter.anchors[0][0])
+
 
 
 if __name__ == "__main__":

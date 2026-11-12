@@ -7,7 +7,9 @@ is mounted: verified source objects/runtime files become sealed memory files.
 """
 from __future__ import annotations
 
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
+from dataclasses import dataclass
+import errno
 import fcntl
 import hashlib
 import json
@@ -28,6 +30,7 @@ from . import source_projection as projection
 SCHEMA = "source-execution-profile/v1"
 MAX_PROFILE = 65536
 MAX_RUNTIME = 128 * 1024 * 1024
+MAX_ADAPTER = 16 * 1024 * 1024
 ADAPTER = Path("/usr/bin/bwrap")
 
 
@@ -118,7 +121,7 @@ def _sealed(stack: ExitStack, value: bytes) -> int:
     return fd
 
 
-def _capture_file(root_fd: int, name: str, expected: str, *, adapter: bool = False) -> bytes:
+def _capture_file(root_fd: int, name: str, expected: str) -> bytes:
     """Read only an explicitly pinned file through no-follow directory anchors."""
     with ExitStack() as stack:
         directory = root_fd
@@ -129,7 +132,7 @@ def _capture_file(root_fd: int, name: str, expected: str, *, adapter: bool = Fal
         stack.callback(os.close, fd)
         before = projection._details(fd)
         _require(stat.S_ISREG(before[2]) and before[4] == 1 and not before[2] & 0o022
-                 and before[3] == (0 if adapter else os.getuid()) and before[5] <= MAX_RUNTIME,
+                 and before[3] == os.getuid() and before[5] <= MAX_RUNTIME,
                  "unsafe_runtime_file")
         raw = bytearray()
         while len(raw) <= before[5]:
@@ -141,6 +144,150 @@ def _capture_file(root_fd: int, name: str, expected: str, *, adapter: bool = Fal
                  and hashlib.sha256(raw).hexdigest() == expected, "runtime_digest_changed")
         return bytes(raw)
 
+@dataclass(frozen=True)
+class _Adapter:
+    fd: int
+    expected_sha256: str
+    details: tuple[int, ...]
+    anchors: tuple[tuple[int, tuple[int, ...]], ...]
+
+
+class _AdapterCommand(list[str]):
+    """Private collector carrier; argv text alone cannot establish FD trust."""
+
+    def __init__(self, values: list[str], adapter: _Adapter):
+        super().__init__(values)
+        self.adapter = adapter
+
+
+def _anchor_identity(fd: int) -> tuple[int, ...]:
+    observed = os.fstat(fd)
+    _require(stat.S_ISDIR(observed.st_mode) and observed.st_uid == 0
+             and not observed.st_mode & 0o022, "unsafe_adapter_ancestor")
+    # Membership/timestamps are deliberately absent: unrelated /usr activity
+    # cannot freeze execution. Only this retained path's identity and authority.
+    return (observed.st_dev, observed.st_ino, observed.st_mode,
+            observed.st_uid, observed.st_gid)
+
+
+def _adapter_anchors(stack: ExitStack) -> tuple[tuple[int, tuple[int, ...]], ...]:
+    anchors = []
+    directory = os.open("/", projection._DIRECTORY | os.O_CLOEXEC)
+    stack.callback(os.close, directory)
+    anchors.append((directory, _anchor_identity(directory)))
+    for component in ("usr", "bin"):
+        directory = os.open(component, projection._DIRECTORY | os.O_CLOEXEC, dir_fd=directory)
+        stack.callback(os.close, directory)
+        anchors.append((directory, _anchor_identity(directory)))
+    return tuple(anchors)
+
+
+def _adapter_details(observed: os.stat_result) -> tuple[int, ...]:
+    return (observed.st_dev, observed.st_ino, observed.st_mode, observed.st_uid,
+            observed.st_gid, observed.st_nlink, observed.st_size,
+            observed.st_mtime_ns, observed.st_ctime_ns)
+
+
+def _no_adapter_capabilities(fd: int) -> None:
+    _require(hasattr(os, "getxattr"), "adapter_capability_metadata_unavailable")
+    try:
+        os.getxattr(fd, "security.capability")
+    except OSError as exc:
+        # Unsupported/denied/unknown metadata is not evidence of absence.
+        _require(exc.errno == errno.ENODATA, "adapter_capability_metadata_unavailable")
+    else:
+        raise ExecutionError("unsafe_adapter_capabilities")
+
+
+def _adapter_bytes(fd: int, expected: str) -> tuple[int, ...]:
+    flags = fcntl.fcntl(fd, fcntl.F_GETFL)
+    _require(flags & os.O_ACCMODE == os.O_RDONLY and not flags & getattr(os, "O_PATH", 0)
+             and fcntl.fcntl(fd, fcntl.F_GETFD) & fcntl.FD_CLOEXEC,
+             "adapter_descriptor_not_readonly")
+    before = os.fstat(fd)
+    _require(stat.S_ISREG(before.st_mode) and before.st_uid == 0 and before.st_nlink == 1
+             and before.st_mode & 0o005 == 0o005 and not before.st_mode & 0o6022
+             and 0 < before.st_size <= MAX_ADAPTER, "unsafe_adapter_file")
+    _no_adapter_capabilities(fd)
+    digest = hashlib.sha256()
+    offset = 0
+    # pread never changes the executable descriptor's offset or reads unbounded
+    # bytes if a trusted-root writer grows the file between observations.
+    while offset <= before.st_size:
+        part = os.pread(fd, min(65536, before.st_size + 1 - offset), offset)
+        if not part:
+            break
+        digest.update(part)
+        offset += len(part)
+    _no_adapter_capabilities(fd)
+    details = _adapter_details(before)
+    _require(offset == before.st_size and _adapter_details(os.fstat(fd)) == details
+             and digest.hexdigest() == expected, "runtime_digest_changed")
+    return details
+
+
+def _verify_adapter(adapter: _Adapter) -> None:
+    for descriptor, identity in adapter.anchors:
+        _require(_anchor_identity(descriptor) == identity, "adapter_ancestor_changed")
+    # Reopen only comparison anchors, never an executable pathname. Retained
+    # anchors alone cannot detect a path renamed away from its original parent.
+    with ExitStack() as comparison:
+        current = _adapter_anchors(comparison)
+        _require(tuple(identity for _, identity in current)
+                 == tuple(identity for _, identity in adapter.anchors), "adapter_path_changed")
+        parent = current[-1][0]
+        def named():
+            return _adapter_details(os.stat("bwrap", dir_fd=parent, follow_symlinks=False))
+        _require(named() == adapter.details, "adapter_path_changed")
+        _require(_adapter_bytes(adapter.fd, adapter.expected_sha256) == adapter.details,
+                 "adapter_identity_changed")
+        _require(named() == adapter.details, "adapter_path_changed")
+    for descriptor, identity in adapter.anchors:
+        _require(_anchor_identity(descriptor) == identity, "adapter_ancestor_changed")
+
+
+@contextmanager
+def _adapter_scope(expected: str):
+    """Retain one root-owned original inode; observations are not atomic seals."""
+    with ExitStack() as retained:
+        anchors = _adapter_anchors(retained)
+        descriptor = os.open("bwrap", projection._FILE | os.O_CLOEXEC, dir_fd=anchors[-1][0])
+        retained.callback(os.close, descriptor)
+        adapter = _Adapter(descriptor, expected, _adapter_bytes(descriptor, expected), anchors)
+        _verify_adapter(adapter)
+        try:
+            yield adapter
+        except BaseException as primary:
+            try:
+                _verify_adapter(adapter)
+            except (OSError, ExecutionError):
+                # Do not replace an owned-group cleanup failure with drift.
+                primary.add_note("adapter_postcheck_failed")
+            raise
+        else:
+            _verify_adapter(adapter)
+
+
+def _execution_fds(argv: list[str], payload_fds: tuple[int, ...]) -> tuple[int, ...]:
+    _require(isinstance(argv, _AdapterCommand) and bool(argv)
+             and type(argv[0]) is str and re.fullmatch(r"/proc/self/fd/[1-9][0-9]*", argv[0]),
+             "invalid_adapter_descriptor")
+    assert isinstance(argv, _AdapterCommand)
+    adapter = argv.adapter
+    _require(type(adapter.fd) is int and adapter.fd > 2
+             and argv[0] == f"/proc/self/fd/{adapter.fd}", "invalid_adapter_descriptor")
+    _require(type(payload_fds) is tuple and all(type(fd) is int and fd > 2 for fd in payload_fds),
+             "invalid_payload_descriptor")
+    _require(len(set(payload_fds)) == len(payload_fds) and adapter.fd not in payload_fds
+             and not set(payload_fds) & {fd for fd, _ in adapter.anchors},
+             "invalid_payload_descriptor")
+    for descriptor in payload_fds:
+        _require(fcntl.fcntl(descriptor, getattr(fcntl, "F_GET_SEALS", 1034)) & 15 == 15,
+                 "unsealed_payload_descriptor")
+    _verify_adapter(adapter)
+    return (adapter.fd, *payload_fds)
+
+
 
 class _Outcome(TypedDict):
     outcome: str
@@ -151,11 +298,14 @@ class _Outcome(TypedDict):
 
 
 def _collect(argv: list[str], fds: tuple[int, ...], timeout: float, output_limit: int) -> _Outcome:
-    """Count/discard output; kill only this created process group on every exit."""
+    """Accept sealed payload FDs; independently bind the original executable FD.
+
+    Count/discard output; kill only this created process group on every exit.
+    """
     start = time.monotonic()
     result: _Outcome = {"outcome": "failed", "output_bytes": 0, "retained_output_bytes": 0,
               "elapsed_ms": 0, "returncode": None}
-    process = subprocess.Popen(argv, pass_fds=fds, env={}, stdin=subprocess.DEVNULL,
+    process = subprocess.Popen(argv, pass_fds=_execution_fds(argv, fds), env={}, stdin=subprocess.DEVNULL,
                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                start_new_session=True, close_fds=True)
     try:
@@ -224,11 +374,9 @@ def execute_committed_source(repository: Path, *, selection: projection.Selectio
             repository_name=repository_name, compiled_policy_sha256=compiled_policy_sha256,
             destination_parent=destination_parent)
         with ExitStack() as stack:
-            # Adapter is also captured/sealed before exec, eliminating path swaps.
-            adapter_root = os.open("/", projection._DIRECTORY)
-            stack.callback(os.close, adapter_root)
-            adapter = _sealed(stack, _capture_file(adapter_root, str(ADAPTER)[1:],
-                                                   profile["adapter_sha256"], adapter=True))
+            # Fixed original-inode execution respects the installed OS policy.
+            # Only payloads are sealed; adapter root/OS trust is explicit.
+            adapter = stack.enter_context(_adapter_scope(profile["adapter_sha256"]))
             root = Path(runtime_root)
             _require(root.is_absolute() and ".." not in root.parts, "invalid_runtime_root")
             runtime_fd = stack.enter_context(projection._directory(root))
@@ -254,7 +402,7 @@ def execute_committed_source(repository: Path, *, selection: projection.Selectio
             admitted, _ = projection._classify(entries, policy)
             for path, (mode, oid) in admitted.items():
                 files.append(("/source/" + path, _sealed(stack, store.read(oid, "blob")), mode == "100755"))
-            command = [f"/proc/self/fd/{adapter}", "--unshare-all", "--unshare-user", "--die-with-parent", "--new-session",
+            command = [f"/proc/self/fd/{adapter.fd}", "--unshare-all", "--unshare-user", "--die-with-parent", "--new-session",
                        "--disable-userns", "--cap-drop", "ALL", "--clearenv", "--tmpfs", "/", "--tmpfs", "/source"]
             directories = {"/source", "/tmp", "/dev"}
             for path, _, _ in files:
@@ -266,7 +414,7 @@ def execute_committed_source(repository: Path, *, selection: projection.Selectio
             for path, fd, executable in files:
                 command.extend(["--perms", "0555" if executable else "0444", "--ro-bind-data", str(fd), path])
             command.extend(["--remount-ro", "/source", "--remount-ro", "/", "--", *profile["argv"]])
-            outcome = _collect(command, tuple([adapter] + [fd for _, fd, _ in files]),
+            outcome = _collect(_AdapterCommand(command, adapter), tuple(fd for _, fd, _ in files),
                                profile["timeout_seconds"], profile["max_output_bytes"])
         return {"schema": "source-execution/v1", "scope": "committed-source-only", **outcome,
                 "repository": repository_name, "source_sha": selection.source, "source_tree": selection.tree,
