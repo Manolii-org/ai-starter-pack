@@ -335,6 +335,7 @@ def test_release_capability_distribution_boundary(default_render, branded_render
         "docs/coordinated-releases.md",
         "schemas/release-manifest.v1.schema.json",
         "schemas/release-manifest.v2.schema.json",
+        "schemas/release-source-policy.v1.schema.json",
         "schemas/release-adoption.v1.schema.json",
         ".github/actions/validate-release-manifest/action.yml",
         ".github/actions/validate-release-manifest/release_manifest.py",
@@ -349,6 +350,7 @@ def test_release_capability_distribution_boundary(default_render, branded_render
         # six-file installer does not ship that optional QA helper.
         assert ROOT / "scripts/tests/test_release_validation_gate.py" in maintenance_paths
         maintenance_paths += list((ROOT / "scripts/tests/fixtures").glob("release-manifest.v*.json"))
+        maintenance_paths.append(ROOT / "scripts/tests/fixtures/release-manifest.c435.py")
         registry_cases = list((ROOT / "tests").glob("_registry_cases_*.py"))
         assert registry_cases, "the registry case inventory must not become vacuous"
         maintenance_paths += registry_cases
@@ -377,6 +379,42 @@ def test_release_capability_distribution_boundary(default_render, branded_render
         )
         assert vector_result.returncode == 0, vector_result.stdout + vector_result.stderr
         assert "authority=none" in vector_result.stdout
+        # Rendered consumers receive the opt-in reader/schema, without adopting
+        # any actual owner's foreign source grant or provider credentials.
+        policy_program = """
+import copy, json, runpy, sys
+r = runpy.run_path(sys.argv[1])
+value = json.load(open(sys.argv[2]))['subject']
+value['profile_version'] = 'exact-code-v1'
+source = {'repo':'shared-fixture/runner-image','sha':'7'*40,'tree':'8'*40}
+policy = {'schema_version':1,'repo':'example/product','entity':'example',
+          'control_sha':'b'*40,'capability_sha':'c'*40,'profile_version':'exact-code-v1',
+          'allowed_code_sources':[source]}
+value['components'][0]['source'] = copy.deepcopy(source)
+value['policy_sha256'] = r['digest'](policy)
+value['qualifications'][0]['tested_subject_sha256'] = r['digest'](r['qualification_subject'](value))
+record = r['prepare'](value, schema_version=2, trusted_source_policy=policy)
+assert r['validate'](record, trusted_source_policy=policy) == record
+try:
+    r['validate'](record)
+except r['ManifestError']:
+    pass
+else:
+    raise AssertionError('default consumer reader admitted foreign source')
+value['databases'][0]['source'] = copy.deepcopy(source)
+value['qualifications'][0]['tested_subject_sha256'] = r['digest'](r['qualification_subject'](value))
+try:
+    r['prepare'](value, schema_version=2, trusted_source_policy=policy)
+except r['ManifestError']:
+    pass
+else:
+    raise AssertionError('consumer reader admitted foreign database')
+"""
+        policy_result = subprocess.run(
+            [sys.executable, "-c", policy_program, str(validator), str(vector_fixture)],
+            cwd=rendered, capture_output=True, text=True, timeout=30,
+        )
+        assert policy_result.returncode == 0, policy_result.stdout + policy_result.stderr
         # Exercise the same discovery seam that previously collected the leaked
         # vector tests, then positively run an intentionally portable unit test.
         env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}

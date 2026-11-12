@@ -5,8 +5,8 @@ on:
     inputs:
       provider_mode:
         type: string
-        default: anthropic
-        description: anthropic | proxy
+        default: proxy
+        description: proxy (governed router) | anthropic (explicit external direct opt-in)
       litellm_proxy_url:
         type: string
         default: ''

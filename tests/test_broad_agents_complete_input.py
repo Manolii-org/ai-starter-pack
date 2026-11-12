@@ -204,6 +204,7 @@ def test_complete_input_keeps_existing_untrusted_boundaries(runner, monkeypatch)
 
 def test_direct_attempt_budget_does_not_gain_proxy_headroom(runner, monkeypatch):
     """Fake direct transport verifies settings only, not authorization."""
+    monkeypatch.setenv('SECURITY_REVIEW_MODE', 'direct')
     monkeypatch.delenv('LITELLM_PROXY_URL')
     monkeypatch.delenv('ANTHROPIC_BASE_URL', raising=False)
     monkeypatch.setenv('ANTHROPIC_DIRECT_API_KEY', 'offline-direct')
