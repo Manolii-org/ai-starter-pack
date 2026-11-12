@@ -1085,4 +1085,5 @@ def test_watch_continuity_maintainer_fixture_never_ships(default_render, strict_
         assert not (rendered / "tests/test_watch_pr_continuity.py").exists()
         command = rendered / ".claude/commands/watch-pr.md"
         assert command.is_file()
+        assert (rendered / "scripts/pr-watch-observe.py").is_file()
         assert "original task" in command.read_text().lower()

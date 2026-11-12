@@ -2,7 +2,6 @@
 import json
 import os
 from pathlib import Path
-import re
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
@@ -15,15 +14,18 @@ SOURCES = [ROOT / '.claude/commands/watch-pr.md.jinja',
            ROOT / 'registry/platform/framework/commands/watch-pr.md']
 
 
+def script_for(source):
+    return (ROOT if source == SOURCES[0] else source.parent.parent) / 'scripts/pr-watch-observe.py'
+
+
 def program(source):
-    text = source.read_text()
-    return re.search(r'```python\n(.*?)\n```', text, re.DOTALL)[1]
+    return script_for(source).read_text()
 
 
 def run(source, directory, **changes):
     env = {**os.environ, 'WATCH_OWNER': 'owner-a', 'WATCH_REPOSITORY': 'sample/project',
            'WATCH_PR': '7', 'WATCH_HEAD': 'a' * 40, 'WATCH_PHASE': 'watching', **changes}
-    return subprocess.run([sys.executable, '-c', program(source)], cwd=directory,
+    return subprocess.run([sys.executable, str(script_for(source))], cwd=directory,
                           env=env, capture_output=True, text=True, timeout=10)
 
 

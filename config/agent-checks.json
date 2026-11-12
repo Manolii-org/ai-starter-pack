@@ -528,7 +528,10 @@
         "registry/platform/framework/commands/watch-pr.md",
         "tests/test_watch_pr_continuity.py",
         "tests/test_watch_pr_subscribe_split.py",
-        "config/agent-checks.json"
+        "config/agent-checks.json",
+        "scripts/pr-watch-observe.py",
+        "plugin/manolii-framework/scripts/pr-watch-observe.py",
+        "registry/platform/framework/scripts/pr-watch-observe.py"
       ],
       "tools": [
         "uv"
