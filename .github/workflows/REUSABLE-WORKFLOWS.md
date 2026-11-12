@@ -711,8 +711,9 @@ inputs that the action ignored, so Autofix never ran — after upgrading it
 pushes `[autofix]` commits and spends tokens. A dispatched agent step that
 produces no `execution_file` fails the job; skips (loop-break, budget,
 `skip-ai-review`, bot actors other than the relay, actors without write
-access) stay green. `GH_PAT` is optional; pushes made with `github.token` do
-not re-trigger PR checks.
+access) stay green. `GH_PAT` is optional; without it the trusted publisher
+does not push, retains unpublished Git objects, and reports
+`publication_credential_unavailable`.
 
 **Model (lean by default).** The agent always runs with an explicit model:
 the reusable's `model` input, or the standalone's repository variable

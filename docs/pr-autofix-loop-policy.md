@@ -27,8 +27,11 @@ The editor and acquisition steps use the built-in token with read-only contents
 permission. The editor commits locally and never receives the publication
 credential. A trusted controller publishes through a fresh bare Git repository
 that does not inherit PR hooks, URL rewrites or credentials. It permits only a
-fast-forward candidate based on the admitted head, refuses instruction-surface
-changes in the repair, sends one push, then requires exact remote-ref readback.
+fast-forward candidate based on the admitted head, enforces the existing
+`[autofix]` commit-subject convention and refuses instruction-surface changes.
+An expected-ref lease makes the sole push conditional on the checked head,
+including deletion/reset races; validated ancestry prevents history rewrites.
+Exact remote-ref readback is still required.
 Unknown publication is retained as unknown; it is never blindly resent.
 
 Reusable callers keep the existing optional `GH_PAT` secret. The standalone
@@ -54,6 +57,15 @@ on that new SHA, independent review, protected merge and parent-task verificatio
 remain separate commitments. `no_change` is not progress. Failed/held publication
 fails its step while retaining local implementation and the unfinished task.
 Exhausted-budget notices are deduplicated; counters are never reset to continue.
+A native Actions-held/uncertain publication receipt suppresses another editor
+for the same head. The original owner must recover retained implementation and
+resolve that specific dependency before advancing the head. New review/CI facts
+remain pending in GitHub; the guard does not acknowledge or discard them.
+Automatic artifact recovery and same-owner event delivery still require the
+qualified owning client; a legacy workflow cannot claim those capabilities.
+
+The generator validates custody step presence/order and embedded payloads.
+Editor admission requires an explicit `skip=false`; a missing output fails closed.
 
 Consumers referencing a moving framework ref receive reviewed workflow changes
 when that ref advances. Pinned/copy-installed callers require reviewed adoption

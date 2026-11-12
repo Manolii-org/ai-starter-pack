@@ -51,12 +51,31 @@ def test_custody_uses_native_owner_and_fails_closed(tmp_path,case,allowed):
     assert out.read_text()==f'skip={str(not allowed).lower()}\n'
 
 
+@pytest.mark.parametrize('outcome', ['publication_admission_held','native_state_held','instruction_surface_held',
+    'publication_credential_unavailable','publication_unknown','native_state_unverified','commit_subject_held'])
+def test_held_receipts_suppress_duplicate_editors_for_the_same_head(tmp_path,outcome):
+    # Run the actual Bash guard with a bounded fake native API, not a broker.
+    original=native_pr
+    comments=[{'user':{'id':41898282},'body':f'<!-- pack-autofix-publication:v1 head={"a"*40} outcome={outcome} -->'}]
+    bin_dir=tmp_path/'bin';bin_dir.mkdir();output=tmp_path/'out'
+    data=tmp_path/'facts';data.write_text(json.dumps({'pr':original(),'comments':comments}))
+    gh=bin_dir/'gh';gh.write_text('#!/usr/bin/python3\nimport json,os,sys\nd=json.load(open(os.environ["FACTS"]))\nprint(json.dumps(d["comments"] if "/comments?" in sys.argv[-1] else d["pr"]))\n');gh.chmod(0o755)
+    env={**os.environ,'PATH':str(bin_dir)+':/usr/bin:/bin','FACTS':str(data),
+         'PR_NUMBER':'7','EXPECTED_HEAD':'a'*40,'REPOSITORY':'example/repository','GITHUB_OUTPUT':str(output)}
+    for user,head,expected in [(41898282,'a'*40,'true'),(41898282,'b'*40,'false'),(99,'a'*40,'false')]:
+        comments[0]['user']['id']=user;comments[0]['body']=f'<!-- pack-autofix-publication:v1 head={head} outcome={outcome} -->'
+        data.write_text(json.dumps({'pr':original(),'comments':comments}));output.write_text('')
+        subprocess.run(['bash',str(ROOT/'scripts/ci/autofix-custody.sh')],env=env,check=True,capture_output=True,timeout=10)
+        assert output.read_text()==f'skip={expected}\n'
+
+
 @pytest.fixture
 def candidate(tmp_path,monkeypatch):
     work=tmp_path/'work';work.mkdir()
     def git(*args):return subprocess.check_output(['/usr/bin/git',*args],cwd=work).decode().strip()
     git('init','-q');git('config','user.email','fixture@example.invalid');git('config','user.name','fixture')
-    (work/'file.txt').write_text('before');git('add','.');git('commit','-qm','base');base=git('rev-parse','HEAD')
+    (work/'file.txt').write_text('initial');git('add','.');git('commit','-qm','initial')
+    (work/'file.txt').write_text('before');git('commit','-qam','base');base=git('rev-parse','HEAD')
     (work/'file.txt').write_text('after');git('commit','-qam','[autofix] fixture');head=git('rev-parse','HEAD')
     for k,v in dict(GITHUB_WORKSPACE=str(work),EXPECTED_HEAD=base,HEAD_REF='fix/owned',PR_NUMBER='7',
         GITHUB_REPOSITORY='example/repository',GITHUB_SERVER_URL='https://github.com',RUNNER_TEMP=str(tmp_path),
@@ -74,6 +93,16 @@ def test_missing_publication_credential_preserves_local_implementation(candidate
     recovery=Path(result['recovery_path'])
     git('bundle','verify',str(recovery/'implementation.bundle'))
     assert json.loads((recovery/'receipt.json').read_text())['candidate_sha']==head
+
+
+def test_unmarked_commit_is_held_without_losing_implementation(candidate,monkeypatch):
+    work,base,head,git=candidate;m=load_publisher()
+    (work/'file.txt').write_text('unmarked');git('commit','-qam','unmarked local repair')
+    monkeypatch.setenv('PUBLISH_TOKEN','fixture-write-only')
+    monkeypatch.setattr(m,'api',lambda *a,**kw:pytest.fail('unmarked candidate must not reach publication'))
+    result=m.publish()
+    assert result['outcome']=='commit_subject_held' and result['published_sha']==''
+    git('bundle','verify',str(Path(result['recovery_path'])/'implementation.bundle'))
 
 
 @pytest.mark.parametrize('hold',['custody','stale-head','registered-owner','unreadable'])
@@ -144,6 +173,49 @@ def test_uncertain_push_is_retained_and_never_retried(candidate,monkeypatch):
     assert retained['outcome']=='publication_unknown' and len(pushes)==1
 
 
+def test_held_receipt_names_dependency_and_does_not_claim_upload(candidate,monkeypatch):
+    m=load_publisher();sent=[]
+    monkeypatch.setenv('GITHUB_RUN_ID','123')
+    def api(path,**kw):
+        if kw.get('method')=='POST':sent.append(kw['body']['body']);return {}
+        return []
+    monkeypatch.setattr(m,'api',api)
+    m.record({'outcome':'publication_credential_unavailable','published_sha':''})
+    assert len(sent)==1 and 'Restore its approved scoped route' in sent[0]
+    assert 'not a durable upload receipt' in sent[0] and '/actions/runs/123' in sent[0]
+
+
+@pytest.mark.parametrize('race',['reset','deleted'])
+def test_publication_lease_refuses_a_ref_changed_after_native_read(candidate,monkeypatch,tmp_path,race):
+    work,base,head,git=candidate;m=load_publisher();real_git=m.git;pushes=[]
+    remote=tmp_path/'remote.git'
+    subprocess.run(['/usr/bin/git','clone','--bare','--quiet',str(work),str(remote)],check=True,capture_output=True)
+    def remote_git(*args):
+        return subprocess.check_output(['/usr/bin/git','--git-dir='+str(remote),*args],env=m.git_env()).decode().strip()
+    remote_git('update-ref','refs/heads/fix/owned',base)
+    ancestor=git('rev-parse',base+'^')
+    monkeypatch.setenv('PUBLISH_TOKEN','fixture-write-only')
+    def run(args,cwd,**kw):
+        if 'push' in args:
+            pushes.append(args)
+            if race=='reset':remote_git('update-ref','refs/heads/fix/owned',ancestor)
+            else:remote_git('update-ref','-d','refs/heads/fix/owned')
+            assert '--force-with-lease=refs/heads/fix/owned:'+base in args
+            args=[str(remote) if a=='https://github.com/example/repository.git' else a for a in args]
+        return real_git(args,cwd,**kw)
+    monkeypatch.setattr(m,'git',run)
+    def api(path,**kw):
+        if '/pulls/' in path:return native_pr(head=base)
+        r=subprocess.run(['/usr/bin/git','--git-dir='+str(remote),'rev-parse','--verify','refs/heads/fix/owned'],capture_output=True,text=True)
+        return {'object':{'sha':r.stdout.strip() if r.returncode==0 else ''}}
+    monkeypatch.setattr(m,'api',api)
+    result=m.publish()
+    assert result['outcome']=='publication_unknown' and result['published_sha']=='' and len(pushes)==1
+    if race=='reset':assert remote_git('rev-parse','refs/heads/fix/owned')==ancestor
+    else:
+        assert subprocess.run(['/usr/bin/git','--git-dir='+str(remote),'show-ref','--verify','refs/heads/fix/owned'],capture_output=True).returncode!=0
+
+
 def test_replace_refs_cannot_hide_instruction_changes(candidate,monkeypatch):
     work,base,safe,git=candidate;m=load_publisher()
     (work/'.claude').mkdir();(work/'.claude/unsafe.md').write_text('fixture instruction change')
@@ -161,7 +233,10 @@ def test_actual_editor_cannot_publish_and_controller_is_custody_gated(file):
     publisher=next(s for s in job['steps'] if s.get('id')=='publish')
     assert workflow['permissions']['contents']=='read'
     assert editor['with']['github_token']=='${{ github.token }}'
-    assert 'steps.custody_dispatch.outputs.skip' in editor['if']
+    assert "steps.custody_dispatch.outputs.skip == 'false'" in editor['if']
+    ids=[s.get('id') for s in job['steps']]
+    assert ids.index('custody_dispatch') < ids.index('claude')
+    assert ids.index('custody_publish') < ids.index('publish')
     assert publisher['if']=="steps.verify_exec.outcome == 'success'"
     assert publisher['env']['PUBLICATION_ADMITTED']=="${{ steps.custody_publish.outputs.skip == 'false' }}"
     if 'reusable' in file:
@@ -180,3 +255,23 @@ def test_actual_editor_cannot_publish_and_controller_is_custody_gated(file):
 def test_embedded_controller_source_is_current():
     r=subprocess.run([os.sys.executable,str(ROOT/'scripts/sync-autofix-control.py'),'--check'],capture_output=True,text=True)
     assert r.returncode==0,r.stdout+r.stderr
+
+
+@pytest.mark.parametrize('file',['pr-autofix-loop.yml','pr-autofix-loop-reusable.yml'])
+@pytest.mark.parametrize('defect',['missing','duplicate','late','empty-payload','fail-open',
+    'publisher-payload','publisher-admission','publisher-condition'])
+def test_generator_refuses_partial_or_unsafe_control_wiring(file,defect):
+    spec=importlib.util.spec_from_file_location('autofix_sync',ROOT/'scripts/sync-autofix-control.py')
+    m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
+    workflow=yaml.safe_load((ROOT/'.github/workflows'/file).read_text());steps=workflow['jobs']['autofix']['steps']
+    guard=next(s for s in steps if s.get('id')=='custody_dispatch')
+    if defect=='missing':steps.remove(guard)
+    if defect=='duplicate':steps.append(guard.copy())
+    if defect=='late':steps.remove(guard);steps.append(guard)
+    if defect=='empty-payload':guard['run']='echo unsafe'
+    if defect=='fail-open':next(s for s in steps if s.get('id')=='claude')['if']="steps.custody_dispatch.outputs.skip != 'true'"
+    publisher=next(s for s in steps if s.get('id')=='publish')
+    if defect=='publisher-payload':publisher['run']='python3 untrusted-checkout.py'
+    if defect=='publisher-admission':publisher['env']['PUBLICATION_ADMITTED']='true'
+    if defect=='publisher-condition':publisher['if']='always()'
+    with pytest.raises(ValueError):m.validate(yaml.safe_dump(workflow), 'reusable' in file)

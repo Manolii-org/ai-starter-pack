@@ -62,6 +62,8 @@ def publish(result=None):
         result["outcome"] = "no_change"
         return result
     git(["merge-base", "--is-ancestor", expected, candidate], workspace)
+    subjects = git(['log','--format=%s','--no-show-signature',expected+'..'+candidate], workspace).decode().splitlines()
+    subjects_valid = bool(subjects) and all(subject.startswith('[autofix]') for subject in subjects)
     names = git(["diff", "--name-only", "--no-ext-diff", "--no-textconv", "--no-renames", "-z",
                  expected, candidate], workspace).decode().split('\0')
     if any(INSTRUCTIONS.search(name) for name in names):
@@ -87,6 +89,9 @@ def publish(result=None):
             pr_number=os.environ['PR_NUMBER'], base_sha=expected, candidate_sha=candidate,
             scope='Git objects only; never execute recovery payloads. Revalidate native custody/head and owning gates before publication.'))+'\n')
         result['recovery_path'] = str(recovery)
+        if not subjects_valid:
+            result['outcome'] = 'commit_subject_held'
+            return result
         # Local data retention is independent of publication authority. A late
         # owner/head/read hold must not discard implementation on runner exit.
         if os.environ.get('PUBLICATION_ADMITTED') != 'true':
@@ -110,7 +115,11 @@ def publish(result=None):
             GIT_CONFIG_VALUE_0='AUTHORIZATION: basic '+base64.b64encode(('x-access-token:'+token).encode()).decode())
         result['outcome'] = 'publication_unknown'  # Before the sole send.
         try:
-            git(['--git-dir='+str(root/'objects.git'), 'push', server+'/'+repo+'.git',
+            # Ancestry was verified above with replacement objects disabled.
+            # This lease adds an atomic expected-ref check; it cannot authorize
+            # a history rewrite or recreate a branch deleted after admission.
+            git(['--git-dir='+str(root/'objects.git'), 'push',
+                 '--force-with-lease=refs/heads/'+branch+':'+expected, server+'/'+repo+'.git',
                  candidate+':refs/heads/'+branch], root, env=env, timeout=120)
         except subprocess.CalledProcessError:
             pass  # Read back once; never blindly resend an uncertain push.
@@ -136,11 +145,23 @@ def record(result):
             break
     else:
         return  # Incomplete history is not permission to duplicate a receipt.
+    dependencies = {
+        'publication_credential_unavailable': 'The owning CI-triggering publication credential is unavailable. Restore its approved scoped route before publication.',
+        'publication_admission_held': 'Native custody admission declined. The retained owner must resolve the reported custody/read/hold dependency before publication.',
+        'native_state_held': 'The native PR head/state/repository/hold changed. Reconcile the current native state before recovering or publishing the candidate.',
+        'instruction_surface_held': 'The candidate changed protected instruction paths. Separate the authorized repair and pass the instruction guard before publication.',
+        'commit_subject_held': 'The candidate violated the existing [autofix] accounting convention. The original owner must review and recommit the retained repair with valid subjects.',
+        'native_state_unverified': 'Native PR readback is unverified. Restore the same approved read route and revalidate current custody/head; do not switch identities.',
+        'publication_unknown': 'The sole push has an uncertain outcome. Verify the authenticated remote SHA before considering another send.',
+    }
     body = ('Verified autofix publication: `'+result['published_sha']+'`. New-head CI still needs verification.'
             if outcome == 'published' else
-            'Autofix execution did not establish publication: `'+outcome+'`. The parent task remains unfinished; '
-            'the existing owner must resolve this specific dependency before retrying publication. '
-            'Independent authorized implementation is not globally blocked.')
+            'Publication held: `'+outcome+'`. '+dependencies.get(outcome,'The controller result needs owning review.')+
+            ' The parent task remains unfinished. The original owner must recover retained implementation before advancing this head; '
+            'other authorized commitments can proceed. A recovery path alone is not a durable upload receipt.')
+    run_id = os.environ.get('GITHUB_RUN_ID','')
+    if re.fullmatch(r'[1-9][0-9]*',run_id):
+        body += ' Inspect the original run and verify its artifact upload: '+os.environ['GITHUB_SERVER_URL'].rstrip('/')+'/'+repo+'/actions/runs/'+run_id
     api(f'repos/{repo}/issues/{number}/comments', method='POST', body={'body':marker+'\n'+body})
 
 

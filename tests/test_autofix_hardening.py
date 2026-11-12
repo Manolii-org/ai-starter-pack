@@ -30,7 +30,7 @@ RESTORE_STEP = "Restore trusted instruction surface from PR base"
 SURFACE = {".claude", ".mcp.json", ".claude.json", ".gitmodules", ".ripgreprc", ".husky",
            "CLAUDE.md", "CLAUDE.local.md", "AGENTS.md"}
 SURFACE_CHECK = "Verify autofix commits left the instruction surface alone"
-GATE = "steps.ref.outputs.skip != 'true' && steps.custody.outputs.skip != 'true' && steps.pr.outputs.skip != 'true' && steps.budget.outputs.skip != 'true'"
+GATE = "steps.ref.outputs.skip != 'true' && steps.custody.outputs.skip == 'false' && steps.pr.outputs.skip != 'true' && steps.budget.outputs.skip != 'true'"
 
 
 def _steps(name: str) -> list[dict]:
@@ -155,7 +155,7 @@ def test_reusable_anthropic_model_env_matches_the_model_flag() -> None:
     assert step["env"]["ANTHROPIC_MODEL"] == f"${{{{ {MODEL_REF['reusable']} }}}}"
     resolver = _step("reusable", title=RESOLVER["reusable"])
     assert resolver["if"] == GATE
-    assert step["if"] == GATE+" && steps.custody_dispatch.outputs.skip != 'true'"
+    assert step["if"] == GATE+" && steps.custody_dispatch.outputs.skip == 'false'"
 
 
 def test_standalone_lock_is_on_the_agent_job_and_never_cancels() -> None:
@@ -182,7 +182,7 @@ def test_standalone_rechecks_the_head_before_any_queued_work() -> None:
     agent = next(i for i, s in enumerate(steps) if str(s.get("uses", "")).startswith(ACTION))
     for step in steps[1:agent + 1]:
         assert step.get("if") == (GO if step.get('id')=='custody_dispatch' else
-            GO+" && steps.custody_dispatch.outputs.skip != 'true'"), step.get("name") or step.get("uses")
+            GO+" && steps.custody_dispatch.outputs.skip == 'false'"), step.get("name") or step.get("uses")
     for step in steps[agent + 1:]:
         assert any(gate in step['if'] for gate in ('steps.claude.outcome','steps.verify_exec.outcome','steps.publish.outputs.recovery_path'))
 

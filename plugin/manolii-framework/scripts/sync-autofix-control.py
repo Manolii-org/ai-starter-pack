@@ -6,6 +6,9 @@ The called workflow never imports controller code from a consumer's PR checkout.
 import argparse
 from pathlib import Path
 import re
+import sys
+
+import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -142,7 +145,40 @@ def render(text):
     text=text[:start]+prefix+text[end:]
     text=re.sub(r"(id: custody_dispatch\n        if: steps.ref[^\n]*)(\n)",
         lambda m:m[1]+(" && steps.custody.outputs.skip != 'true'" if 'steps.custody.outputs' not in m[1] else '')+m[2],text)
+    for guard in ('custody','custody_dispatch'):
+        text = text.replace(f"steps.{guard}.outputs.skip != 'true'", f"steps.{guard}.outputs.skip == 'false'")
     return text
+
+
+def validate(text, reusable):
+    """Refuse partial/misordered control wiring; unset outputs never admit work."""
+    jobs = yaml.safe_load(text)['jobs']
+    expected = {'autofix': ('custody_dispatch','claude','verify_exec','custody_publish','publish')}
+    if reusable:
+        expected['autofix'] = ('custody',*expected['autofix'])
+    else:
+        expected['preflight'] = ('custody','budget')
+        needs = jobs['autofix'].get('needs',[])
+        if 'preflight' not in ([needs] if isinstance(needs,str) else needs):
+            raise ValueError('autofix must depend on custody preflight')
+    canonical = (ROOT/'scripts/ci/autofix-custody.sh').read_text().rstrip()
+    for name, required in expected.items():
+        steps = jobs[name]['steps'];ids = [s.get('id') for s in steps]
+        if any(ids.count(identity)!=1 for identity in required):
+            raise ValueError('missing or duplicate required custody/control step')
+        if [ids.index(identity) for identity in required] != sorted(ids.index(identity) for identity in required):
+            raise ValueError('custody/control steps are out of order')
+        for s in steps:
+            if s.get('id') in ('custody','custody_dispatch','custody_publish') and canonical not in s.get('run',''):
+                raise ValueError('custody guard payload is missing')
+    editor = next(s for s in jobs['autofix']['steps'] if s.get('id')=='claude')
+    if "steps.custody_dispatch.outputs.skip == 'false'" not in editor.get('if',''):
+        raise ValueError('editor requires affirmative custody admission')
+    publisher = next(s for s in jobs['autofix']['steps'] if s.get('id')=='publish')
+    if ((ROOT/'scripts/ci/autofix-publish.py').read_text().rstrip() not in publisher.get('run','')
+            or publisher.get('env',{}).get('PUBLICATION_ADMITTED') != "${{ steps.custody_publish.outputs.skip == 'false' }}"
+            or publisher.get('if') != "steps.verify_exec.outcome == 'success'"):
+        raise ValueError('publisher payload or admission is missing')
 
 
 def main():
@@ -151,6 +187,11 @@ def main():
     for name in ['pr-autofix-loop.yml','pr-autofix-loop-reusable.yml']:
         path=ROOT/'.github/workflows'/name;text=path.read_text()
         result=render(initial(text,'reusable' in name) if '# autofix-control:guard:begin' not in text else text)
+        try:
+            validate(result,'reusable' in name)
+        except (ValueError,KeyError,TypeError,yaml.YAMLError):
+            print(f'INVALID custody/control structure: {path.name}',file=sys.stderr)
+            return 1
         if result!=text:
             stale.append(str(path.relative_to(ROOT)))
             if not args.check:path.write_text(result)
