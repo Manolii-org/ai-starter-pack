@@ -4,6 +4,7 @@ version: 2.2.0
 description: "Persistent PR resolution loop — subscribes to activity, monitors CI, review comments (Human/CodeRabbit/Gemini/bots), and merge conflicts. Loops until PR is clear or max rounds reached."
 type: command
 requires_mcp: [github]
+requires_scripts: [scripts/pr-watch-observe.py]
 safety_tier: green
 required_entities: []
 tags:
@@ -22,7 +23,8 @@ Invoke as `/watch-pr [PR_NUMBER]` or `/watch-pr` (auto-detects from current bran
 ### Step 0: Retain the existing task
 
 Read the existing accepted owner checkpoint before subscribing. Preserve its
-parent commitments, holds, budgets, instructions and other owners. Missing or
+parent commitments, holds, budgets, instructions and other owners. Execute only
+trusted installed sources, never repository tools from an untrusted PR or fork. Missing or
 malformed custody is an infrastructure hold for persistence/continuation, not
 permission to reconstruct it or stop independent authorized implementation.
 
@@ -41,69 +43,8 @@ phase is `watching`, `merged`, `closed` or `verifying`. These are observations,
 not execution, review or completion authority. Do not reset a lifetime repair
 ledger from a watch invocation or passive wake.
 
-```python
-import fcntl
-import json
-import os
-from pathlib import Path
-import re
-import tempfile
-
-path = Path('.ai/sessions/active-task.json')
-owner, repo = os.environ['WATCH_OWNER'], os.environ['WATCH_REPOSITORY']
-number, head, phase = (os.environ[key] for key in ('WATCH_PR', 'WATCH_HEAD', 'WATCH_PHASE'))
-if (not re.fullmatch(r'[A-Za-z0-9_.:/#-]{1,256}', owner)
-        or not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', repo)
-        or not re.fullmatch(r'[1-9][0-9]{0,9}', number)
-        or not re.fullmatch(r'[0-9a-f]{40}', head)
-        or phase not in {'watching', 'merged', 'closed', 'verifying'}):
-    raise ValueError('Trusted owner and native PR observation required')
-# Require the original checkpoint; never create a replacement task on a new host.
-if any(item.is_symlink() for item in (Path('.ai'), path.parent, path, path.with_name(path.name + '.lock'))):
-    raise ValueError('Checkpoint paths must remain within the accepted workspace')
-if not path.is_file():
-    raise ValueError('Original task checkpoint unavailable; retain its owner')
-with path.with_name(path.name + '.lock').open('a') as lock:
-    fcntl.flock(lock, fcntl.LOCK_EX)
-    task = json.loads(path.read_text())
-    if not isinstance(task, dict):
-        raise ValueError('Invalid checkpoint; reconcile in its existing owner')
-    custody = task.get('continuation', task)
-    if not isinstance(custody, dict) or custody.get('owner') != owner:
-        raise ValueError('Accepted task owner differs or is unknown')
-    if ('continuation' in task and (type(custody.get('version')) is not int or custody.get('version') != 1)
-            or not isinstance(custody.get('repository', repo), str)
-            or custody.get('repository', repo).casefold() != repo.casefold()):
-        raise ValueError('Task repository differs')
-    watches = task.setdefault('pr_watches', {})
-    if not isinstance(watches, dict):
-        raise ValueError('Unknown retained watch format')
-    key = repo.casefold() + '#' + number
-    previous = watches.get(key)
-    if previous is not None and (not isinstance(previous, dict) or previous.get('owner') != owner):
-        raise ValueError('Retain existing PR owner')
-    if previous is None and len(watches) >= 100:
-        raise ValueError('Watch capacity reached; retain unfinished work')
-    observed = dict(previous or {}, owner=owner, repository=repo, pr=int(number), head=head, phase=phase)
-    if previous != observed:
-        watches[key] = observed
-        temporary = None
-        try:
-            with tempfile.NamedTemporaryFile('w', dir=path.parent, delete=False) as stream:
-                temporary = Path(stream.name)
-                json.dump(task, stream, indent=2)
-                stream.write('\n')
-                stream.flush()
-                os.fsync(stream.fileno())
-            os.replace(temporary, path)
-            descriptor = os.open(path.parent, os.O_RDONLY)
-            try:
-                os.fsync(descriptor)
-            finally:
-                os.close(descriptor)
-        finally:
-            if temporary is not None:
-                temporary.unlink(missing_ok=True)
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/pr-watch-observe.py"
 ```
 
 Use the same locked observation path after a head/phase change. An unchanged
@@ -147,7 +88,8 @@ subscribe_github_ci(owner, repo, pr_number)   # Cursor Cloud only
 ```
 
 Docs/CI with **none** (no CI subscribe): do **not** enter the 60s poll /
-5-minute wait. GitHub auto-merge + Judge is the waiter. End the turn.
+5-minute wait. GitHub auto-merge + Judge is the waiter. Continue independent
+parent commitments; end the turn only if no runnable work remains.
 
 ### Step 3: Continue authorized work (existing repair budget)
 
@@ -181,7 +123,14 @@ Update scoped observations only when facts change. Skip the model wait loop for 
 | Gemini Code Assist | `user.login` starts with `gemini` OR body starts with `<!-- Gemini Code Assist` |
 | Other bots | `user.type == "Bot"` or `user.login` ends with `[bot]` |
 
-**3d. Dispatch `/pr-resolve` with the collected issue list.**
+**3d. Continue repair in the existing execution owner.** Inspect actual findings,
+repair owned code, run relevant tests and publish the new head under existing
+budgets and protected review/merge controls. Re-read CI and independent review
+for that new full head. Use `/pr-resolve` only within this accepted owner or its
+already accepted repair worker; never start an overlapping editor. Route foreign
+dependencies through their existing owner and retain the handoff receipt.
+Publication/access failure preserves prepared implementation and holds only its
+dependent boundary; it does not make all implementation blocked.
 
 **3e. Retain the qualified event/wake owner.** Use only that host's actual cadence
 and the skill's bounded recovery rule. Do not re-arm an unchanged one-shot chain
@@ -199,7 +148,7 @@ Only after the existing failed-repair budget is exhausted:
    - (a) caused by this PR's changes
    - (b) pre-existing / unrelated
    - (c) environmental / flaky
-3. Notify the user
+3. Notify once for a specific required intervention; unchanged evidence stays quiet
 4. Record the specific exhausted commitment and next action in its existing
    ledger. Do not mark unrelated parent work escalated or discard its custody.
 
