@@ -993,9 +993,8 @@ def invoke_agent(
         return {"source": agent_config.name, "findings": [],
                 "first_party": bool(agent_config.first_party or os.environ.get("CLIENT_AI_POLICY")),
                 "skipped": "route_policy_denied"}
-    # first_party agents (security review per the eligibility matrix) go
-    # Anthropic-direct — never the OSS proxy, regardless of declared model.
-    # The estate read-only allowlist is the one proxy exception above.
+    # Only explicitly admitted direct compatibility selects that plane.
+    # Scoped estate read-only grants retain the proxy; governed mode stays there.
     if readonly_proxy:
         direct_required = False
         api_key = api_key or get_api_key()
@@ -1029,10 +1028,8 @@ def invoke_agent(
                 "first_party": True,
                 "skipped": "no_direct_key",
             }
-    # Engagement carrying client_ai_policy is Anthropic-direct for EVERY
-    # agent — the proxy/OSS route is bypassed entirely. Agents declaring
-    # client_policy_model pin that model; the rest dispatch on their declared
-    # model's Anthropic equivalent (DIRECT_MODEL_MAP below).
+    # An explicitly admitted direct engagement may use its legacy model hint.
+    # A client flag alone never selects this compatibility lane.
     elif mode == "direct" and os.environ.get("CLIENT_AI_POLICY"):
         direct_required = True
         # The shared credential resolved before this point is the proxy token

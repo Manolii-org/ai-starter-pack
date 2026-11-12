@@ -1094,11 +1094,9 @@ class Judge:
                     and candidate_findings
                     and not estate_security
                 ):
-                    # Only actual first-party findings force the direct key:
-                    # a `skipped` marker carries nothing restricted, so it
-                    # belongs on the advisory list (disclosed missing coverage)
-                    # rather than vetoing adjudication of proxy-eligible
-                    # findings from the rest of the batch.
+                    # Retain legacy provenance for explicit direct compatibility
+                    # and coverage diagnostics. It cannot select a vendor in
+                    # the governed default; skipped roles remain missing review.
                     self._has_first_party_candidates = True
                 if data.get("first_party") and data.get("skipped"):
                     self._skipped_first_party.append(source)
@@ -1208,15 +1206,14 @@ Only keep original IDs that pass all four gates. Never post to GitHub yourself."
         except RouteAdmissionError as exc:
             logger.error("%s; required adjudication incomplete", exc)
             return None
-        if first_party and not api_key:
+        if not api_key and not proxied:
             logger.error(
-                "first-party findings present but no direct Anthropic "
-                "credential (ANTHROPIC_DIRECT_API_KEY) — refusing to "
-                "adjudicate security candidates via the OSS proxy"
+                "Explicit direct review transport has no provider credential "
+                "(ANTHROPIC_DIRECT_API_KEY); adjudication incomplete"
             )
             return None
         if not api_key:
-            logger.error("no API credential set; cannot invoke judge agent")
+            logger.error("Governed review route or router credential unavailable; cannot invoke judge agent")
             return None
 
         evidence = _judge_evidence(findings, self.sha)

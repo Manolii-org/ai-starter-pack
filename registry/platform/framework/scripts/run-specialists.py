@@ -212,12 +212,14 @@ def _call_api(system_prompt: str, user_message: str, model: str, max_tokens: int
     """Call the Messages API via urllib (Anthropic direct or LiteLLM proxy)."""
     api_key, api_url, proxied = _endpoint(direct=first_party, role=role)
     if not api_key:
-        if first_party:
+        if first_party and not proxied:
             raise RuntimeError(
                 "first_party skill needs ANTHROPIC_DIRECT_API_KEY (or "
                 "ANTHROPIC_API_KEY with no proxy) — the proxy credential "
                 "cannot authenticate Anthropic-direct"
             )
+        if proxied:
+            raise RuntimeError("governed review route or router credential unavailable")
         raise RuntimeError("no API credential set")
     if proxied:
         model = _PROXY_MODEL_MAP.get(model, model)
@@ -439,6 +441,10 @@ def _invoke_skill(skill_name: str, diff: str, output_dir: pathlib.Path) -> tuple
             return skill_name, reason
 
     if not estate_requested and first_party and not api_key:
+        if proxied_preview:
+            _write_skip_marker(skill_name, output_dir, "no_proxy_credential")
+            print(f"[{skill_name}] governed review route or router credential unavailable — marker written")
+            return skill_name, "skipped: no governed review route or router credential"
         # Write a marker, not nothing: a first-party skill that cannot run
         # must surface as a first-party candidate so the judge fails closed
         # into the advisory path instead of silently adjudicating the rest
@@ -543,9 +549,8 @@ def _invoke_skill(skill_name: str, diff: str, output_dir: pathlib.Path) -> tuple
         if mode != "estate-ci-v1" or not estate_requested:
             data["first_party"] = not proxied_preview
         if first_party and not proxied_preview and data.get("findings"):
-            # Marks the candidate set for run-judge: first-party findings must
-            # be adjudicated on a first-party model, not the OSS proxy. Empty
-            # results stay unmarked so they never force a direct key.
+            # Preserve actual direct provenance for the optional compatibility
+            # lane. Governed/proxy output is normalized above.
             data["first_party"] = True
 
         # Write findings to file
