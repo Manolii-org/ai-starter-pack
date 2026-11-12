@@ -154,6 +154,16 @@ The canonical event gate is embedded in standalone preflight, reusable editing
 and fresh publisher admission. It verifies native sender type/ID, current native
 head and any explicit review commit, passes only the verified reviewer login to
 the action's bot allowlist, and retains native permission checks for other users.
+An authenticated bot is a delivery source, not authority to run an editor for
+any PR opener. If all event actors use bot waivers (native review, legacy relay
+or opted-in CI bots), the native opener must have verified repository
+`admin`/`write` permission before the model action can run. Missing, denied or
+unknown opener metadata holds admission without credential fallback. Existing
+writable human event actors retain their normal authorization route, including
+their ability to act on a read-only opener's PR. Legitimate bot openers need the
+same native write proof; allowlist membership alone does not supply it. This is
+an automatic-worker admission condition, not a restriction on an existing task
+owner's independently authorized implementation.
 Known informational summaries and unchanged reply loops stay quiet. Mixed
 P2/P3 findings remain eligible, and unknown new approved review text is inspected
 rather than discarded. Bot review text cannot issue the human `skip-autofix`

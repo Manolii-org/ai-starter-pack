@@ -10,7 +10,7 @@ echo "trigger_run_url=$WR_URL" >> "$GITHUB_OUTPUT"
 # checkout — read the head commit message via the API instead of
 # `git log` (same assertion: subject starts with [autofix]).
 PR_HEAD=$(timeout 20 gh api "repos/${REPOSITORY}/pulls/${PR_NUM}" \
-  --jq '. as $pr | $pr.head | {sha: .sha, same_repo: (if .repo == null then "missing" elif (.repo.id == $pr.base.repo.id) then "true" else "false" end)}' \
+  --jq '. as $pr | $pr.head | {sha: .sha, opener: ($pr.user.login // ""), same_repo: (if .repo == null then "missing" elif (.repo.id == $pr.base.repo.id) then "true" else "false" end)}' \
   2>/dev/null || echo '{}')
 HEAD_SHA=$(echo "$PR_HEAD" | jq -r '.sha // empty')
 SAME_REPO=$(echo "$PR_HEAD" | jq -r '.same_repo // empty')
@@ -149,6 +149,7 @@ echo "allowed_bots=$allowed_bots" >> "$GITHUB_OUTPUT"
 # actors outside allowed_bots and for actors without write access.
 # Native review admission, the relay compatibility route and opted-in CI
 # bots are distinct. All other actors need native repository write access.
+event_authorized=false
 for who in "$ACTOR" "${WR_ACTOR:-}"; do
   [[ -z "$who" ]] && continue
   if [[ "$review_admitted" == true && "$who" == "$ACTOR" && "$EVENT_NAME" != workflow_run ]]; then continue; fi
@@ -160,7 +161,7 @@ for who in "$ACTOR" "${WR_ACTOR:-}"; do
   fi
   PERM=$(timeout -k 5 30 gh api "repos/${REPOSITORY}/collaborators/${who}/permission" --jq '.permission' 2>/dev/null || echo unknown)
   case "$PERM" in
-    admin|write) ;;
+    admin|write) event_authorized=true ;;
     *)
       echo "skip=true" >> "$GITHUB_OUTPUT"
       echo "Actor ${who} has no write access or is not an approved source (permission=${PERM}); skipping"
@@ -168,6 +169,28 @@ for who in "$ACTOR" "${WR_ACTOR:-}"; do
       ;;
   esac
 done
+
+# Bot identity authorizes delivery, not privileged execution for an arbitrary
+# PR opener. When all event actors used bot waivers, require native write
+# authority for the opener before any secret-bearing model action can run.
+# An existing writable human actor still authorizes its normal event route.
+if [[ "$event_authorized" != true ]]; then
+  OPENER=$(jq -r '.opener // empty' <<< "$PR_HEAD")
+  if [[ ! "$OPENER" =~ ^[a-zA-Z0-9][a-zA-Z0-9-]*(\[bot\])?$ ]]; then
+    echo 'skip=true' >> "$GITHUB_OUTPUT"
+    echo 'Native PR opener is missing or invalid; bot-driven editor admission held.'
+    exit 0
+  fi
+  OPENER_PERM=$(timeout -k 5 30 gh api "repos/${REPOSITORY}/collaborators/${OPENER}/permission" --jq '.permission' 2>/dev/null || echo unknown)
+  case "$OPENER_PERM" in
+    admin|write) ;;
+    *)
+      echo 'skip=true' >> "$GITHUB_OUTPUT"
+      echo 'Native PR opener lacks verified write authority; bot-driven editor admission held. Its existing authorized owner must reconcile the PR/read route; no model or writer identity fallback.'
+      exit 0
+      ;;
+  esac
+fi
 
 # --repo required: this step runs with no checkout, so gh would
 # resolve the repo from cwd and fail. Failure must fail closed —

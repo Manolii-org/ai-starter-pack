@@ -17,7 +17,7 @@ def load_publisher():
 
 
 def native_pr(body='',head='a'*40):
-    return dict(state='open',body=body,user={'id':17},labels=[],
+    return dict(state='open',body=body,user={'id':17,'login':'repo-owner'},labels=[],
         head={'sha':head,'ref':'fix/owned','repo':{'full_name':'example/repository'}},
         base={'ref':'main','repo':{'default_branch':'main'}})
 
@@ -500,7 +500,11 @@ a=sys.argv[1:]
 if a[:2]==['pr','view']:value={'labels':facts['labels']}
 elif a and a[0]=='api':
  path=a[1]
- if '/collaborators/' in path:value={'permission':facts['permission']}
+ if '/collaborators/' in path:
+  if '/collaborators/'+facts['pr']['user'].get('login','')+'/permission' in path:
+   if facts.get('opener_unreadable'):sys.exit(1)
+   value={'permission':facts['opener_permission']}
+  else:value={'permission':facts['permission']}
  elif '/commits/' in path:
   if facts['commit_unreadable']:sys.exit(1)
   value={'commit':{'message':facts['subject']}}
@@ -519,7 +523,7 @@ if '--jq' in a:
 else:print(json.dumps(value))
 ''');fake.chmod(0o755)
     pr=native_pr();pr['base']['repo']['id']=42;pr['head']['repo']['id']=42
-    facts=dict(pr=pr,permission='none',labels=[],subject='owned source',head_unreadable=False,commit_unreadable=False)
+    facts=dict(pr=pr,permission='none',opener_permission='write',labels=[],subject='owned source',head_unreadable=False,commit_unreadable=False)
     env={**os.environ,'PATH':str(bin_dir)+':/usr/bin:/bin','EVENT_FACTS':str(data),
         'EVENT_NAME':'pull_request_review_comment','COMMENT_BODY':'**P2 Badge** actionable finding',
         'PR_NUM':'7','PR_NUMBER':'7','ACTOR':'chatgpt-codex-connector[bot]','ACTOR_ID':'199175422','ACTOR_TYPE':'Bot',
@@ -536,6 +540,35 @@ else:print(json.dumps(value))
         assert result.returncode==0,result.stderr
         return dict(line.split('=',1) for line in output.read_text().splitlines() if '=' in line),result.stdout
     return facts,env,run
+
+
+@pytest.mark.parametrize('route', ['native-review','relay','trusted-ci-bot'])
+@pytest.mark.parametrize('permission', ['admin','write','read','none','triage','maintain','unknown','denied','missing','malformed'])
+def test_bot_only_dispatch_requires_native_opener_write(native_event_gate,route,permission):
+    facts,env,run=native_event_gate
+    facts['opener_permission']=permission
+    if permission=='denied':facts['opener_unreadable']=True
+    if permission=='missing':facts['pr']['user'].pop('login')
+    if permission=='malformed':facts['pr']['user']['login']='../outside'
+    if route=='relay':env.update(EVENT_NAME='issue_comment',ACTOR='github-actions[bot]',ACTOR_ID='41898282',COMMENT_BODY='**[@reviewer]** finding')
+    if route=='trusted-ci-bot':env.update(EVENT_NAME='workflow_run',ACTOR='trusted-agent[bot]',TRUSTED_BOTS='trusted-agent')
+    output,_=run()
+    assert output.get('skip')==str(permission not in {'admin','write'}).lower()
+
+
+def test_existing_write_actor_can_authorize_read_opener(native_event_gate):
+    facts,env,run=native_event_gate
+    facts.update(permission='write',opener_permission='read',opener_unreadable=True)
+    env.update(ACTOR='authorized-user',ACTOR_TYPE='User',ACTOR_ID='17')
+    output,_=run()
+    assert output['skip']=='false'
+
+
+def test_bot_opener_needs_the_same_native_write_proof(native_event_gate):
+    facts,env,run=native_event_gate
+    facts['pr']['user']['login']='authorized-opener[bot]'
+    output,_=run()
+    assert output['skip']=='false'
 
 
 @pytest.mark.parametrize('case,admitted',[
