@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""Embed the canonical custody/publisher code in trusted workflow source.
+"""Embed protected controllers and validate editor/publisher job isolation.
 
-The called workflow never imports controller code from a consumer's PR checkout.
+The public callers retain their API and locks. Only the internal execution
+workflow contains code; it never imports controller code from a PR checkout.
 """
 import argparse
+import ast
 from pathlib import Path
 import re
 import sys
@@ -11,192 +13,162 @@ import sys
 import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
+EXECUTION = 'pr-autofix-execution-reusable.yml'
+EDITOR_CONDITIONS = {
+    'standalone': "steps.lock.outputs.go == 'true' && steps.custody_dispatch.outputs.skip == 'false'",
+    'reusable': "steps.ref.outputs.skip != 'true' && steps.custody.outputs.skip == 'false' && steps.pr.outputs.skip != 'true' && steps.budget.outputs.skip != 'true' && steps.custody_dispatch.outputs.skip == 'false'",
+}
+ADMISSIONS = {
+    'standalone': "${{ steps.lock.outputs.go == 'true' && steps.custody_publish.outputs.skip == 'false' }}",
+    'reusable': "${{ steps.ref.outputs.skip == 'false' && steps.pr.outputs.skip == 'false' && steps.budget.outputs.skip == 'false' && steps.custody_publish.outputs.skip == 'false' }}",
+}
 
 
-def step(kind, identity, condition, number, head, branch=None, token=None):
-    name = 'Check retained execution owner' if kind == 'guard' else 'Publish and verify the repair'
-    env = {'REPOSITORY': '${{ github.repository }}', 'PR_NUMBER': number, 'EXPECTED_HEAD': head}
-    if kind == 'guard':
-        env['GH_TOKEN'] = '${{ github.token }}'
-        body = (ROOT/'scripts/ci/autofix-custody.sh').read_text().rstrip()
-    else:
-        env.update(HEAD_REF=branch, READ_TOKEN='${{ github.token }}', PUBLISH_TOKEN=token,
-                   PUBLICATION_ADMITTED="${{ steps.custody_publish.outputs.skip == 'false' }}")
-        body = "/usr/bin/python3 -I - <<'AUTOFIX_PY'\n"+(ROOT/'scripts/ci/autofix-publish.py').read_text().rstrip()+"\nAUTOFIX_PY"
-    lines = [f'      - name: {name}',f'        id: {identity}',f'        if: {condition}', '        env:']
-    lines += [f'          {key}: {value}' for key,value in env.items()]
-    lines += ['        run: |',f'          # autofix-control:{kind}:begin']
-    lines += ['          '+line if line else '' for line in body.splitlines()]
-    lines += [f'          # autofix-control:{kind}:end','']
-    return '\n'.join(lines)+'\n'
+class Dumper(yaml.SafeDumper):
+    def ignore_aliases(self, data):
+        return True
 
 
-def initial(text, reusable):
-    number = '${{ steps.ref.outputs.pr_number }}' if reusable else '${{ needs.preflight.outputs.pr_number }}'
-    head = '${{ steps.ref.outputs.head_sha }}' if reusable else '${{ needs.preflight.outputs.head_sha }}'
-    branch = '${{ steps.ref.outputs.head_ref }}' if reusable else '${{ needs.preflight.outputs.head_ref }}'
-    condition = ("steps.ref.outputs.skip != 'true' && steps.pr.outputs.skip != 'true' && steps.budget.outputs.skip != 'true'"
-                 if reusable else "steps.lock.outputs.go == 'true'")
-    text = text.replace('  contents: write','  contents: read')
-    # Acquisition and the model only receive the built-in read-only code token.
-    text = re.sub(r'(token: )\$\{\{ secrets\.(?:GH_PAT|MN_GH_AUTOMATION_TOKEN) \|\| (?:secrets.GITHUB_TOKEN|github.token) \}\}',
-                  r'\1${{ github.token }}', text)
-    text = text.replace('and push to the PR branch','locally; do not push. The trusted controller owns publication')
-    if reusable:
-        text = text.replace("if: steps.ref.outputs.skip != 'true'", "if: steps.ref.outputs.skip != 'true' && steps.custody.outputs.skip != 'true'")
-        guard = step('guard','custody',"steps.ref.outputs.skip != 'true'",number,head)
-        start = text.index('      - uses: actions/checkout@')
-        text = text[:start]+guard+text[start:]
-        # A retained session does not need the legacy editor's credentials.
-        a=text.index('      - name: Validate provider secrets');b=text.index('      - name: Resolve PR number',a)
-        provider=text[a:b].replace('        env:',"        if: steps.ref.outputs.skip != 'true' && steps.custody.outputs.skip != 'true'\n        env:",1)
-        text=text[:a]+text[b:]
-        start=text.index('      - uses: actions/checkout@');text=text[:start]+provider+text[start:]
-        text=text.replace('      activation: ${{ steps.verify_exec',
-            '      publication: ${{ steps.publish.outputs.outcome }}\n      published_sha: ${{ steps.publish.outputs.published_sha }}\n      activation: ${{ steps.verify_exec')
-        text=text.replace('    outputs:\n      activation:',
-            '    outputs:\n      published_sha:\n        description: Verified remote publication SHA; empty does not establish handling.\n        value: ${{ jobs.autofix.outputs.published_sha }}\n      publication:\n        description: Controller outcome, separate from editor execution.\n        value: ${{ jobs.autofix.outputs.publication }}\n      activation:',1)
-    else:
-        guard=step('guard','custody',"steps.ref.outputs.skip != 'true' && steps.pr.outputs.skip != 'true'",
-                   '${{ steps.ref.outputs.pr_number }}','${{ steps.pr.outputs.head_sha }}')
-        start=text.index('      - name: Enforce per-PR successful-fix budget');text=text[:start]+guard+text[start:]
-        text=text.replace("if: steps.ref.outputs.skip != 'true' && steps.pr.outputs.skip != 'true'\n        env:\n          GH_TOKEN:",
-                          "if: steps.ref.outputs.skip != 'true' && steps.pr.outputs.skip != 'true' && steps.custody.outputs.skip != 'true'\n        env:\n          GH_TOKEN:")
-        text=text.replace('          BUDGET_SKIP:', '          CUSTODY_SKIP: ${{ steps.custody.outputs.skip }}\n          BUDGET_SKIP:')
-        text=text.replace('if [[ "$REF_SKIP" == "true" ||', 'if [[ "$CUSTODY_SKIP" == "true" || "$REF_SKIP" == "true" ||')
-        text=text.replace("if: steps.lock.outputs.go == 'true'", "if: steps.lock.outputs.go == 'true' && steps.custody_dispatch.outputs.skip != 'true'")
-        start=text.index('      - uses: actions/checkout@');text=text[:start]+step('guard','custody_dispatch',condition,number,head)+text[start:]
-        text=text.replace('    needs: preflight\n', '    needs: preflight\n    outputs:\n      publication: ${{ steps.publish.outputs.outcome }}\n      published_sha: ${{ steps.publish.outputs.published_sha }}\n')
-    # Re-read native custody immediately before both editor and publisher.
-    marker='      - name: Run autofix with Claude Code'
-    start=text.index(marker)
-    if reusable:
-        text=text[:start]+step('guard','custody_dispatch',condition,number,head)+text[start:]
-        end=text.index('        env:',text.index(marker))
-        part=text[text.index(marker):end].replace('        if: '+condition,
-            '        if: '+condition+" && steps.custody_dispatch.outputs.skip != 'true'")
-        text=text[:text.index(marker)]+part+text[end:]
-    start=text.index('      - name: Verify autofix commits left the instruction surface alone')
-    guard=step('guard','custody_publish',"steps.verify_exec.outcome == 'success'",number,head)
-    pub=step('publish','publish',"steps.verify_exec.outcome == 'success' && steps.custody_publish.outputs.skip == 'false'",
-             number,head,branch,'${{ secrets.GH_PAT }}' if reusable else '${{ secrets.MN_GH_AUTOMATION_TOKEN }}')
-    text=text[:start]+guard+pub+text[start:]
-    recovery = '''      - name: Retain unpublished implementation
-        if: always() && steps.publish.outputs.recovery_path != '' && steps.publish.outputs.outcome != 'published'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: autofix-recovery-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ steps.publish.outputs.recovery_path }}
-          retention-days: 7
-          if-no-files-found: error
+def represent_string(dumper, value):
+    if '\n' in value:
+        value = '\n'.join(line.rstrip() for line in value.split('\n'))
+    return dumper.represent_scalar('tag:yaml.org,2002:str', value, style='|' if '\n' in value else None)
 
-'''
-    start=text.index('      - name: Verify autofix commits left the instruction surface alone')
-    text=text[:start]+recovery+text[start:]
-    return text
+
+Dumper.add_representer(str, represent_string)
+
+
+def normalized(value):
+    return ' '.join(value.split())
+
+
+def prepare_source():
+    """Small explicit source closure; editor code has no publication/API path."""
+    source = (ROOT/'scripts/ci/autofix-publish.py').read_text()
+    tree = ast.parse(source)
+    selected = []
+    for node in tree.body:
+        if (isinstance(node,(ast.Import,ast.ImportFrom))
+                or isinstance(node,ast.FunctionDef) and node.name in {'git_env','git','prepare_packet'}
+                or isinstance(node,ast.Assign) and any(isinstance(t,ast.Name) and t.id == 'SHA' for t in node.targets)):
+            selected.append(ast.get_source_segment(source,node))
+    return '\n\n'.join(selected)+"\n\nresult = prepare_packet()\nwith open(os.environ['GITHUB_OUTPUT'],'a') as stream:\n    stream.write('recovery_path='+result['recovery_path']+'\\n')\nprint(json.dumps(result))"
 
 
 def render(text):
-    # Retention runs even when the final guard holds publication. The protected
-    # controller consumes the guard decision after capturing safe Git objects.
-    text = text.replace("id: publish\n        if: steps.verify_exec.outcome == 'success' && steps.custody_publish.outputs.skip == 'false'",
-                        "id: publish\n        if: steps.verify_exec.outcome == 'success'")
-    text = re.sub(r"(?m)^(          PUBLISH_TOKEN: .*)$",
-        r"\1\n          PUBLICATION_ADMITTED: ${{ steps.custody_publish.outputs.skip == 'false' }}",text)
-    text = text.replace("          PUBLICATION_ADMITTED: ${{ steps.custody_publish.outputs.skip == 'false' }}\n"*2,
-                        "          PUBLICATION_ADMITTED: ${{ steps.custody_publish.outputs.skip == 'false' }}\n")
-    text = text.replace("steps.budget.outputs.skip == 'true') && 'skipped'",
-        "steps.budget.outputs.skip == 'true' || steps.custody.outputs.skip == 'true' || steps.custody_dispatch.outputs.skip == 'true') && 'skipped'")
-    # The publisher owns the one material credential-hold receipt. The old
-    # preflight warning both repeats it and advertises a removed token fallback.
-    text = re.sub(r'(?ms)^      - name: Warn when elevated push token is absent\n.*?(?=^      - name: Resolve Anthropic credential\n)', '', text)
-    text=text.replace('6. If architectural / ambiguous, post `gh pr comment` and STOP — do not guess',
-        '6. A genuine external or human dependency holds only its affected finding. Record its dependency, unblock condition and next action once; finish other already-authorized findings before yielding. Never retry unchanged denials, repeat wait notices or mark the parent task done from a partial result.')
-    if '      - name: Retain unpublished implementation' not in text:
-        recovery = """      - name: Retain unpublished implementation
-        if: always() && steps.publish.outputs.recovery_path != '' && steps.publish.outputs.outcome != 'published'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: autofix-recovery-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ steps.publish.outputs.recovery_path }}
-          retention-days: 7
-          if-no-files-found: error
-
-"""
-        start=text.index('      - name: Verify autofix commits left the instruction surface alone')
-        text=text[:start]+recovery+text[start:]
-    for kind, source in [('guard','scripts/ci/autofix-custody.sh'),('publish','scripts/ci/autofix-publish.py')]:
-        body=(ROOT/source).read_text().rstrip()
-        if kind=='publish':body="/usr/bin/python3 -I - <<'AUTOFIX_PY'\n"+body+"\nAUTOFIX_PY"
-        body='\n'.join('          '+line if line else '' for line in body.splitlines())
-        pattern=rf'(?ms)(^          # autofix-control:{kind}:begin\n).*?(^          # autofix-control:{kind}:end$)'
-        text=re.sub(pattern,lambda m:m[1]+body+'\n'+m[2],text)
-    budget=(ROOT/'scripts/ci/autofix-budget-notice.sh').read_text().rstrip()
-    budget='\n'.join('            '+line if line else '' for line in budget.splitlines())
-    text=re.sub(r'(?ms)(^            # autofix-control:budget-notice:begin\n).*?(^            # autofix-control:budget-notice:end$)',
-                lambda m:m[1]+budget+'\n'+m[2],text)
-    text=text.replace('      - name: Verify the agent executed\n        if:',
-                      '      - name: Verify the agent executed\n        id: verify_exec\n        if:')
-    start=text.index('      - name: Run autofix with Claude Code')
-    end=text.index('        env:',start)
-    prefix=text[start:end]
-    if 'steps.custody_dispatch.outputs.skip' not in prefix:
-        prefix=re.sub(r'(?m)^(        if: .*)$',r"\1 && steps.custody_dispatch.outputs.skip != 'true'",prefix)
-    text=text[:start]+prefix+text[end:]
-    text=re.sub(r"(id: custody_dispatch\n        if: steps.ref[^\n]*)(\n)",
-        lambda m:m[1]+(" && steps.custody.outputs.skip != 'true'" if 'steps.custody.outputs' not in m[1] else '')+m[2],text)
-    for guard in ('custody','custody_dispatch'):
-        text = text.replace(f"steps.{guard}.outputs.skip != 'true'", f"steps.{guard}.outputs.skip == 'false'")
-    return text
+    data = yaml.safe_load(text)
+    if True in data:
+        data['on'] = data.pop(True)
+    for job in data['jobs'].values():
+        for step in job.get('steps', []):
+            body = step.get('run', '')
+            for kind, source in [('guard','scripts/ci/autofix-custody.sh'),
+                                 ('prepare','scripts/ci/autofix-publish.py'),
+                                 ('publish','scripts/ci/autofix-publish.py')]:
+                if f'# autofix-control:{kind}:begin' not in body:
+                    continue
+                payload = prepare_source() if kind == 'prepare' else (ROOT/source).read_text().rstrip()
+                if kind != 'guard':
+                    payload = "/usr/bin/python3 -I - <<'AUTOFIX_PY'\n"+payload+"\nAUTOFIX_PY"
+                body = re.sub(rf'(?ms)^# autofix-control:{kind}:begin\n.*?^# autofix-control:{kind}:end$',
+                    lambda _: f'# autofix-control:{kind}:begin\n{payload}\n# autofix-control:{kind}:end', body)
+            if '# autofix-control:budget-notice:begin' in body:
+                notice = (ROOT/'scripts/ci/autofix-budget-notice.sh').read_text().rstrip()
+                body = re.sub(r'(?ms)^  # autofix-control:budget-notice:begin\n.*?^  # autofix-control:budget-notice:end$',
+                    lambda _: '  # autofix-control:budget-notice:begin\n'+'\n'.join('  '+s if s else '' for s in notice.splitlines())+'\n  # autofix-control:budget-notice:end',body)
+            if 'run' in step:
+                step['run'] = body
+    data = {k:data[k] for k in ('name','on',*tuple(k for k in data if k not in ('name','on')))}
+    return '# Trusted control source: generated payloads are checked by scripts/sync-autofix-control.py.\n'+yaml.dump(data,Dumper=Dumper,sort_keys=False,width=140).replace("\n'on':","\non:")
 
 
-def validate(text, reusable):
-    """Refuse partial/misordered control wiring; unset outputs never admit work."""
-    jobs = yaml.safe_load(text)['jobs']
-    expected = {'autofix': ('custody_dispatch','claude','verify_exec','custody_publish','publish')}
-    if reusable:
-        expected['autofix'] = ('custody',*expected['autofix'])
-    else:
-        expected['preflight'] = ('custody','budget')
-        needs = jobs['autofix'].get('needs',[])
-        if 'preflight' not in ([needs] if isinstance(needs,str) else needs):
-            raise ValueError('autofix must depend on custody preflight')
+def validate(text, reusable=None):
+    """Require whole approved gates and separate fresh publisher runners."""
+    data = yaml.safe_load(text); jobs = data['jobs']
     canonical = (ROOT/'scripts/ci/autofix-custody.sh').read_text().rstrip()
-    for name, required in expected.items():
-        steps = jobs[name]['steps'];ids = [s.get('id') for s in steps]
-        if any(ids.count(identity)!=1 for identity in required):
+    publisher_source = (ROOT/'scripts/ci/autofix-publish.py').read_text().rstrip()
+    if data['permissions']['contents'] != 'read':
+        raise ValueError('editor contents permission must be read-only')
+    for variant in ('standalone', 'reusable'):
+        editor_job, publisher_job = jobs[variant+'_editor'], jobs[variant+'_publisher']
+        steps, pub_steps = editor_job['steps'], publisher_job['steps']
+        required = ('custody_dispatch','claude','verify_exec','prepare')
+        if variant == 'reusable':
+            required = ('custody', *required)
+        ids = [s.get('id') for s in steps]
+        pub_ids = [s.get('id') for s in pub_steps]
+        if any(ids.count(x) != 1 for x in required) or any(pub_ids.count(x) != 1 for x in ('custody_publish','publish')):
             raise ValueError('missing or duplicate required custody/control step')
-        if [ids.index(identity) for identity in required] != sorted(ids.index(identity) for identity in required):
+        if [ids.index(x) for x in required] != sorted(ids.index(x) for x in required) or pub_ids.index('custody_publish') >= pub_ids.index('publish'):
             raise ValueError('custody/control steps are out of order')
-        for s in steps:
+        for s in steps+pub_steps:
             if s.get('id') in ('custody','custody_dispatch','custody_publish') and canonical not in s.get('run',''):
                 raise ValueError('custody guard payload is missing')
-    editor = next(s for s in jobs['autofix']['steps'] if s.get('id')=='claude')
-    if "steps.custody_dispatch.outputs.skip == 'false'" not in editor.get('if',''):
-        raise ValueError('editor requires affirmative custody admission')
-    publisher = next(s for s in jobs['autofix']['steps'] if s.get('id')=='publish')
-    if ((ROOT/'scripts/ci/autofix-publish.py').read_text().rstrip() not in publisher.get('run','')
-            or publisher.get('env',{}).get('PUBLICATION_ADMITTED') != "${{ steps.custody_publish.outputs.skip == 'false' }}"
-            or publisher.get('if') != "steps.verify_exec.outcome == 'success'"):
-        raise ValueError('publisher payload or admission is missing')
+        editor = next(s for s in steps if s.get('id') == 'claude')
+        if normalized(editor.get('if','')) != EDITOR_CONDITIONS[variant]:
+            raise ValueError('editor requires the full affirmative custody condition')
+        prepare = next(s for s in steps if s.get('id') == 'prepare')
+        if prepare.get('env',{}).get('AUTOFIX_MODE') != 'prepare' or prepare_source() not in prepare.get('run',''):
+            raise ValueError('unprivileged packet preparation is missing')
+        if any('secrets.GH_PAT' in str(s) or 'secrets.MN_GH_AUTOMATION_TOKEN' in str(s) for s in steps) or any('PUBLISH_TOKEN' in k for k in editor_job.get('env',{})):
+            raise ValueError('publication credentials must not enter the editor job')
+        publisher = next(s for s in pub_steps if s.get('id') == 'publish')
+        if (publisher_source not in publisher.get('run','') or publisher.get('if') is not None
+                or normalized(publisher.get('env',{}).get('PUBLICATION_ADMITTED','')) != ADMISSIONS[variant]
+                or publisher.get('env',{}).get('AUTOFIX_PACKET_DIR') != '${{ runner.temp }}/autofix-candidate-data'):
+            raise ValueError('publisher payload or native admission is missing')
+        if (publisher_job.get('runs-on') != 'ubuntu-latest' or publisher_job.get('needs') != variant+'_editor'
+                or publisher_job.get('timeout-minutes') != 5 or editor_job.get('timeout-minutes') != 25
+                or any('checkout@' in s.get('uses','') or 'claude-code-action@' in s.get('uses','') for s in pub_steps)
+                or publisher_job.get('env')):
+            raise ValueError('publisher must run separately without PR code/environment')
+        download = [s for s in pub_steps if s.get('uses','').startswith('actions/download-artifact@')]
+        if len(download) != 1 or download[0]['with'] != {
+            'name':'autofix-candidate-${{ github.run_id }}-${{ github.run_attempt }}',
+            'path':'${{ runner.temp }}/autofix-candidate-data'}:
+            raise ValueError('candidate handoff must be bound to this run and attempt')
+
+
+def validate_wrapper(text, reusable):
+    data = yaml.safe_load(text); job = data['jobs']['autofix']
+    if job.get('uses') != './.github/workflows/'+EXECUTION or job['with'].get('variant') != ('reusable' if reusable else 'standalone'):
+        raise ValueError('caller must invoke the complete isolated execution workflow')
+    if 'steps' in job or 'runs-on' in job:
+        raise ValueError('caller must hold its lock over both execution jobs')
+    if reusable:
+        if 'concurrency' in job or 'concurrency' in data:
+            raise ValueError('reusable caller owns concurrency; do not nest its lock')
+    else:
+        steps = data['jobs']['preflight']['steps']; ids = [s.get('id') for s in steps]
+        if (ids.count('custody') != 1 or ids.count('budget') != 1 or ids.index('custody') > ids.index('budget')
+                or (ROOT/'scripts/ci/autofix-custody.sh').read_text().rstrip() not in steps[ids.index('custody')].get('run','')):
+            raise ValueError('standalone custody admission must precede budget and locking')
+    if not reusable and (job.get('needs') != 'preflight' or job.get('concurrency') != {
+            'group':'autofix-${{ github.repository }}-${{ needs.preflight.outputs.pr_number }}',
+            'cancel-in-progress':False} or 'concurrency' in data):
+        raise ValueError('standalone admission precedes the noncancelling whole-execution lock')
 
 
 def main():
-    parser=argparse.ArgumentParser(description=__doc__);parser.add_argument('--check',action='store_true');args=parser.parse_args()
-    stale=[]
-    for name in ['pr-autofix-loop.yml','pr-autofix-loop-reusable.yml']:
-        path=ROOT/'.github/workflows'/name;text=path.read_text()
-        result=render(initial(text,'reusable' in name) if '# autofix-control:guard:begin' not in text else text)
+    parser = argparse.ArgumentParser(description=__doc__); parser.add_argument('--check',action='store_true'); args = parser.parse_args()
+    stale = []
+    for name in ['pr-autofix-loop.yml','pr-autofix-loop-reusable.yml',EXECUTION]:
+        path = ROOT/'.github/workflows'/name; text = path.read_text(); result = render(text)
         try:
-            validate(result,'reusable' in name)
-        except (ValueError,KeyError,TypeError,yaml.YAMLError):
-            print(f'INVALID custody/control structure: {path.name}',file=sys.stderr)
+            if name == EXECUTION:
+                validate(result)
+            else:
+                validate_wrapper(result,'reusable' in name)
+        except (ValueError,KeyError,TypeError,yaml.YAMLError) as exc:
+            print(f'INVALID custody/control structure: {path.name}: {exc}',file=sys.stderr)
             return 1
-        if result!=text:
+        if result != text:
             stale.append(str(path.relative_to(ROOT)))
-            if not args.check:path.write_text(result)
+            if not args.check:
+                path.write_text(result)
     print(('STALE' if args.check and stale else 'OK')+' autofix controller source')
     return int(args.check and bool(stale))
 
 
-if __name__=='__main__':raise SystemExit(main())
+if __name__ == '__main__':
+    raise SystemExit(main())

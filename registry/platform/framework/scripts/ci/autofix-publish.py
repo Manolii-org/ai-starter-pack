@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import stat
 import tempfile
 import urllib.parse
 import urllib.request
@@ -68,8 +69,10 @@ def publish(result=None):
         return result
     subjects = git(['log','--format=%s','--no-show-signature',expected+'..'+candidate], workspace).decode().splitlines()
     subjects_valid = bool(subjects) and all(subject.startswith('[autofix]') for subject in subjects)
-    names = git(["diff", "--name-only", "--no-ext-diff", "--no-textconv", "--no-renames", "-z",
-                 expected, candidate], workspace).decode().split('\0')
+    # Inspect every commit, including both sides of merges. A net-zero change
+    # to an instruction file must not hide it in published history.
+    names = git(["log", "-m", "--format=", "--name-only", "--no-ext-diff", "--no-textconv",
+                 "--no-renames", "-z", expected+".."+candidate], workspace).decode().split('\0')
     if any(INSTRUCTIONS.search(name) for name in names):
         result["outcome"] = "instruction_surface_held"
         return result
@@ -161,23 +164,109 @@ def record(result):
         'commit_subject_held': 'The candidate violated the existing [autofix] accounting convention. The original owner must review and recommit the retained repair with valid subjects.',
         'candidate_ancestry_held': 'The candidate is not verified as a descendant of the admitted head. The original owner must reconcile workspace/head ownership and restore the authorized branch.',
         'native_state_unverified': 'Native PR readback is unverified. Restore the same approved read route and revalidate current custody/head; do not switch identities.',
+        'publication_packet_held': 'The editor data packet could not be bound to native PR/head inputs or exceeded its size budget. Inspect this run artifact without executing it; reconcile or reduce the original repair before another publication attempt.',
         'publication_unknown': 'The sole push has an uncertain outcome. Verify the authenticated remote SHA before considering another send.',
     }
     body = ('Verified autofix publication: `'+result['published_sha']+'`. New-head CI still needs verification.'
             if outcome == 'published' else
             'Publication held: `'+outcome+'`. '+dependencies.get(outcome,'The controller result needs owning review.')+
-            ' The parent task remains unfinished. The original owner must recover retained implementation before advancing this head; '
-            'other authorized commitments can proceed. A recovery path alone is not a durable upload receipt.')
+            ' The parent task remains unfinished. Other authorized commitments can proceed. '+
+            ('The original owner must verify and recover retained implementation before advancing this head. '
+             'A recovery path alone is not a durable upload receipt.' if result.get('recovery_path') else
+             'This controller retained no recovery bundle; reconcile the original editor run before advancing this head.'))
     run_id = os.environ.get('GITHUB_RUN_ID','')
     if re.fullmatch(r'[1-9][0-9]*',run_id):
         body += ' Inspect the original run and verify its artifact upload: '+os.environ['GITHUB_SERVER_URL'].rstrip('/')+'/'+repo+'/actions/runs/'+run_id
     api(f'repos/{repo}/issues/{number}/comments', method='POST', body={'body':marker+'\n'+body})
 
 
+def prepare_packet():
+    """Unprivileged editor-side data capture; never reads a publisher secret/API."""
+    work = Path(os.environ['GITHUB_WORKSPACE'])
+    expected = os.environ['EXPECTED_HEAD']
+    if not SHA.fullmatch(expected):
+        raise ValueError('invalid admitted head')
+    candidate = git(['rev-parse','--verify','HEAD^{commit}'], work).decode().strip()
+    if not SHA.fullmatch(candidate):
+        raise ValueError('invalid candidate')
+    # Foreign history is not retained as an owned repair.
+    git(['merge-base','--is-ancestor',expected,candidate],work)
+    packet = Path(tempfile.mkdtemp(prefix='autofix-packet-',dir=os.environ['RUNNER_TEMP']))
+    if candidate != expected:
+        with tempfile.TemporaryDirectory(prefix='autofix-packet-objects-') as directory:
+            root = Path(directory); (root/'template').mkdir()
+            git(['clone','--bare','--local','--shared','--no-hardlinks','--template='+str(root/'template'),
+                 str(work),str(root/'objects.git')],root,timeout=120)
+            git(['--git-dir='+str(root/'objects.git'),'update-ref','refs/heads/implementation',candidate],root)
+            git(['--git-dir='+str(root/'objects.git'),'bundle','create',str(packet/'implementation.bundle'),
+                 'refs/heads/implementation','^'+expected],root,timeout=120)
+    (packet/'receipt.json').write_text(json.dumps(dict(repository=os.environ['GITHUB_REPOSITORY'],
+        pr_number=os.environ['PR_NUMBER'],head_ref=os.environ['HEAD_REF'],base_sha=expected,candidate_sha=candidate))+'\n')
+    return dict(outcome='prepared',published_sha='',recovery_path=str(packet))
+
+
+def import_packet(directory):
+    """Fresh publisher runner: parse data only, bind it to trusted native inputs."""
+    packet = Path(os.environ['AUTOFIX_PACKET_DIR'])
+    receipt = packet/'receipt.json'
+    if not stat.S_ISREG(receipt.lstat().st_mode) or not 0 < receipt.stat().st_size <= 16384:
+        raise ValueError('invalid packet receipt')
+    meta = json.loads(receipt.read_text())
+    for field, env in [('repository','GITHUB_REPOSITORY'),('pr_number','PR_NUMBER'),
+                       ('head_ref','HEAD_REF'),('base_sha','EXPECTED_HEAD')]:
+        if meta.get(field) != os.environ[env]:
+            raise ValueError('packet does not match native admission')
+    expected, candidate = meta['base_sha'], meta.get('candidate_sha','')
+    if not SHA.fullmatch(expected) or not SHA.fullmatch(candidate):
+        raise ValueError('invalid packet object')
+    expected_files = {'receipt.json'} if candidate == expected else {'receipt.json','implementation.bundle'}
+    if {p.name for p in packet.iterdir()} != expected_files:
+        raise ValueError('unexpected packet data')
+    if candidate == expected:
+        return None
+    bundle = packet/'implementation.bundle'
+    if not stat.S_ISREG(bundle.lstat().st_mode) or not 0 < bundle.stat().st_size <= 64*1024*1024:
+        raise ValueError('invalid or over-budget bundle')
+    root = Path(directory); (root/'template').mkdir()
+    work = root/'work'; work.mkdir()
+    git(['init','--quiet','--bare','--template='+str(root/'template')],work)
+    server = os.environ['GITHUB_SERVER_URL'].rstrip('/')
+    repo = os.environ['GITHUB_REPOSITORY']
+    if (urllib.parse.urlparse(server).scheme != 'https'
+            or not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+',repo)):
+        raise ValueError('invalid native repository')
+    env = git_env()
+    env.update(GIT_CONFIG_COUNT='1',GIT_CONFIG_KEY_0=f'http.{server}/.extraheader',
+        GIT_CONFIG_VALUE_0='AUTHORIZATION: basic '+base64.b64encode(('x-access-token:'+os.environ['READ_TOKEN']).encode()).decode())
+    # The only network acquisition is the native admitted base, using the read
+    # token. No checkout, filters, PR config or editor environment is imported.
+    git(['fetch','--no-tags','--no-recurse-submodules','--depth=1',server+'/'+repo+'.git',expected],work,env=env,timeout=120)
+    git(['bundle','verify',str(bundle)],work)
+    refs = git(['bundle','list-heads',str(bundle)],work).decode().splitlines()
+    if refs != [candidate+' refs/heads/implementation']:
+        raise ValueError('unexpected bundle references')
+    git(['bundle','unbundle',str(bundle)],work,timeout=120)
+    git(['update-ref','refs/heads/implementation',candidate],work)
+    git(['symbolic-ref','HEAD','refs/heads/implementation'],work)
+    return work
+
+
 def main():
     result = {'outcome':'unverified','published_sha':''}
     try:
-        result = publish(result)
+        if os.environ.get('AUTOFIX_MODE') == 'prepare':
+            result = prepare_packet()
+        elif os.environ.get('AUTOFIX_PACKET_DIR'):
+            result['outcome'] = 'publication_packet_held'
+            with tempfile.TemporaryDirectory(prefix='autofix-import-') as directory:
+                work = import_packet(directory)
+                if work is None:
+                    result['outcome'] = 'no_change'
+                else:
+                    os.environ['GITHUB_WORKSPACE'] = str(work)
+                    result = publish(result)
+        else:
+            result = publish(result)
     except Exception as exc:
         result['failure_class'] = type(exc).__name__  # No payloads, tokens or Git stderr.
     with open(os.environ['GITHUB_OUTPUT'],'a') as stream:
@@ -185,10 +274,11 @@ def main():
             stream.write(key+'='+result.get(key,'')+'\n')
     print(json.dumps(result))
     try:
-        record(result)
+        if os.environ.get('AUTOFIX_MODE') != 'prepare':
+            record(result)
     except Exception:
         print('Publication receipt delivery unverified; no duplicate send attempted.')
-    return 0 if result['outcome'] in {'published','no_change'} else 2
+    return 0 if result['outcome'] in {'published','no_change','prepared'} else 2
 
 
 if __name__ == '__main__':

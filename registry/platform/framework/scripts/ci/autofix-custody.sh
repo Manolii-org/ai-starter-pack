@@ -37,7 +37,7 @@ autofix_custody() {
     if jq -e --arg head "$EXPECTED_HEAD" 'any(.[];
       .user.id == 41898282 and ((.body // "") | test(
         "^<!-- pack-autofix-publication:v1 head=" + $head +
-        " outcome=(publication_admission_held|native_state_held|instruction_surface_held|publication_credential_unavailable|publication_unknown|native_state_unverified|commit_subject_held|candidate_ancestry_held) -->")))' <<< "$comments" >/dev/null; then
+        " outcome=(publication_packet_held|publication_admission_held|native_state_held|instruction_surface_held|publication_credential_unavailable|publication_unknown|native_state_unverified|commit_subject_held|candidate_ancestry_held) -->")))' <<< "$comments" >/dev/null; then
       echo 'This head has held or uncertain publication. Its existing owner must recover retained work and resolve that dependency; new GitHub facts remain pending. No duplicate editor admitted.'
       return 1
     fi

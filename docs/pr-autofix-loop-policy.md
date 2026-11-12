@@ -18,17 +18,41 @@ original owner; the guard is not a resume transport.
 Preflight checks ownership before editor work, the dispatch step rechecks it,
 and publication rechecks native head/state/fork/holds again. Unreadable or
 incomplete bounded readback holds the affected action. Current native head and
-repository identity remain authoritative. Existing job locks, bot allowlists,
+repository identity remain authoritative. Existing whole-execution locks, bot allowlists,
 instruction restoration, commit guards, model/provider selection, human holds,
 budgets and protected merge/review controls remain in force. No new scheduler,
 poller, provider or editing session is registered.
 
 The editor and acquisition steps use the built-in token with read-only contents
 permission. The editor commits locally and never receives the publication
-credential. A trusted controller publishes through a fresh bare Git repository
+credential. The public caller invokes `pr-autofix-execution-reusable.yml`, which
+runs the editor and publisher on separate runners. The standalone caller holds
+its existing per-PR job lock over this entire invocation, after admission;
+reusable callers retain their existing outer lock without a nested lock.
+Unrelated rejected events cannot displace queued admitted work. Copy-installed
+consumers must install the internal workflow together with their caller. Nested
+calls resolve local workflow paths from the calling workflow's repository and
+commit, without loading a consumer PR's controller. Job/check names now include
+`Autofix Editor (standalone|reusable)` and `Autofix Publisher (standalone|reusable)`
+under the existing `Autofix PR` call; review any consumer check-name bindings
+before adopting. The existing 30-minute job allowance is split into 25 minutes
+for editing and five for publication. Queue time is separate from runner time.
+
+The editor uploads only a Git bundle and a bounded JSON receipt, named for this
+run and attempt. A fresh publisher downloads that same-run artifact using the
+Actions artifact service; no editor job outputs, environment variables, proxy/CA
+settings, Git config, checkout or model code enter the publisher. It independently
+rechecks native state and binds the packet's repository, PR, branch and base to
+trusted admission. Receipt size is limited to 16 KiB and bundle size to 64 MiB
+before Git import; oversized repairs require the original owner to reduce or
+recover them. Artifact download itself remains subject to Actions service limits.
+Only the admitted base is fetched using the read token. Bundle references,
+ancestry and every candidate commit are validated as data before credentialed
+publication. A trusted controller publishes through a fresh bare Git repository
 that does not inherit PR hooks, URL rewrites or credentials. It permits only a
 fast-forward candidate based on the admitted head, enforces the existing
-`[autofix]` commit-subject convention and refuses instruction-surface changes.
+`[autofix]` commit-subject convention and refuses instruction-surface changes in
+any candidate commit, including changes restored later or hidden by a merge.
 An expected-ref lease makes the sole push conditional on the checked head,
 including deletion/reset races; validated ancestry prevents history rewrites.
 Exact remote-ref readback is still required.
@@ -40,9 +64,12 @@ publication credentials; there is no built-in-token publication fallback.
 Missing publication access does not prevent independent local implementation.
 Unpublished implementation is retained as a seven-day recovery artifact containing
 a Git bundle and bounded metadata, without execution logs or authentication files.
-The controller captures committed recovery data before checking late publication
-admission, so a moved head, retained owner or unavailable read holds the push
-without discarding the implementation.
+The unprivileged editor captures committed candidate data before publication.
+The publisher captures validated committed recovery data before checking late
+publication admission, so a moved head, retained owner or unavailable read holds
+the push without discarding the implementation. A foreign-ancestry or protected
+history hold does not claim a publisher recovery bundle; its receipt explicitly
+points to the original editor run instead.
 Recovery is data, not execution authority: the original owner must verify artifact
 provenance, base/head/custody, object identity, review and checks before restoring
 or publishing it. Artifact upload and comment delivery require their own receipts;
@@ -65,7 +92,8 @@ Automatic artifact recovery and same-owner event delivery still require the
 qualified owning client; a legacy workflow cannot claim those capabilities.
 
 The generator validates custody step presence/order and embedded payloads.
-Editor admission requires an explicit `skip=false`; a missing output fails closed.
+Editor admission requires the full approved conjunction, including explicit
+`skip=false`; missing outputs and an OR bypass fail validation.
 
 Consumers referencing a moving framework ref receive reviewed workflow changes
 when that ref advances. Pinned/copy-installed callers require reviewed adoption

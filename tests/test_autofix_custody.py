@@ -52,7 +52,7 @@ def test_custody_uses_native_owner_and_fails_closed(tmp_path,case,allowed):
 
 
 @pytest.mark.parametrize('outcome', ['publication_admission_held','native_state_held','instruction_surface_held',
-    'publication_credential_unavailable','publication_unknown','native_state_unverified','commit_subject_held','candidate_ancestry_held'])
+    'publication_credential_unavailable','publication_unknown','native_state_unverified','commit_subject_held','candidate_ancestry_held','publication_packet_held'])
 def test_held_receipts_suppress_duplicate_editors_for_the_same_head(tmp_path,outcome):
     # Run the actual Bash guard with a bounded fake native API, not a broker.
     original=native_pr
@@ -180,7 +180,7 @@ def test_held_receipt_names_dependency_and_does_not_claim_upload(candidate,monke
         if kw.get('method')=='POST':sent.append(kw['body']['body']);return {}
         return []
     monkeypatch.setattr(m,'api',api)
-    m.record({'outcome':'publication_credential_unavailable','published_sha':''})
+    m.record({'outcome':'publication_credential_unavailable','published_sha':'','recovery_path':'fixture-local-path'})
     assert len(sent)==1 and 'Restore its approved scoped route' in sent[0]
     assert 'not a durable upload receipt' in sent[0] and '/actions/runs/123' in sent[0]
 
@@ -250,30 +250,32 @@ def test_legacy_grafts_cannot_authorize_a_history_rewrite(candidate,monkeypatch)
     assert m.publish()['outcome']=='candidate_ancestry_held'
 
 
-@pytest.mark.parametrize('file',['pr-autofix-loop.yml','pr-autofix-loop-reusable.yml'])
-def test_actual_editor_cannot_publish_and_controller_is_custody_gated(file):
-    workflow=yaml.safe_load((ROOT/'.github/workflows'/file).read_text());job=workflow['jobs']['autofix']
+@pytest.mark.parametrize('variant',['standalone','reusable'])
+def test_actual_editor_cannot_publish_and_controller_is_custody_gated(variant):
+    workflow=yaml.safe_load((ROOT/'.github/workflows/pr-autofix-execution-reusable.yml').read_text())
+    job=workflow['jobs'][variant+'_editor']; publisher_job=workflow['jobs'][variant+'_publisher']
     editor=next(s for s in job['steps'] if s.get('id')=='claude')
-    publisher=next(s for s in job['steps'] if s.get('id')=='publish')
+    publisher=next(s for s in publisher_job['steps'] if s.get('id')=='publish')
     assert workflow['permissions']['contents']=='read'
     assert editor['with']['github_token']=='${{ github.token }}'
     assert "steps.custody_dispatch.outputs.skip == 'false'" in editor['if']
     ids=[s.get('id') for s in job['steps']]
     assert ids.index('custody_dispatch') < ids.index('claude')
-    assert ids.index('custody_publish') < ids.index('publish')
-    assert publisher['if']=="steps.verify_exec.outcome == 'success'"
-    assert publisher['env']['PUBLICATION_ADMITTED']=="${{ steps.custody_publish.outputs.skip == 'false' }}"
-    if 'reusable' in file:
+    assert publisher_job['needs']==variant+'_editor'
+    assert publisher_job['runs-on']=='ubuntu-latest' and 'env' not in publisher_job
+    assert job['timeout-minutes']+publisher_job['timeout-minutes']==30
+    assert "steps.custody_publish.outputs.skip == 'false'" in publisher['env']['PUBLICATION_ADMITTED']
+    assert publisher['env']['AUTOFIX_PACKET_DIR']=='${{ runner.temp }}/autofix-candidate-data'
+    assert not any('checkout@' in s.get('uses','') or 'claude-code-action@' in s.get('uses','') for s in publisher_job['steps'])
+    if variant=='reusable':
         activation=job['outputs']['activation']
         assert "steps.custody.outputs.skip == 'true'" in activation
         assert "steps.custody_dispatch.outputs.skip == 'true'" in activation
     assert 'do not push' in editor['with']['prompt']
     assert publisher['env']['PUBLISH_TOKEN'] in {'${{ secrets.GH_PAT }}','${{ secrets.MN_GH_AUTOMATION_TOKEN }}'}
     for other in job['steps']:
-        if other is not publisher:
-            assert not any('secrets.GH_PAT' in str(v) or 'secrets.MN_GH_AUTOMATION_TOKEN' in str(v)
-                           for v in other.get('env',{}).values())
-    assert 'fall back to GITHUB_TOKEN' not in (ROOT/'.github/workflows'/file).read_text()
+        assert not any('secrets.GH_PAT' in str(v) or 'secrets.MN_GH_AUTOMATION_TOKEN' in str(v)
+                       for v in other.get('env',{}).values())
 
 
 def test_embedded_controller_source_is_current():
@@ -281,21 +283,120 @@ def test_embedded_controller_source_is_current():
     assert r.returncode==0,r.stdout+r.stderr
 
 
-@pytest.mark.parametrize('file',['pr-autofix-loop.yml','pr-autofix-loop-reusable.yml'])
-@pytest.mark.parametrize('defect',['missing','duplicate','late','empty-payload','fail-open',
-    'publisher-payload','publisher-admission','publisher-condition'])
-def test_generator_refuses_partial_or_unsafe_control_wiring(file,defect):
+@pytest.mark.parametrize('variant',['standalone','reusable'])
+@pytest.mark.parametrize('defect',['missing','duplicate','late','empty-payload','fail-open','or-bypass',
+    'publisher-payload','publisher-admission','publisher-condition','shared-environment','wrong-artifact','editor-secret'])
+def test_generator_refuses_partial_or_unsafe_control_wiring(variant,defect):
     spec=importlib.util.spec_from_file_location('autofix_sync',ROOT/'scripts/sync-autofix-control.py')
     m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
-    workflow=yaml.safe_load((ROOT/'.github/workflows'/file).read_text());steps=workflow['jobs']['autofix']['steps']
+    workflow=yaml.safe_load((ROOT/'.github/workflows/pr-autofix-execution-reusable.yml').read_text())
+    steps=workflow['jobs'][variant+'_editor']['steps']; pub_job=workflow['jobs'][variant+'_publisher']
     guard=next(s for s in steps if s.get('id')=='custody_dispatch')
     if defect=='missing':steps.remove(guard)
     if defect=='duplicate':steps.append(guard.copy())
     if defect=='late':steps.remove(guard);steps.append(guard)
     if defect=='empty-payload':guard['run']='echo unsafe'
-    if defect=='fail-open':next(s for s in steps if s.get('id')=='claude')['if']="steps.custody_dispatch.outputs.skip != 'true'"
-    publisher=next(s for s in steps if s.get('id')=='publish')
+    editor=next(s for s in steps if s.get('id')=='claude')
+    if defect=='fail-open':editor['if']="steps.custody_dispatch.outputs.skip != 'true'"
+    if defect=='or-bypass':editor['if']="true || steps.custody_dispatch.outputs.skip == 'false'"
+    publisher=next(s for s in pub_job['steps'] if s.get('id')=='publish')
     if defect=='publisher-payload':publisher['run']='python3 untrusted-checkout.py'
     if defect=='publisher-admission':publisher['env']['PUBLICATION_ADMITTED']='true'
     if defect=='publisher-condition':publisher['if']='always()'
-    with pytest.raises(ValueError):m.validate(yaml.safe_dump(workflow), 'reusable' in file)
+    if defect=='shared-environment':pub_job['env']={'HTTPS_PROXY':'${{ needs.'+variant+'_editor.outputs.proxy }}'}
+    if defect=='wrong-artifact':next(s for s in pub_job['steps'] if 'download-artifact@' in s.get('uses',''))['with']['run-id']='other-run'
+    if defect=='editor-secret':editor['env']['PUBLISH_TOKEN']='${{ secrets.GH_PAT }}'
+    with pytest.raises(ValueError):m.validate(yaml.safe_dump(workflow))
+
+
+@pytest.mark.parametrize('variant',['standalone','reusable'])
+@pytest.mark.parametrize('defect',['partial-lock','missing-call','nested-lock'])
+def test_generator_preserves_whole_execution_lock_contract(variant,defect):
+    spec=importlib.util.spec_from_file_location('autofix_sync',ROOT/'scripts/sync-autofix-control.py')
+    m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
+    path=ROOT/'.github/workflows'/('pr-autofix-loop'+('-reusable' if variant=='reusable' else '')+'.yml')
+    workflow=yaml.safe_load(path.read_text());job=workflow['jobs']['autofix']
+    if defect=='partial-lock':job['steps']=[{'run':'untrusted'}]
+    if defect=='missing-call':job['uses']='./wrong.yml'
+    if defect=='nested-lock':
+        if variant=='reusable':job['concurrency']={'group':'caller-lock'}
+        else:workflow['concurrency']=job.pop('concurrency')
+    with pytest.raises(ValueError):m.validate_wrapper(yaml.safe_dump(workflow),variant=='reusable')
+
+
+def test_protected_change_then_restore_still_holds(candidate,monkeypatch):
+    work,base,head,git=candidate;m=load_publisher()
+    path=work/'AGENTS.md';path.write_text('temporary instruction mutation')
+    git('add','.');git('commit','-qm','[autofix] temporary mutation')
+    path.unlink();git('add','.');git('commit','-qm','[autofix] restore net tree')
+    assert 'AGENTS.md' not in git('diff','--name-only',base,'HEAD')
+    monkeypatch.setattr(m,'api',lambda *a,**kw:pytest.fail('historical protected change must hold'))
+    assert m.publish()['outcome']=='instruction_surface_held'
+
+
+@pytest.mark.parametrize('outcome',['candidate_ancestry_held','instruction_surface_held'])
+def test_no_bundle_receipt_does_not_promise_retained_code(candidate,monkeypatch,outcome):
+    m=load_publisher();sent=[]
+    monkeypatch.setattr(m,'api',lambda path,**kw:sent.append(kw['body']['body']) if kw.get('method')=='POST' else [])
+    m.record({'outcome':outcome,'published_sha':''})
+    assert len(sent)==1 and 'retained no recovery bundle' in sent[0]
+    assert 'must recover retained implementation' not in sent[0]
+
+
+def test_separate_publisher_imports_only_bundle_data(candidate,monkeypatch,tmp_path):
+    work,base,head,git=candidate;m=load_publisher();real_git=m.git
+    remote=tmp_path/'native.git'
+    subprocess.run(['/usr/bin/git','clone','--bare','--quiet',str(work),str(remote)],check=True,capture_output=True)
+    monkeypatch.setenv('HTTPS_PROXY','https://editor-controlled.invalid')
+    monkeypatch.setenv('GIT_SSL_CAINFO','/editor-controlled-ca')
+    packet=m.prepare_packet();packet_dir=Path(packet['recovery_path'])
+    assert {p.name for p in packet_dir.iterdir()}=={'receipt.json','implementation.bundle'}
+    assert 'editor-controlled' not in (packet_dir/'receipt.json').read_text()
+    # Model the fresh job environment. These are actual Git objects but local
+    # transport fixtures, not authenticated GitHub publication evidence.
+    monkeypatch.delenv('HTTPS_PROXY');monkeypatch.delenv('GIT_SSL_CAINFO')
+    monkeypatch.setenv('AUTOFIX_PACKET_DIR',str(packet_dir))
+    def native_fetch(args,cwd,**kw):
+        if 'fetch' in args:
+            assert kw['env'].get('HTTPS_PROXY') is None and kw['env'].get('GIT_SSL_CAINFO') is None
+            args=[str(remote) if a=='https://github.com/example/repository.git' else a for a in args]
+        return real_git(args,cwd,**kw)
+    monkeypatch.setattr(m,'git',native_fetch)
+    target=tmp_path/'publisher';target.mkdir()
+    imported=m.import_packet(target)
+    assert m.git(['rev-parse','HEAD'],imported).decode().strip()==head
+    monkeypatch.setenv('GITHUB_WORKSPACE',str(imported))
+    monkeypatch.setattr(m,'api',lambda *a,**kw:native_pr(head=base))
+    result=m.publish()
+    assert result['outcome']=='publication_credential_unavailable'
+    assert Path(result['recovery_path'],'implementation.bundle').is_file()
+
+
+@pytest.mark.parametrize('tamper',['wrong-repo','wrong-head','wrong-pr','wrong-ref','symlink','extra-file','oversized'])
+def test_data_packet_cannot_grant_publication(candidate,monkeypatch,tmp_path,tamper):
+    m=load_publisher();packet=Path(m.prepare_packet()['recovery_path']);receipt=packet/'receipt.json'
+    meta=json.loads(receipt.read_text())
+    field={'wrong-repo':'repository','wrong-head':'base_sha','wrong-pr':'pr_number','wrong-ref':'head_ref'}.get(tamper)
+    if field:meta[field]='different';receipt.write_text(json.dumps(meta))
+    if tamper=='extra-file':(packet/'GITHUB_ENV').write_text('HTTPS_PROXY=untrusted')
+    if tamper=='symlink':
+        saved=tmp_path/'untrusted';saved.write_text(receipt.read_text());receipt.unlink();receipt.symlink_to(saved)
+    if tamper=='oversized':
+        with (packet/'implementation.bundle').open('ab') as stream:stream.truncate(64*1024*1024+1)
+    monkeypatch.setenv('AUTOFIX_PACKET_DIR',str(packet))
+    monkeypatch.setattr(m,'git',lambda *a,**kw:pytest.fail('invalid packet must not reach Git/network'))
+    with pytest.raises(ValueError):m.import_packet(tmp_path/'import')
+
+
+def test_embedded_capture_executes_without_publisher_or_api_credentials(candidate,monkeypatch,tmp_path):
+    workflow=yaml.safe_load((ROOT/'.github/workflows/pr-autofix-execution-reusable.yml').read_text())
+    step=next(s for s in workflow['jobs']['standalone_editor']['steps'] if s.get('id')=='prepare')
+    assert 'PUBLISH_TOKEN' not in step['run'] and 'def api(' not in step['run']
+    output=tmp_path/'capture-output'
+    env={k:v for k,v in os.environ.items() if k not in {'PUBLISH_TOKEN','READ_TOKEN','GITHUB_API_URL'}}
+    env['GITHUB_OUTPUT']=str(output)
+    result=subprocess.run(['bash','-c',step['run']],env=env,text=True,capture_output=True,timeout=20)
+    assert result.returncode==0,result.stderr
+    packet=Path(output.read_text().strip().split('=',1)[1])
+    assert (packet/'implementation.bundle').is_file()
+    assert json.loads((packet/'receipt.json').read_text())['candidate_sha']==candidate[2]

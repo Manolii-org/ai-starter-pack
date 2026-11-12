@@ -37,7 +37,7 @@ def test_all_autofix_workflows_parse_as_yaml() -> None:
 def test_autofix_acquisition_uses_builtin_token_without_publisher_secret() -> None:
     text = WORKFLOWS[1].read_text(encoding="utf-8")
     spec = yaml.safe_load(text)
-    steps = spec['jobs']['autofix']['steps']
+    steps = yaml.safe_load((ROOT / '.github/workflows/pr-autofix-execution-reusable.yml').read_text())['jobs']['reusable_editor']['steps']
     editor = next(s for s in steps if s.get('id') == 'claude')
     checkout = next(s for s in steps if s.get('uses', '').startswith('actions/checkout@'))
     restore = next(s for s in steps if s.get('name') == 'Restore trusted instruction surface from PR base')
@@ -52,14 +52,15 @@ def test_autofix_acquisition_uses_builtin_token_without_publisher_secret() -> No
 def test_workflow_run_staleness_is_checked_before_checkout_and_agent() -> None:
     """A delayed failure must not check out or invoke an agent for an old SHA."""
 
-    for workflow in WORKFLOWS:
-        text = workflow.read_text(encoding="utf-8")
-        stale_check = '"$WR_HEAD_SHA" != "$CURRENT_HEAD_SHA"'
-        checkout = "uses: actions/checkout@"
-        agent = "uses: anthropics/claude-code-action@"
-        assert "WR_HEAD_SHA: ${{ github.event.workflow_run.head_sha || '' }}" in text
-        assert "gh api \"repos/${REPOSITORY}/pulls/${PR_NUM}\" --jq '.head.sha'" in text
-        assert text.index(stale_check) < text.index(checkout) < text.index(agent)
-        # Missing API/SHA evidence is deliberately fail-open so a current failure
-        # still reaches repair; only a proven inequality suppresses dispatch.
-        assert '-n "$WR_HEAD_SHA" && -n "$CURRENT_HEAD_SHA"' in text
+    execution = yaml.safe_load((ROOT / ".github/workflows/pr-autofix-execution-reusable.yml").read_text())
+    for workflow, variant in zip(WORKFLOWS, ("standalone", "reusable")):
+        caller = yaml.safe_load(workflow.read_text())
+        steps = [s for job in caller['jobs'].values() for s in job.get('steps', [])]
+        steps += execution['jobs'][variant+'_editor']['steps']
+        stale = next(i for i,s in enumerate(steps) if '"$WR_HEAD_SHA" != "$CURRENT_HEAD_SHA"' in s.get('run',''))
+        checkout = next(i for i,s in enumerate(steps) if s.get('uses','').startswith('actions/checkout@'))
+        agent = next(i for i,s in enumerate(steps) if s.get('uses','').startswith('anthropics/claude-code-action@'))
+        assert stale < checkout < agent
+        assert steps[stale]['env']['WR_HEAD_SHA']=="${{ github.event.workflow_run.head_sha || '' }}"
+        assert 'CURRENT_HEAD_SHA' in steps[stale]['run']
+        assert '-n "$WR_HEAD_SHA" && -n "$CURRENT_HEAD_SHA"' in steps[stale]['run']

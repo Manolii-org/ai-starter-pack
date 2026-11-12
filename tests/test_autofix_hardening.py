@@ -35,7 +35,9 @@ GATE = "steps.ref.outputs.skip != 'true' && steps.custody.outputs.skip == 'false
 
 def _steps(name: str) -> list[dict]:
     spec = yaml.safe_load(WORKFLOWS[name].read_text(encoding="utf-8"))
-    return [step for job in spec["jobs"].values() for step in job.get("steps", [])]
+    execution = yaml.safe_load((ROOT / ".github/workflows/pr-autofix-execution-reusable.yml").read_text())
+    return ([step for job in spec["jobs"].values() for step in job.get("steps", [])] +
+            execution['jobs'][name+'_editor']['steps'])
 
 
 def _step(name: str, *, uses: str | None = None, title: str | None = None) -> dict:
@@ -165,6 +167,7 @@ def test_standalone_lock_is_on_the_agent_job_and_never_cancels() -> None:
     assert "concurrency" not in spec
     assert "concurrency" not in spec["jobs"]["preflight"]
     lock = spec["jobs"]["autofix"]["concurrency"]
+    assert spec["jobs"]["autofix"]["uses"] == "./.github/workflows/pr-autofix-execution-reusable.yml"
     assert lock["cancel-in-progress"] is False
     assert "needs.preflight.outputs.pr_number" in lock["group"]
 
@@ -176,15 +179,15 @@ GO = "steps.lock.outputs.go == 'true'"
 def test_standalone_rechecks_the_head_before_any_queued_work() -> None:
     """Codex review, PR #251: preflight runs before the job waits for the lock,
     so a queued run must re-check the head before checking out or dispatching."""
-    steps = yaml.safe_load(WORKFLOWS["standalone"].read_text(encoding="utf-8"))["jobs"]["autofix"]["steps"]
+    steps = yaml.safe_load((ROOT / '.github/workflows/pr-autofix-execution-reusable.yml').read_text())['jobs']['standalone_editor']['steps']
     assert steps[0]["name"] == LOCK_CHECK and steps[0]["id"] == "lock"
-    assert steps[0]["env"]["VALIDATED"] == "${{ needs.preflight.outputs.head_sha }}"
+    assert steps[0]["env"]["VALIDATED"] == "${{ inputs.head_sha }}"
     agent = next(i for i, s in enumerate(steps) if str(s.get("uses", "")).startswith(ACTION))
     for step in steps[1:agent + 1]:
         assert step.get("if") == (GO if step.get('id')=='custody_dispatch' else
             GO+" && steps.custody_dispatch.outputs.skip == 'false'"), step.get("name") or step.get("uses")
     for step in steps[agent + 1:]:
-        assert any(gate in step['if'] for gate in ('steps.claude.outcome','steps.verify_exec.outcome','steps.publish.outputs.recovery_path'))
+        assert any(gate in step['if'] for gate in ('steps.claude.outcome','steps.verify_exec.outcome','steps.prepare.outputs.recovery_path'))
 
 
 @pytest.mark.parametrize(("pr", "validated", "go"), [
@@ -493,7 +496,7 @@ def test_trusted_agent_bots_are_opt_in_and_ci_failure_only(name: str) -> None:
     # Never the raw value: only the preflight's sanitised list reaches the action.
     assert src not in allowed
     if name == "standalone":
-        assert allowed == "${{ needs.preflight.outputs.allowed_bots || 'github-actions' }}"
+        assert allowed == "${{ inputs.allowed_bots || 'github-actions' }}"
         spec = yaml.safe_load(WORKFLOWS[name].read_text(encoding="utf-8"))
         assert spec["jobs"]["preflight"]["outputs"]["allowed_bots"] == "${{ steps.pr.outputs.allowed_bots }}"
     else:

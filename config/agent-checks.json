@@ -364,7 +364,7 @@
         ".github/workflows/e2e-playwright-reusable.yml",
         ".github/workflows/email-capture-live-conformance.yml",
         ".github/workflows/integration-admission-reusable.yml",
-        ".github/workflows/pr-autofix-loop*.yml",
+        ".github/workflows/pr-autofix*.yml",
         ".github/workflows/setup-env-secret.yml",
         ".github/workflows/static-review.yml",
         "tests/test_autofix_hardening.py",
