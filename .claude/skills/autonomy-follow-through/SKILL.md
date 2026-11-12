@@ -1,6 +1,6 @@
 ---
 name: autonomy-follow-through
-version: 1.1.5
+version: 1.1.7
 description: "Shared termination + escalation loop for routine-native autonomy and /watch-pr. Stops on done/blocked_on_human/blocked_on_infra/superseded/gave_up; merges when safe."
 type: skill
 model: sonnet
@@ -98,19 +98,37 @@ instruction update does not install a verifier or attest consumer adoption.
 
 ## Inputs
 
+When the original session retains execution, record its verified opaque owner
+claim as `X-Follow-Through-Owner:` in the initial PR body and register it once
+with an author-owned `<!-- follow-through-owner:v1 -->` comment. Reuse an existing
+owner; never publish private session IDs. This excludes competing framework
+editors. It is not an accepted wake, ownership transfer or execution receipt.
+Do not install another watcher or claim continuation from this policy alone.
+
+Deployment/access and future-wake holds apply to their dependent operations.
+Before waiting, complete independent authorized implementation, tests, publication
+and review. Route dependencies to their existing owners. Every wait records a
+specific dependency, unblock condition and next action. Unchanged checks stay
+quiet. Preserve original commitments through compaction, PR merge and idle time;
+stop task follow-up only after the original requested outcome is verified.
+
 Required PR number; optional handoff item id (maps to producer issue URL) and producer issue URL.
 
 ## Pre-Process QA (Ecosystem-Audit Phase 4.0)
 
-Before loop, post a PR comment tagged `<!-- qa-pre-process -->`: assumptions/scope; obvious errors (secrets/imports/syntax); opportunities (coverage/blind spots/follow-ons); continuity (context/cache/environment). Block only P0 errors.
+Before a material scope change, record assumptions/scope, obvious errors,
+opportunities and continuity in the existing checkpoint. Reuse that assessment
+on unchanged wakes; do not post another task brief. Notify only material progress,
+a specific required intervention or verified completion. Block only P0 errors
+at this preliminary assessment; all owning publication/review gates still apply.
 
 ## Outer Loop
 
 Policy: `config/autonomy-executor-policy.yaml`; max repair rounds default 5. Passive CI/review waits consume none.
 
-Bound passive heartbeats separately: record owner's explicit wait deadline/wake lease. Without one, permit only one one-shot for an unchanged pending operation, then existing subscription/accepted handoff. Never reset expired waits/chain one-shots. At bound, persist pending status/evidence/actual owner, suspend active wait chain; timeout means `blocked_on_infra`, never consent/PASS. Retain user-authorized durable schedules. Without real continuation, terminate this invocation blocked_on_infra, report monitoring unavailable with pending-work evidence, and perform incident/escalation actions. Resume active work on substantive events/decisive evidence under retry rules.
+Bound passive heartbeats separately: record owner's explicit wait deadline/wake lease. Without one, permit only one one-shot for an unchanged pending operation, then existing subscription/accepted handoff. Never reset expired waits/chain one-shots. At bound, persist pending status/evidence/actual owner, suspend active wait chain; timeout means `blocked_on_infra`, never consent/PASS. Retain user-authorized durable schedules. Without real continuation, mark future monitoring blocked_on_infra and retain pending-work evidence. Finish independent authorized implementation, tests and review before yielding; retain parent commitments and use only owning incident/escalation actions. Resume active work on substantive events/decisive evidence under retry rules.
 
-Before the first authenticated-read round, establish one owning-repository-approved deterministic broker on the main thread or in a local process and verify its credential/raw-response boundaries. Bind every round and wake to that same broker; return only permitted sanitized evidence. Keep credentials and raw authenticated responses out of delegated model context, including a persistent named `infra` agent. Preserve provider/plane verification: aliases do not prove providers. Without an approved broker preserving these boundaries, terminate `blocked_on_infra`; never select an unverified fallback.
+Before the first authenticated-read round, establish one owning-repository-approved deterministic broker on the main thread or in a local process and verify its credential/raw-response boundaries. Bind every round and wake to that same broker; return only permitted sanitized evidence. Keep credentials and raw authenticated responses out of delegated model context, including a persistent named `infra` agent. Preserve provider/plane verification: aliases do not prove providers. Without an approved broker preserving these boundaries, hold that authenticated operation `blocked_on_infra`; finish independent authorized local implementation and tests before yielding. Missing optional executor infrastructure does not revoke the original session's authority or install a new executor. Never select an unverified fallback.
 
 Each round:
 1. Batch authorized PR/CI/review/thread/complete-label reads; keep credentials/raw authenticated payloads out of delegated model context; return permitted sanitized evidence.

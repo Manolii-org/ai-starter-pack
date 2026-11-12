@@ -145,7 +145,11 @@ def test_reusable_workflow_installs_governed_proxy_by_default(name):
     else:
         # The default selects the already-supported proxy transport and model
         # resolver without changing action authority, success cap or jobs.
-        job = workflow["jobs"]["autofix"]
+        wrapper = workflow["jobs"]["autofix"]
+        assert wrapper["with"]["provider_mode"] == "${{ inputs.provider_mode }}"
+        execution = yaml.safe_load((ROOT / ".github/workflows/pr-autofix-execution-reusable.yml").read_text())
+        assert execution[True]["workflow_call"]["inputs"]["provider_mode"]["default"] == "proxy"
+        job = execution["jobs"]["reusable_editor"]
         assert "inputs.litellm_proxy_url" in job["env"]["ANTHROPIC_BASE_URL"]
         assert "secrets.LITELLM_MASTER_KEY" in job["env"]["ANTHROPIC_API_KEY"]
         model = next(step for step in job["steps"] if step.get("id") == "model")

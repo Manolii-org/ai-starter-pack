@@ -61,7 +61,7 @@ jobs:
         run: python3 scripts/check-pinned-uses.py
 
       - name: actionlint
-        run: actionlint -shellcheck= -pyflakes=
+        run: python3 scripts/check-pinned-uses.py --actionlint
 
       - name: zizmor (ratchet against baseline)
         run: python3 scripts/workflow-security-ratchet.py

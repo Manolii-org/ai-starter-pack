@@ -38,7 +38,7 @@ class TestPackSelfXor(unittest.TestCase):
         self.assertIn("max_successful_fixes", reusable)
 
     def test_claude_code_action_sha_pinned(self):
-        for name in ("pr-autofix-loop.yml", "pr-autofix-loop-reusable.yml"):
+        for name in ("pr-autofix-execution-reusable.yml",):
             text = (ROOT / ".github" / "workflows" / name).read_text(encoding="utf-8")
             self.assertNotIn("claude-code-action@beta", text)
             self.assertRegex(
