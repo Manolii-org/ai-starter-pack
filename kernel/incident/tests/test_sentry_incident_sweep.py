@@ -178,3 +178,33 @@ def test_cursor_is_read_from_the_link_url_when_the_attribute_is_absent():
         sweep_mod._next_cursor(bad, 100)
     with pytest.raises(sweep_mod.SweepError):
         sweep_mod._next_cursor('<https://sentry.io/>; rel="next"; results="true"', 100)
+
+
+def test_missing_link_header_is_incomplete_even_on_a_short_page():
+    def short_no_link(url):
+        return [issue()], {}
+    with pytest.raises(sweep_mod.SweepError, match="incomplete"):
+        sweep_mod.sweep(MANIFEST, short_no_link, now=NOW)
+
+
+def test_transport_failure_on_an_event_is_emitted_unknown_not_fatal(monkeypatch):
+    import urllib.error
+    calls = {"n": 0}
+    def opener_open(request, timeout):
+        calls["n"] += 1
+        raise urllib.error.URLError("timed out")
+    monkeypatch.setattr(sweep_mod._OPENER, "open", opener_open)
+    with pytest.raises(sweep_mod.SweepError, match="transport error"):
+        sweep_mod.http_fetch("t")(sweep_mod.API + "/organizations/o/issues/1/events/latest/")
+
+
+@pytest.mark.parametrize("bad", [
+    {"entity": "e", "organization": {"slug": "o", "id": "1"}, "routes": []},
+    {"entity": "e", "organization": {"slug": "o", "id": "1"}, "routes": [{"project_id": "1", "environment": "production"}]},
+    {"entity": "e", "organization": {"slug": "o", "id": "1"}, "routes": "nope"},
+])
+def test_manifest_rejects_empty_or_incomplete_routes(tmp_path, bad):
+    path = tmp_path / "r.json"
+    path.write_text(json.dumps(bad))
+    with pytest.raises(sweep_mod.SweepError):
+        sweep_mod.load_routes(path)

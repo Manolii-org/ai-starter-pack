@@ -128,18 +128,27 @@ def http_fetch(token: str) -> Fetch:
         try:
             # Fixed https origin, and redirects are refused, so the token never leaves it.
             with _OPENER.open(request, timeout=15) as response:  # nosec B310  # noqa: S310
-                return json.loads(response.read() or b"null"), dict(response.headers)
+                body = response.read()
+                headers = dict(response.headers)
         except urllib.error.HTTPError as exc:
             raise SweepError(f"Sentry API HTTP {exc.code}") from None
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            # Transport failures become SweepError so one unreadable event is
+            # emitted `unknown` instead of aborting the sweep. No body is quoted.
+            raise SweepError(f"Sentry API transport error ({type(exc).__name__})") from None
+        try:
+            return json.loads(body or b"null"), headers
+        except ValueError:
+            raise SweepError("Sentry API returned malformed JSON") from None
     return fetch
 
 
 def _next_cursor(link: str | None, page_length: int) -> str | None:
     part = next((p for p in (link or "").split(",") if 'rel="next"' in p), None)
     if part is None:
-        if page_length == PAGE_SIZE:
-            raise SweepError("Sentry pagination is incomplete")
-        return None
+        # Sentry always signals the last page with results="false"; a missing
+        # next link means the listing cannot be proven complete.
+        raise SweepError("Sentry pagination is incomplete")
     if 'results="false"' in part:
         return None
     if 'results="true"' not in part:
@@ -160,9 +169,21 @@ def _next_cursor(link: str | None, page_length: int) -> str | None:
 
 def load_routes(path: Path) -> dict:
     manifest = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(manifest, dict):
+        raise SweepError("routes manifest must be an object")
     for key in ("entity", "organization", "routes"):
         if key not in manifest:
             raise SweepError(f"routes manifest missing {key}")
+    if not isinstance(manifest["organization"], dict):
+        raise SweepError("routes manifest organization is invalid")
+    if not isinstance(manifest["routes"], list) or not manifest["routes"]:
+        raise SweepError("routes manifest must contain at least one route")
+    for route in manifest["routes"]:
+        if not isinstance(route, dict):
+            raise SweepError("route must be an object")
+        for field in ("project_id", "environment", "repo", "runtime_id"):
+            if not isinstance(route.get(field), str) or not route[field]:
+                raise SweepError(f"route is missing {field}")
     if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,60}", manifest["organization"].get("slug", "")) \
             or not re.fullmatch(r"[0-9]{1,32}", str(manifest["organization"].get("id", ""))):
         raise SweepError("routes manifest organization is invalid")
