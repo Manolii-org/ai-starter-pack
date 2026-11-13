@@ -156,6 +156,7 @@ def load_routes(path: Path) -> dict:
 
 def sweep(manifest: dict, fetch: Fetch, *, now: datetime | None = None, lookback_minutes: int | None = None,
           max_enrichments: int | None = None, deadline_seconds: float = 240.0,
+          enrich_seconds: float = 120.0,
           clock: Callable[[], float] = time.monotonic) -> dict:
     """Return {"candidates": [...], "stats": {...}}. Raises SweepError on incomplete coverage."""
     started = clock()
@@ -207,19 +208,23 @@ def sweep(manifest: dict, fetch: Fetch, *, now: datetime | None = None, lookback
     # Oldest lastSeen first: groups nearest the lookback edge are enriched now,
     # so a deferred group is among the newest and is re-observed next sweep.
     ordered = sorted(groups.values(), key=lambda item: str(item[0].get("lastSeen") or ""))
+    empty = {"exception_type": None, "message": None, "in_app": None, "release": None}
     for index, (row, route, environment) in enumerate(ordered):
-        if index >= budget or clock() - started > deadline_seconds:
-            deferred += 1  # re-observed by the next sweep while it recurs
-            continue
         issue_id = str(row["id"])
-        try:
-            event, _ = fetch(f"{API}/organizations/{org['slug']}/issues/{issue_id}/events/latest/?"
-                             + urllib.parse.urlencode({"environment": environment}))
-            facts = event_facts(event)
-            enriched += 1
-        except SweepError:
-            facts = {"exception_type": None, "message": None, "in_app": None, "release": None}
-            unreadable += 1
+        if index >= budget or clock() - started > enrich_seconds:
+            # Never drop a group: over budget it is emitted `unknown`, which
+            # never reaches an implementation lane.
+            facts = dict(empty)
+            deferred += 1
+        else:
+            try:
+                event, _ = fetch(f"{API}/organizations/{org['slug']}/issues/{issue_id}/events/latest/?"
+                                 + urllib.parse.urlencode({"environment": environment}))
+                facts = event_facts(event)
+                enriched += 1
+            except SweepError:
+                facts = dict(empty)
+                unreadable += 1
         sha = release_sha(facts["release"])
         short_id = row.get("shortId") if isinstance(row.get("shortId"), str) and SHORT_ID.match(row["shortId"]) else issue_id
         exception_type = facts["exception_type"]

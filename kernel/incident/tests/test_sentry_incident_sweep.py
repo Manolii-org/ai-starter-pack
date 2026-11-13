@@ -97,11 +97,22 @@ def test_secret_shaped_exception_types_are_dropped():
         assert sweep_mod.safe_exception_type(name) == name
 
 
-def test_enrichment_budget_defers_instead_of_emitting_unclassified():
+def test_enrichment_budget_never_drops_a_group():
     rows = [issue(str(i)) for i in range(1, 6)]
-    result = sweep_mod.sweep(MANIFEST, fake({"production": rows}), now=NOW, max_enrichments=3)
-    assert len(result["candidates"]) == 3
+    result = sweep_mod.sweep(MANIFEST, fake({"production": rows}, {str(i): event() for i in range(1, 6)}),
+                             now=NOW, max_enrichments=3)
+    assert len(result["candidates"]) == 5
     assert result["stats"]["deferred"] == 2
+    assert sum(c["classification"] == "unknown" for c in result["candidates"]) == 2
+
+
+def test_slow_enrichment_stops_at_its_budget_and_still_emits_everything():
+    ticks = iter(range(0, 1000, 50))
+    rows = [issue(str(i)) for i in range(1, 6)]
+    result = sweep_mod.sweep(MANIFEST, fake({"production": rows}, {str(i): event() for i in range(1, 6)}),
+                             now=NOW, enrich_seconds=120, clock=lambda: next(ticks))
+    assert len(result["candidates"]) == 5
+    assert result["stats"]["deferred"] >= 1
 
 
 def test_unreadable_event_is_emitted_unknown_not_dropped():
@@ -147,6 +158,7 @@ def test_example_manifest_loads():
 
 def test_budget_defers_the_newest_groups_first():
     rows = [dict(issue(str(i)), lastSeen=f"2026-11-12T11:{50 - i:02d}:00Z") for i in range(1, 6)]
-    result = sweep_mod.sweep(MANIFEST, fake({"production": rows}), now=NOW, max_enrichments=3)
-    emitted = {c["delivery_id"].split(":")[2] for c in result["candidates"]}
-    assert emitted == {"3", "4", "5"}  # the three oldest; 1 and 2 (newest) are deferred
+    result = sweep_mod.sweep(MANIFEST, fake({"production": rows}, {str(i): event() for i in range(1, 6)}),
+                             now=NOW, max_enrichments=3)
+    enriched = {c["delivery_id"].split(":")[2] for c in result["candidates"] if c["classification"] != "unknown"}
+    assert enriched == {"3", "4", "5"}  # the three oldest; 1 and 2 (newest) are emitted unknown
