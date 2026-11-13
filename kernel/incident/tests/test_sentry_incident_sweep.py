@@ -162,3 +162,19 @@ def test_budget_defers_the_newest_groups_first():
                              now=NOW, max_enrichments=3)
     enriched = {c["delivery_id"].split(":")[2] for c in result["candidates"] if c["classification"] != "unknown"}
     assert enriched == {"3", "4", "5"}  # the three oldest; 1 and 2 (newest) are emitted unknown
+
+
+def test_redirects_are_refused_so_the_token_never_follows_them():
+    handler = sweep_mod._NoRedirect()
+    with pytest.raises(sweep_mod.SweepError, match="redirect refused"):
+        handler.redirect_request(None, None, 302, "Found", {}, "http://evil.example/")
+
+
+def test_cursor_is_read_from_the_link_url_when_the_attribute_is_absent():
+    link = '<https://sentry.io/api/0/organizations/o/issues/?cursor=100:0:1>; rel="next"; results="true"'
+    assert sweep_mod._next_cursor(link, 100) == "100:0:1"
+    bad = '<https://sentry.io/api/0/organizations/o/issues/?cursor=../../x>; rel="next"; results="true"'
+    with pytest.raises(sweep_mod.SweepError):
+        sweep_mod._next_cursor(bad, 100)
+    with pytest.raises(sweep_mod.SweepError):
+        sweep_mod._next_cursor('<https://sentry.io/>; rel="next"; results="true"', 100)

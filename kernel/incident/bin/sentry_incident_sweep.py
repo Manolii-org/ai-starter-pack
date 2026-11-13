@@ -110,13 +110,24 @@ def event_facts(event: object) -> dict:
     }
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Never follow a redirect: urllib would copy the Authorization header to it."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: D401
+        raise SweepError(f"Sentry API redirect refused (HTTP {code})")
+
+
+_OPENER = urllib.request.build_opener(_NoRedirect)
+
+
 def http_fetch(token: str) -> Fetch:
     def fetch(url: str) -> tuple[object, dict]:
         if not url.startswith(API + "/"):
             raise SweepError("refusing to send the Sentry token to another origin")
         request = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
         try:
-            with urllib.request.urlopen(request, timeout=15) as response:  # noqa: S310 - fixed https origin
+            # Fixed https origin, and redirects are refused, so the token never leaves it.
+            with _OPENER.open(request, timeout=15) as response:  # nosec B310  # noqa: S310
                 return json.loads(response.read() or b"null"), dict(response.headers)
         except urllib.error.HTTPError as exc:
             raise SweepError(f"Sentry API HTTP {exc.code}") from None
@@ -131,10 +142,20 @@ def _next_cursor(link: str | None, page_length: int) -> str | None:
         return None
     if 'results="false"' in part:
         return None
-    match = re.search(r'cursor="([^"]+)"', part)
-    if 'results="true"' not in part or not match or not CURSOR.match(match.group(1)):
+    if 'results="true"' not in part:
         raise SweepError("Sentry pagination state is invalid")
-    return match.group(1)
+    # Prefer the cursor attribute; fall back to the cursor query parameter of
+    # the Link URL (both documented). Only the opaque value is used: the URL is
+    # rebuilt from the fixed origin, never followed.
+    match = re.search(r'cursor="([^"]+)"', part)
+    cursor = match.group(1) if match else None
+    if cursor is None:
+        url_match = re.search(r"<([^>]+)>", part)
+        values = urllib.parse.parse_qs(urllib.parse.urlparse(url_match.group(1)).query).get("cursor") if url_match else None
+        cursor = values[0] if values else None
+    if not cursor or not CURSOR.match(cursor):
+        raise SweepError("Sentry pagination state is invalid")
+    return cursor
 
 
 def load_routes(path: Path) -> dict:
