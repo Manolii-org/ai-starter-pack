@@ -1,6 +1,6 @@
 ---
 name: autonomy-follow-through
-version: 1.1.7
+version: 1.1.8
 description: "Shared termination + escalation loop for routine-native autonomy and /watch-pr. Stops on done/blocked_on_human/blocked_on_infra/superseded/gave_up; merges when safe."
 type: skill
 model: sonnet
@@ -52,7 +52,14 @@ budgets; replacing a goal can reset usage, and explicit turns while it is paused
 may not count against its native usage. Native Goal/Queue does not install GitHub
 subscriptions, provide cross-host editor exclusion or satisfy review/merge gates.
 Use short checkpoint references and material-change-only notifications under the
-existing owner; do not add another watcher. Official references:
+existing owner; do not add another watcher. Before creating a new hosted heartbeat,
+require demonstrated same-owner execution, busy-session queuing/coalescing and
+original-environment recovery on that host. Configuration, delivered notifications
+and accepted messages alone do not qualify it. Without qualified transport,
+create no new timer; retain the wake infrastructure hold and accepted existing
+repair owner while independent authorized work continues. Preserve existing
+user-authorized schedules and provider-required bounded heartbeats; do not cancel
+or transfer them under this creation rule. Official references:
 [long-running work](https://learn.chatgpt.com/docs/long-running-work),
 [Queue and Steer](https://learn.chatgpt.com/docs/prompting#steering-and-queuing), and
 [App Server](https://developers.openai.com/codex/app-server).
