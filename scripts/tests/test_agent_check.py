@@ -420,11 +420,14 @@ class AgentCheckTests(unittest.TestCase):
     def test_git_reads_are_bounded_and_timeout_revokes_old_evidence(self):
         runner = load("agent-check")
         calls = []
+        head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.root, capture_output=True,
+                              check=True).stdout
         def bounded(command, **kwargs):
             calls.append(command)
             self.assertGreater(kwargs["timeout"], 0)
             self.assertLessEqual(kwargs["timeout"], 30)
-            return subprocess.CompletedProcess(command, 0, b"", b"")
+            # Git's own HEAD^{commit} resolution must agree before any reuse.
+            return subprocess.CompletedProcess(command, 0, head if command[-1:] == ["HEAD^{commit}"] else b"", b"")
         checks = mock.Mock(wraps=runner.source_scope_declared)
         with mock.patch.object(runner.subprocess, "run", side_effect=bounded), \
              mock.patch.object(runner, "source_scope_declared", checks):
@@ -435,7 +438,9 @@ class AgentCheckTests(unittest.TestCase):
         self.assertEqual(checks.call_count, 2)
         scope_reads = [command for command in calls if command[-1:] == [runner.SOURCE_SCOPE_POLICY]]
         self.assertEqual(len(scope_reads), 1)
-        self.assertEqual(len(calls) - len(scope_reads), 4)
+        resolutions = [command for command in calls if command[-1:] == ["HEAD^{commit}"]]
+        self.assertEqual(len(resolutions), 2)  # before and after the one listing
+        self.assertEqual(len(calls) - len(scope_reads) - len(resolutions), 4)
         self.run_check()
         with mock.patch.object(runner, "plan_for", side_effect=subprocess.TimeoutExpired(["git"], 30)):
             self.assertEqual(runner.main(["--repo-root", str(self.root), "--provider", "codex"]), 2)

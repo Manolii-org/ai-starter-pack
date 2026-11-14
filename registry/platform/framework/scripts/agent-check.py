@@ -52,6 +52,7 @@ _SOURCE_SCOPE_METADATA_REASONS = frozenset({
     "Git config includes require a qualified metadata adapter",
     "Git object alternates require a qualified metadata adapter",
     "source-scope ownership ancestry is ambiguous", "source-scope ownership ancestry bound exceeded",
+    "Git common-directory routing requires a qualified adapter",
 })
 
 
@@ -209,12 +210,16 @@ def _source_scope_alias_metadata(path: Path) -> None:
 def _source_scope_head_chain(gitdir: Path, common: Path) -> tuple | None:
     """Bound symbolic HEAD to checked ref namespaces, never other worktrees.
 
-    Returns the exact route observation (path, bytes, descriptor identity per
-    hop) only when it ends in a loose object id; otherwise None.
+    Returns a cache-key observation (path, bytes, descriptor identity per hop)
+    only when every hop has Git's exact written form and the route ends in a
+    loose object id; otherwise None. The observation never selects what Git
+    probes: Git resolves HEAD itself and must agree before an answer is kept.
+    The hold decisions below are unchanged from the uncached guard.
     """
     path = gitdir / "HEAD"
     read = _source_scope_control_read(path)
     route = []
+    exact = True
     for _ in range(32):
         if read is None:
             return None  # A missing loose ref may resolve through checked packed refs.
@@ -222,7 +227,9 @@ def _source_scope_head_chain(gitdir: Path, common: Path) -> tuple | None:
         route.append((str(path), raw, identity))
         text = raw.decode("utf-8").strip()
         if re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", text):
-            return tuple(route)
+            # Exact form only: 40/64 lowercase hex and at most one newline.
+            exact = exact and re.fullmatch(rb"(?:[0-9a-f]{40}|[0-9a-f]{64})\n?", raw) is not None
+            return tuple(route) if exact else None
         if not text.startswith("ref: refs/"):
             raise ValueError("unqualified symbolic HEAD route")
         reference = text[5:]
@@ -231,6 +238,7 @@ def _source_scope_head_chain(gitdir: Path, common: Path) -> tuple | None:
                 or any(ord(char) < 32 or ord(char) == 127 for char in reference)
                 or "\\" in reference):
             raise ValueError("unqualified symbolic HEAD route")
+        exact = exact and raw in (b"ref: " + reference.encode("utf-8"), b"ref: " + reference.encode("utf-8") + b"\n")
         # Git keeps these namespaces private to the current linked worktree.
         private = reference.startswith(("refs/bisect/", "refs/worktree/", "refs/rewritten/"))
         path = (gitdir if private else common) / reference
@@ -258,6 +266,10 @@ def _source_scope_git_controls(root: Path) -> tuple | None:
     if stat.S_ISDIR(marker.lstat().st_mode):
         gitdir = marker
         common = gitdir
+        # Git honours a commondir file here and would read refs, objects and
+        # config elsewhere; that routing is not modeled, so it holds.
+        if _source_scope_exists(gitdir / "commondir"):
+            raise ValueError("Git common-directory routing requires a qualified adapter")
     else:
         raw = _source_scope_control_bytes(marker)
         if raw is None or not raw.startswith(b"gitdir: ") or len(raw.splitlines()) != 1:
@@ -303,17 +315,23 @@ def _source_scope_git_controls(root: Path) -> tuple | None:
     private_refs = gitdir / "refs"
     if gitdir != common and _source_scope_exists(private_refs):
         _source_scope_alias_metadata(private_refs)
-    return None if route is None else (str(root), str(gitdir), str(common), tuple(configs), route)
+    # Ref storage this resolver does not model is never a cache key; the
+    # uncached HEAD probe (Git authoritative) still applies.
+    if route is None or any(_source_scope_exists(directory / "reftable")
+                            for directory in dict.fromkeys((common, gitdir))) or any(
+            raw is not None and re.search(rb"refstorage", raw, re.IGNORECASE) for raw in configs):
+        return None
+    return (str(root), str(gitdir), str(common), tuple(configs), route)
 
 
-# Undeclared fixed-probe answers, keyed by the complete control observation made
-# for that call: owner/control paths, config bytes and every HEAD route hop
-# (bytes plus descriptor identity) ending in a loose commit id. Such a call
-# probes that observed immutable commit id, never a HEAD re-resolved while the
-# probe runs, so a stored answer is bound to the id it describes. Every call
-# still re-runs pins, enclosing declarations, control checks and the alias
-# walk; any route change (commit, checkout, rewritten ref) is a miss. Declared,
-# unborn and packed-only routes are never memoized and still probe HEAD.
+# Undeclared answers, keyed by this call's complete control observation:
+# owner/control paths, config bytes and every exact HEAD route hop (bytes plus
+# descriptor identity) ending in a loose commit id. Git is authoritative: it
+# resolves HEAD^{commit} itself and the probe lists that id. An answer is kept
+# only when Git's id equals the observed id before and after the probe and the
+# observation is unchanged; any mismatch is uncached. Every call still re-runs
+# pins, enclosing declarations, control checks and the alias walk. Declared,
+# unborn, packed-only, inexact and unmodeled routes use the uncached HEAD probe.
 _SOURCE_SCOPE_UNDECLARED_TREES: set = set()
 
 
@@ -337,23 +355,33 @@ def _source_scope_tree_declared(owner: Path, environment: dict, timeout: int,
     def metadata(*arguments):
         return subprocess.run(["git", "--no-replace-objects", "-c", "protocol.allow=never", *arguments],
                               cwd=owner, env=environment, capture_output=True, timeout=timeout, check=False)
-    # An observed loose route names its commit; probe that id, not a HEAD that
-    # could be re-routed while Git runs.
-    commit = "HEAD" if observation is None else observation[-1][-1][1].decode("ascii").strip()
-    result = metadata("ls-tree", "-z", commit, "--", SOURCE_SCOPE_POLICY)
+    def resolved_commit():
+        result = metadata("rev-parse", "--verify", "--quiet", "HEAD^{commit}")
+        output = result.stdout
+        if result.returncode == 0 and re.fullmatch(rb"(?:[0-9a-f]{40}|[0-9a-f]{64})\n", output):
+            return output[:-1].decode("ascii")
+        return None
+    commit = None
+    if observation is None:
+        result = metadata("ls-tree", "-z", "HEAD", "--", SOURCE_SCOPE_POLICY)
+    else:
+        # Git, not this resolver, selects the commit that is listed.
+        commit = resolved_commit()
+        result = (metadata("ls-tree", "-z", commit, "--", SOURCE_SCOPE_POLICY) if commit is not None
+                  else subprocess.CompletedProcess([], 1, b"", b""))
     if result.stdout:
         return True
-    if observation is not None and result.returncode != 0:
-        # A verified loose commit id is never an unborn branch.
-        raise ValueError("source-scope metadata unavailable")
     if result.returncode == 0:
-        # Defence in depth: record only if config and route were also unchanged.
         if (observation is not None and key is not None
+                and commit == observation[-1][-1][1].rstrip(b"\n").decode("ascii")
+                and resolved_commit() == commit
                 and _source_scope_observation_unchanged(observation)):
             if len(_SOURCE_SCOPE_UNDECLARED_TREES) >= 256:
                 _SOURCE_SCOPE_UNDECLARED_TREES.clear()
             _SOURCE_SCOPE_UNDECLARED_TREES.add(key)
         return False
+    if commit is not None:
+        raise ValueError("source-scope metadata unavailable")  # Git resolved it but cannot list it.
     head = metadata("rev-parse", "--verify", "--quiet", "HEAD")
     symbolic = metadata("symbolic-ref", "--quiet", "HEAD")
     ref = symbolic.stdout.decode("utf-8").strip()

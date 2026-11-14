@@ -23,16 +23,25 @@ def load(name):
 
 
 def fixed_probe_tail(test, command, kwargs, real, *, full=False):
-    """The fixed probe names HEAD, or (runner, loose route) the observed HEAD commit id."""
+    """Fixed probes: HEAD listing, or Git's own HEAD^{commit} resolution and that id's listing."""
     if full:
         test.assertEqual(command[:4], ["git", "--no-replace-objects", "-c", "protocol.allow=never"])
+    if command[-4:] == ["rev-parse", "--verify", "--quiet", "HEAD^{commit}"]:
+        if full:
+            test.assertEqual(len(command), 8)
+        return
+    if full:
         test.assertEqual(len(command), 9)
     tail = command[-5:]
     test.assertEqual(tail[:2] + tail[3:], ["ls-tree", "-z", "--", ".ai/source-scope-policy.json"])
     if tail[2] != "HEAD":
-        current = real(["git", "rev-parse", "--verify", "HEAD"], cwd=kwargs["cwd"], env=kwargs["env"],
+        current = real(["git", "rev-parse", "--verify", "HEAD^{commit}"], cwd=kwargs["cwd"], env=kwargs["env"],
                        capture_output=True, text=True, check=True).stdout.strip()
         test.assertEqual(tail[2], current)
+
+
+def is_listing(command):
+    return "ls-tree" in command
 
 
 class SourceScopeBoundary(unittest.TestCase):
@@ -172,7 +181,9 @@ raise SystemExit(code)
              patch.object(Path, "read_bytes", side_effect=AssertionError("protected content read")):
             with self.assertRaises(self.runner.SourceScopeError):
                 self.runner.plan_for(self.root, self.config)
-        self.assertEqual(len(observed), 1)
+        # Git resolves HEAD^{commit} itself, then that id is listed once.
+        self.assertEqual(sum(map(is_listing, observed)), 1)
+        self.assertEqual(len(observed), 2)
 
     def test_symlinked_policy_parent_and_external_content_reader_stay_held(self):
         (self.root / ".ai").rename(self.root / ".ai-retained")
@@ -496,7 +507,10 @@ raise SystemExit(module.main(['--repo-root',str(root),*sys.argv[3:]]))
                  patch.object(Path, "read_bytes", side_effect=AssertionError("working payload read")):
                 self.assertEqual(self.runner.source_scope_declared(self.root), declared)
                 self.assertEqual(self.finalise.source_scope_declared(self.root), declared)
-        self.assertEqual(len(observed), 4)
+        # One listing per runner/gate call; the runner adds Git's HEAD^{commit}
+        # resolution (re-checked after an undeclared listing before caching).
+        self.assertEqual(sum(map(is_listing, observed)), 4)
+        self.assertEqual(len(observed), 7)
 
     def test_committed_enclosing_scope_is_checked_before_nested_git_control_bytes(self):
         self.declare()
@@ -1768,7 +1782,9 @@ class ScopeControlCompatibility(unittest.TestCase):
         with patch.object(self.runner.subprocess, "run", side_effect=counting):
             self.assertFalse(self.runner.source_scope_declared(self.root))
             self.assertFalse(self.runner.source_scope_declared(self.root))
-            self.assertEqual(len(probes), 1)  # identical observation: one fixed probe
+            # Identical observation: Git resolved, listed and re-resolved once only.
+            self.assertEqual(sum(map(is_listing, probes)), 1)
+            self.assertEqual(len(probes), 3)
             # Every other hold is still observed fresh on a memoized route.
             with patch.dict(os.environ, {self.runner.SOURCE_SCOPE_PIN: ""}):
                 self.assertTrue(self.runner.source_scope_declared(self.root))
@@ -1878,6 +1894,80 @@ class ScopeControlCompatibility(unittest.TestCase):
             self.assertTrue(self.runner.source_scope_declared(self.root))
         self.assertEqual(self.memo_git("ls-tree", "HEAD", "--", self.runner.SOURCE_SCOPE_POLICY) != "", True)
 
+    def test_commondir_in_a_plain_git_directory_holds_instead_of_local_resolution(self):
+        # Repository A's branch is declared; B's own branch names an undeclared
+        # commit but B/.git/commondir routes Git to A's refs, objects and config.
+        undeclared, declared, branch = self.memo_fixture()
+        self.memo_git("update-ref", branch, declared)
+        other = self.other_root()
+        (other / ".git/refs/heads").mkdir(parents=True)
+        (other / ".git/objects").mkdir()
+        (other / ".git/HEAD").write_text("ref: " + branch + "\n")
+        (other / ".git" / branch).write_text(undeclared + "\n")
+        (other / ".git/commondir").write_text(str(self.root / ".git") + "\n")
+        (other / ".git/config").write_bytes((self.root / ".git/config").read_bytes())
+        truth = subprocess.run(["git", "ls-tree", "HEAD", "--", self.runner.SOURCE_SCOPE_POLICY], cwd=other,
+                               capture_output=True, text=True)
+        self.assertTrue(truth.stdout)  # native Git follows commondir to the declaration
+        for _ in range(2):
+            with self.assertRaises(self.runner.SourceScopeError) as held:
+                self.runner.require_source_scope(other)
+            self.assertIn("Git common-directory routing requires a qualified adapter", str(held.exception))
+        self.assertEqual(len(self.runner._SOURCE_SCOPE_UNDECLARED_TREES), 1)  # only the fixture's own entry
+
+    def test_inexact_loose_ref_forms_are_never_an_observation_or_undeclared(self):
+        undeclared, _, branch = self.memo_fixture()
+        self.runner._SOURCE_SCOPE_UNDECLARED_TREES.clear()
+        ref = self.root / ".git" / branch
+        # Git rejects leading whitespace: hold, as the uncached guard did.
+        for form in (b"  " + undeclared.encode() + b"\n", b"\t" + undeclared.encode()):
+            with self.subTest(form=form):
+                ref.write_bytes(form)
+                with self.assertRaises(self.runner.SourceScopeError):
+                    self.runner.require_source_scope(self.root)
+                self.assertEqual(self.runner._SOURCE_SCOPE_UNDECLARED_TREES, set())
+        # Git accepts extra trailing whitespace: answer per Git, but never cache it.
+        for form in (undeclared.encode() + b"\n\n", undeclared.encode() + b" \n"):
+            with self.subTest(form=form):
+                ref.write_bytes(form)
+                self.assertFalse(self.runner.source_scope_declared(self.root))
+                self.assertEqual(self.runner._SOURCE_SCOPE_UNDECLARED_TREES, set())
+        head = self.root / ".git/HEAD"
+        ref.write_bytes(undeclared.encode() + b"\n")
+        head.write_bytes(b"ref: " + branch.encode() + b"\n")
+        self.assertFalse(self.runner.source_scope_declared(self.root))
+        self.assertEqual(len(self.runner._SOURCE_SCOPE_UNDECLARED_TREES), 1)  # exact forms still cache
+
+    def test_git_and_observation_disagreement_is_never_cached(self):
+        undeclared, declared, branch = self.memo_fixture()
+        self.runner._SOURCE_SCOPE_UNDECLARED_TREES.clear()
+        # A real disagreement: the loose ref names an annotated tag, Git peels it.
+        self.memo_git("tag", "-a", "-m", "Synthetic tag", "synthetic-tag", undeclared)
+        tag = self.memo_git("rev-parse", "synthetic-tag")
+        (self.root / ".git" / branch).write_text(tag + "\n")
+        for _ in range(2):
+            self.assertFalse(self.runner.source_scope_declared(self.root))
+        self.assertEqual(self.runner._SOURCE_SCOPE_UNDECLARED_TREES, set())
+        # A simulated disagreement: Git resolves a different commit than observed.
+        (self.root / ".git" / branch).write_text(undeclared + "\n")
+        real = subprocess.run
+        tree = self.memo_git("rev-parse", undeclared + "^{tree}")
+        distinct = self.memo_git("commit-tree", tree, "-m", "Synthetic distinct undeclared")
+        for when in ("before", "after"):
+            calls = []
+            def disagree(command, **kwargs):
+                if command[-1:] == ["HEAD^{commit}"]:
+                    calls.append(command)
+                    if (when == "before") == (len(calls) == 1):
+                        return subprocess.CompletedProcess(command, 0, distinct.encode() + b"\n", b"")
+                return real(command, **kwargs)
+            with self.subTest(when=when), patch.object(self.runner.subprocess, "run", side_effect=disagree):
+                self.assertFalse(self.runner.source_scope_declared(self.root))
+                self.assertEqual(len(calls), 1 if when == "before" else 2)  # early mismatch stops
+                self.assertEqual(self.runner._SOURCE_SCOPE_UNDECLARED_TREES, set())
+        self.assertFalse(self.runner.source_scope_declared(self.root))
+        self.assertEqual(len(self.runner._SOURCE_SCOPE_UNDECLARED_TREES), 1)
+
     def test_head_moved_during_probe_is_not_memoized(self):
         real = subprocess.run
         subprocess.run(["git", "branch", "other"], cwd=self.root, check=True)
@@ -1889,8 +1979,9 @@ class ScopeControlCompatibility(unittest.TestCase):
         head = self.root / ".git/HEAD"
         original = head.read_bytes()
         def racing(command, **kwargs):
-            # HEAD flips to an undeclared branch for the probe and back afterwards
-            # (an ABA route change). The probe names the observed commit id.
+            # HEAD flips to an undeclared branch around every Git process and
+            # back afterwards (an ABA route change). Git answers for what it
+            # actually saw, and that mismatch with the observation is never kept.
             head.write_bytes(b"ref: refs/heads/other\n")
             try:
                 return real(command, **kwargs)
@@ -1898,7 +1989,7 @@ class ScopeControlCompatibility(unittest.TestCase):
                 head.unlink()
                 head.write_bytes(original)
         with patch.object(self.runner.subprocess, "run", side_effect=racing):
-            self.assertTrue(self.runner.source_scope_declared(self.root))
+            self.assertFalse(self.runner.source_scope_declared(self.root))
         self.assertEqual(self.runner._SOURCE_SCOPE_UNDECLARED_TREES, set())
         self.assertTrue(self.runner.source_scope_declared(self.root))
 
