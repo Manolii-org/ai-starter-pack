@@ -144,10 +144,25 @@
         ".cursor/rules/agent-validation.mdc",
         "scripts/install-agent-validation.py",
         "config/agent-checks.json",
-        ".claude/skills/agent-validation/SKILL.md"
+        ".claude/skills/agent-validation/SKILL.md",
+        "scripts/tests/test_source_scope_boundary.py",
+        "scripts/qa/finalise-gate.py",
+        "schemas/source-scope-policy.v1.schema.json",
+        "docs/source-scope-boundary.md",
+        "scripts/lib/source_projection.py",
+        "scripts/tests/test_source_projection.py",
+        "scripts/lib/source_executor.py",
+        "scripts/tests/test_source_executor.py",
+        "docs/source-only-execution.md",
+        ".github/workflows/plugin-eval-gate.yml",
+        "scripts/source-adapter-probe.py",
+        "scripts/tests/test_source_adapter_probe.py"
       ],
       "tools": [
-        "python"
+        "python",
+        "git",
+        "bwrap",
+        "cc"
       ],
       "commands": [
         [
@@ -164,6 +179,50 @@
           "scripts/tests",
           "-p",
           "test_agent_check.py",
+          "-v"
+        ],
+        [
+          "python3",
+          "-m",
+          "unittest",
+          "discover",
+          "-s",
+          "scripts/tests",
+          "-p",
+          "test_source_scope_boundary.py",
+          "-v"
+        ],
+        [
+          "python3",
+          "-m",
+          "unittest",
+          "discover",
+          "-s",
+          "scripts/tests",
+          "-p",
+          "test_source_projection.py",
+          "-v"
+        ],
+        [
+          "python3",
+          "-m",
+          "unittest",
+          "discover",
+          "-s",
+          "scripts/tests",
+          "-p",
+          "test_source_executor.py",
+          "-v"
+        ],
+        [
+          "python3",
+          "-m",
+          "unittest",
+          "discover",
+          "-s",
+          "scripts/tests",
+          "-p",
+          "test_source_adapter_probe.py",
           "-v"
         ]
       ]
@@ -277,7 +336,7 @@
           "-q",
           "tests/test_copier_render.py",
           "-k",
-          "test_rendered_readme_counts_match_rendered_tree or test_release_capability_distribution_boundary or test_agent_validation_base_uses_owner_ref or test_watch_continuity_maintainer_fixture_never_ships"
+          "test_rendered_readme_counts_match_rendered_tree or test_release_capability_distribution_boundary or test_agent_validation_base_uses_owner_ref or test_executor_public_linux_setup_consumes_metadata_and_fails_closed or test_watch_continuity_maintainer_fixture_never_ships"
         ],
         [
           ".ai/agent-checks/release-venv/bin/python",

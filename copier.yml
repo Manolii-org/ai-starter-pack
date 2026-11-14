@@ -332,6 +332,18 @@ _exclude:
   - tests/test_delivery_component_distribution.py
   - tests/test_session_terminal_callers.py
   - scripts/tests/test_agent_validation_layout.py
+  # Source-scope control qualification and the non-executing projection
+  # foundation are Pack-owned; portable consumers keep their existing recipe.
+  - scripts/tests/test_source_scope_boundary.py
+  - scripts/tests/test_source_projection.py
+  - scripts/lib/source_projection.py
+  # The reviewed source executor is an additive Linux Pack qualification only.
+  # Portable installations do not contain its OS/runtime adapter or tests.
+  - scripts/lib/source_executor.py
+  - scripts/tests/test_source_executor.py
+  - scripts/source-adapter-probe.py
+  - scripts/tests/test_source_adapter_probe.py
+  - docs/source-only-execution.md
   # Native owner transport remains local to the public Pack.
   - scripts/ci/native_owner_recipe.py
   - .github/workflows/native-owner-recipe.yml
