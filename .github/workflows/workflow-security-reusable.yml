@@ -85,8 +85,8 @@ jobs:
           API: ${{ github.api_url }}
           BASE: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
           HEAD: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha }}
-        shell: python
         run: |
+          python3 - <<'PY'
           import json, os, re, urllib.request
           relevant = "true"
           base, head = os.environ.get("BASE", ""), os.environ.get("HEAD", "")
@@ -106,6 +106,7 @@ jobs:
                   print(f"::warning::Change detection failed ({type(exc).__name__}); scanning")
           with open(os.environ["GITHUB_OUTPUT"], "a") as out:
               out.write(f"relevant={relevant}\n")
+          PY
 
       - name: Checkout caller
         if: steps.changes.outputs.relevant == 'true'
