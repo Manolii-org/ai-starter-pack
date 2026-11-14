@@ -351,6 +351,10 @@ _exclude:
   # and the test that asserts on them. Consumers adopt via a caller of
   # workflow-security-reusable.yml and generate their own baseline.
   - .github/workflows/workflow-security.yml
+  # Pack-only source scan of distributed skills (scan once at the source);
+  # consumers fetch the gate at a pinned pack_ref when they need it.
+  - .github/workflows/skill-scan.yml
+  - scripts/skill-scan-gate.py
   - config/zizmor-baseline.json
   - tests/test_workflow_security.py
   # Template-internal master content — present only in the master's

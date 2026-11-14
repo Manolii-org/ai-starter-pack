@@ -32,6 +32,20 @@ on:
         required: false
         type: string
         default: ''
+      runs_on:
+        description: 'Runner label. ubuntu-slim is sufficient (pure Python + static binaries, no sudo).'
+        required: false
+        type: string
+        default: 'ubuntu-latest'
+      changed_only:
+        description: >-
+          On pull_request and merge_group, skip the scan visibly unless a
+          workflow, composite action or action.yml file changed. Schedule,
+          push and dispatch always scan. Change detection uses the compare API
+          and fails safe (scans) on any error or a 300-file response.
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -39,7 +53,7 @@ permissions:
 jobs:
   scan:
     name: Workflow security
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runs_on }}
     timeout-minutes: 10
     steps:
       - name: Resolve pack revision
@@ -58,13 +72,50 @@ jobs:
           fi
           echo "ref=$PACK_REF" >> "$GITHUB_OUTPUT"
 
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
+        with:
+          python-version: '3.12'
+
+      - name: Detect workflow changes
+        id: changes
+        env:
+          CHANGED_ONLY: ${{ inputs.changed_only }}
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          API: ${{ github.api_url }}
+          BASE: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+          HEAD: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha }}
+        shell: python
+        run: |
+          import json, os, re, urllib.request
+          relevant = "true"
+          base, head = os.environ.get("BASE", ""), os.environ.get("HEAD", "")
+          if os.environ.get("CHANGED_ONLY") == "true" and base and head:
+              try:
+                  req = urllib.request.Request(
+                      f"{os.environ['API']}/repos/{os.environ['REPO']}/compare/{base}...{head}",
+                      headers={"Authorization": f"Bearer {os.environ['GH_TOKEN']}",
+                               "Accept": "application/vnd.github+json"})
+                  with urllib.request.urlopen(req, timeout=30) as r:
+                      files = [f["filename"] for f in json.load(r).get("files", [])]
+                  pattern = re.compile(r"^\.github/(workflows|actions)/|(^|/)action\.ya?ml$")
+                  if len(files) < 300 and not any(pattern.search(f) for f in files):
+                      relevant = "false"
+                      print("::notice::No workflow or action files changed; workflow security skipped (changed_only)")
+              except Exception as exc:  # fail safe: scan
+                  print(f"::warning::Change detection failed ({type(exc).__name__}); scanning")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as out:
+              out.write(f"relevant={relevant}\n")
+
       - name: Checkout caller
+        if: steps.changes.outputs.relevant == 'true'
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           path: caller
           persist-credentials: false
 
       - name: Checkout pack scripts (this workflow's own revision)
+        if: steps.changes.outputs.relevant == 'true'
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           repository: manolii-org/ai-starter-pack
@@ -72,17 +123,15 @@ jobs:
           path: pack
           persist-credentials: false
 
-      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
-        with:
-          python-version: '3.12'
-
       - name: Install pinned scanners
+        if: steps.changes.outputs.relevant == 'true'
         run: |
           bash pack/scripts/install-workflow-scanners.sh "$RUNNER_TEMP/bin"
           python3 -m pip install --quiet --disable-pip-version-check --require-hashes --only-binary=:all: -r pack/config/workflow-security-requirements.txt
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
 
       - name: Every uses is SHA-pinned
+        if: steps.changes.outputs.relevant == 'true'
         env:
           ALLOW_REF: ${{ inputs.allow_ref }}
         run: |
@@ -94,10 +143,12 @@ jobs:
           python3 ../pack/scripts/check-pinned-uses.py "${args[@]}"
 
       - name: actionlint
+        if: steps.changes.outputs.relevant == 'true'
         working-directory: caller
         run: python3 ../pack/scripts/check-pinned-uses.py --actionlint
 
       - name: zizmor
+        if: steps.changes.outputs.relevant == 'true'
         working-directory: caller
         env:
           BASELINE: ${{ inputs.zizmor_baseline }}

@@ -236,12 +236,6 @@
       "severity": "Medium"
     },
     {
-      "fingerprint": "468736f81d203b62",
-      "ident": "artipacked",
-      "path": ".github/workflows/static-review.yml",
-      "severity": "Medium"
-    },
-    {
       "fingerprint": "ca41deee2c12432e",
       "ident": "artipacked",
       "path": ".github/workflows/static-review.yml",

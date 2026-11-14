@@ -4,6 +4,12 @@
 
 ### Fixed
 
+- `static-review` / `static-review-reusable`: Semgrep no longer uses the
+  archived `returntocorp/semgrep-action` (archived 2024-04-09). The job runs in
+  Semgrep's own image pinned by tag and digest, fetches the same default
+  rulesets at run time (never vendored), sends no metrics, and on pull requests
+  and merge queues reports only findings the change introduces
+  (`--baseline-commit`). It still fails on findings.
 - `agent-check`: setup is reused only when its `ready_paths` are unchanged
   (fingerprint of names, modes, sizes, mtimes, inodes and ctimes plus symlink
   target state, walking symlinked directories; tool caches including
@@ -24,6 +30,25 @@
 
 ### Added
 
+- Security assurance (central shared service):
+  - `workflow-security-reusable`: `runs_on` (default `ubuntu-latest`;
+    `ubuntu-slim` suffices) and `changed_only` (default `false`). With
+    `changed_only`, pull requests and merge queues skip the scan visibly unless
+    a workflow, composite action or `action.yml` changed; detection fails safe
+    to scanning. The job name `Workflow security` is unchanged.
+  - `secret-scan-reusable`: `engine` (`gitleaks` default, or checksum-verified
+    `trufflehog` with `trufflehog_only_verified`) and `osv_scanner`
+    (`off` default, `report`, `enforce`): one OSV-Scanner pass over every
+    supported lockfile, including known-malicious package data, inside the
+    existing Dependency Vulnerability Audit job. Job names and outputs are
+    unchanged.
+  - `static-review-reusable`: `semgrep_runs_on`, `semgrep_config` and
+    `semgrep_local_rules` (defaults keep v1 behaviour).
+  - Pack-only `skill-scan.yml` + `scripts/skill-scan-gate.py`: SkillSpector
+    (pinned, static `--no-llm`) scans the skills this pack distributes once at
+    the source and fails on HIGH/CRITICAL skill risk.
+  - `.githooks/pre-commit`: optional staged-change secret scan when `gitleaks`
+    is installed (`SKIP_GITLEAKS=1` skips once).
 - `scripts/agent-merge.py`: the merge path for agents that merge interactively
   rather than through an auto-merge workflow. It refuses unless the PR is at the
   reviewed head (`--head`, required to merge), `mergeable_state` is clean, every
