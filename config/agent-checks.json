@@ -222,7 +222,20 @@
         "plugin/manolii-framework/schemas/release-source-policy.v1.schema.json",
         "registry/platform/framework/schemas/release-source-policy.v1.schema.json",
         "scripts/tests/test_release_source_policy.py",
-        "scripts/tests/fixtures/release-manifest.c435.py"
+        "scripts/tests/fixtures/release-manifest.c435.py",
+        ".github/workflows/release-tag.yml",
+        "tests/test_release_tag_namespaces.py",
+        "tests/test_hydrate_assessment.py",
+        "tests/test_workflow_security.py",
+        "README.md",
+        "docs/renovate-preset.md",
+        "docs/node-runtime-support.md",
+        "docs/contracts/integration-admission.md",
+        "default.json",
+        "tests/test_renovate_config.py",
+        "config/workflow-outcomes.json",
+        ".github/workflows/integration-admission-reusable.yml",
+        "scripts/tests/test_lint_workflow_outcomes.py"
       ],
       "tools": [
         "uv"
@@ -256,10 +269,28 @@
           "tests/test_copier_render.py",
           "-k",
           "test_rendered_readme_counts_match_rendered_tree or test_release_capability_distribution_boundary or test_agent_validation_base_uses_owner_ref or test_watch_continuity_maintainer_fixture_never_ships"
+        ],
+        [
+          ".ai/agent-checks/release-venv/bin/python",
+          "-B",
+          "-m",
+          "pytest",
+          "-q",
+          "tests/test_release_tag_namespaces.py",
+          "tests/test_hydrate_assessment.py::test_pack_ref_input_exists_and_defaults_to_major_alias",
+          "tests/test_workflow_security.py::test_documented_callers_pin_pack_ref_to_the_uses_sha",
+          "tests/test_renovate_config.py",
+          "scripts/tests/test_lint_workflow_outcomes.py"
         ]
       ],
       "timeout_seconds": 180,
-      "environment": "release-contract-python"
+      "environment": "release-contract-python",
+      "ci_sources": [
+        {
+          "path": ".github/workflows/plugin-eval-gate.yml",
+          "contains": "python3 -m pytest tests/ -q"
+        }
+      ]
     },
     {
       "id": "feature-controls",

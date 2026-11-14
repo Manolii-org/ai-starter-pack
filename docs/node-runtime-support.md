@@ -41,9 +41,10 @@ chosen runner; they do not set an application host's production runtime.
 
 After exact-source local validation, independent review and required hosted
 checks pass, merge the owning PR and verify that merged commit before invoking
-the existing release lane for `v2.0.0` with its full SHA. The lane also moves
-the matching `v2` alias; it must not move `v1` or rewrite released tags.
-No production consumer should adopt a floating global ref.
+the existing automatic release lane for `v2.0.0` with its full SHA. The lane
+creates only the new immutable annotated tag; it does not create or move `v2`,
+`v1` or any other alias, and never rewrites released tags. A new publication
+must not activate unqualified consumers through a global ref.
 
 New scaffolds pin `ai-manifest.yaml` to `2.0.0`. Copier excludes the Pack's
 native-guidance installation receipt and preserves existing consumer manifests
@@ -51,14 +52,15 @@ and receipts. A missing receipt stays absent until explicit native adoption;
 update the manifest and use the normal native-guidance resolver to create or
 refresh a receipt for the consumer's selected version.
 
-Each consumer opens its own PR pinned to the release commit or immutable tag.
-For Playwright also set `pack_ref` to that same immutable release, since the
-workflow cannot discover its own ref. Example after publication:
+Consumer automation prepares an owning PR pinned to the full release commit
+SHA. For Playwright also set `pack_ref` to that same SHA, since the workflow
+cannot discover its own ref. Substitute the published 40-character commit in
+both positions after publication:
 
 ```yaml
-uses: Manolii-org/ai-starter-pack/.github/workflows/e2e-playwright-reusable.yml@v2.0.0
+uses: Manolii-org/ai-starter-pack/.github/workflows/e2e-playwright-reusable.yml@<full-40-character-release-commit> # v2.0.0
 with:
-  pack_ref: v2.0.0
+  pack_ref: <full-40-character-release-commit> # v2.0.0
   node_version: '24.22.1'
 ```
 
