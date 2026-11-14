@@ -22,6 +22,19 @@ def load(name):
     return module
 
 
+def fixed_probe_tail(test, command, kwargs, real, *, full=False):
+    """The fixed probe names HEAD, or (runner, loose route) the observed HEAD commit id."""
+    if full:
+        test.assertEqual(command[:4], ["git", "--no-replace-objects", "-c", "protocol.allow=never"])
+        test.assertEqual(len(command), 9)
+    tail = command[-5:]
+    test.assertEqual(tail[:2] + tail[3:], ["ls-tree", "-z", "--", ".ai/source-scope-policy.json"])
+    if tail[2] != "HEAD":
+        current = real(["git", "rev-parse", "--verify", "HEAD"], cwd=kwargs["cwd"], env=kwargs["env"],
+                       capture_output=True, text=True, check=True).stdout.strip()
+        test.assertEqual(tail[2], current)
+
+
 class SourceScopeBoundary(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
@@ -151,8 +164,7 @@ raise SystemExit(code)
         observed = []
         def metadata_only(command, **kwargs):
             observed.append(command)
-            self.assertEqual(command, ["git", "--no-replace-objects", "-c", "protocol.allow=never",
-                                       "ls-tree", "-z", "HEAD", "--", self.runner.SOURCE_SCOPE_POLICY])
+            fixed_probe_tail(self, command, kwargs, real, full=True)
             self.assertEqual(kwargs["env"]["GIT_NO_LAZY_FETCH"], "1")
             self.assertEqual(kwargs["env"]["GIT_ALLOW_PROTOCOL"], "")
             return real(command, **kwargs)
@@ -341,7 +353,7 @@ raise SystemExit(code)
             if kwargs.get("cwd") == linked:
                 raise AssertionError("Git through aliased worktree config")
             self.assertEqual(kwargs.get("cwd"), self.root)
-            self.assertEqual(command[-5:], ["ls-tree", "-z", "HEAD", "--", self.runner.SOURCE_SCOPE_POLICY])
+            fixed_probe_tail(self, command, kwargs, real)
             return real(command, **kwargs)
         with patch.object(self.runner.subprocess, "run", side_effect=outer_metadata_only):
             with self.assertRaises(self.runner.SourceScopeError):
@@ -462,11 +474,9 @@ raise SystemExit(module.main(['--repo-root',str(root),*sys.argv[3:]]))
 
     def test_real_packed_git_fixed_metadata_probe_preserves_default_and_committed_hold(self):
         real = subprocess.run
-        expected = ["git", "--no-replace-objects", "-c", "protocol.allow=never",
-                    "ls-tree", "-z", "HEAD", "--", self.runner.SOURCE_SCOPE_POLICY]
         observed = []
         def only_fixed_metadata(command, **kwargs):
-            self.assertEqual(command, expected)
+            fixed_probe_tail(self, command, kwargs, real, full=True)
             self.assertEqual(kwargs["env"]["GIT_NO_LAZY_FETCH"], "1")
             self.assertEqual(kwargs["env"]["GIT_ALLOW_PROTOCOL"], "")
             observed.append(command)
@@ -554,7 +564,7 @@ raise SystemExit(module.main(['--repo-root',str(root),*sys.argv[3:]]))
         real = subprocess.run
         def no_grafts(command, **kwargs):
             self.assertEqual(kwargs["env"]["GIT_GRAFT_FILE"], os.devnull)
-            self.assertEqual(command[-5:], ["ls-tree", "-z", "HEAD", "--", self.runner.SOURCE_SCOPE_POLICY])
+            fixed_probe_tail(self, command, kwargs, real)
             return real(command, **kwargs)
         with patch.object(subprocess, "run", side_effect=no_grafts):
             self.assertFalse(self.runner.source_scope_declared(self.root))
@@ -643,8 +653,7 @@ raise SystemExit(module.main(['--repo-root',str(root),*sys.argv[3:]]))
             for name in ("SOURCE_SCOPE_PUBLIC_MARKER", "SOURCE_SCOPE_SYNTHETIC_VALUE", "GH_TOKEN",
                          "DOPPLER_TOKEN", "SSH_ASKPASS", "SSH_AUTH_SOCK"):
                 self.assertNotIn(name, selected)
-            self.assertEqual(command, ["git", "--no-replace-objects", "-c", "protocol.allow=never",
-                                       "ls-tree", "-z", "HEAD", "--", self.runner.SOURCE_SCOPE_POLICY])
+            fixed_probe_tail(self, command, kwargs, real, full=True)
             return real(command, **kwargs)
         with patch.dict(os.environ, environment, clear=True), patch.object(subprocess, "run", side_effect=controlled_probe):
             self.assertTrue(self.runner.source_scope_declared(self.root))
@@ -1792,6 +1801,83 @@ class ScopeControlCompatibility(unittest.TestCase):
             with self.assertRaises(self.runner.SourceScopeError):
                 self.runner.require_source_scope(self.root)
 
+    def memo_git(self, *args):
+        return subprocess.run(["git", "-c", "commit.gpgsign=false", *args], cwd=self.root, check=True,
+                              capture_output=True, text=True).stdout.strip()
+
+    def memo_fixture(self):
+        """Cache an undeclared answer at U, with a declared commit D on branch 'declared'."""
+        undeclared = self.memo_git("rev-parse", "HEAD")
+        self.memo_git("checkout", "-q", "-b", "declared")
+        self.declare()
+        self.memo_git("add", self.runner.SOURCE_SCOPE_POLICY)
+        self.memo_git("commit", "-qm", "Synthetic declared")
+        declared = self.memo_git("rev-parse", "HEAD")
+        self.memo_git("checkout", "-q", "main" if self.memo_git("branch", "--list", "main") else "master")
+        self.assertFalse((self.root / self.runner.SOURCE_SCOPE_POLICY).exists())
+        self.assertFalse(self.runner.source_scope_declared(self.root))
+        self.assertTrue(self.runner._SOURCE_SCOPE_UNDECLARED_TREES)
+        return undeclared, declared, self.memo_git("symbolic-ref", "HEAD")
+
+    def test_cached_answer_yields_to_a_new_commit_adding_the_declaration(self):
+        self.memo_fixture()
+        self.memo_git("merge", "-q", "--ff-only", "declared")
+        (self.root / self.runner.SOURCE_SCOPE_POLICY).unlink()
+        self.assertTrue(self.runner.source_scope_declared(self.root))
+        self.assertTrue(self.runner.source_scope_declared(self.root))
+
+    def test_cached_answer_yields_to_a_packed_refs_only_switch(self):
+        _, declared, branch = self.memo_fixture()
+        self.memo_git("update-ref", branch, declared)
+        self.memo_git("pack-refs", "--all", "--prune")
+        self.assertFalse((self.root / ".git" / branch).exists())
+        (self.root / self.runner.SOURCE_SCOPE_POLICY).unlink(missing_ok=True)
+        self.assertTrue(self.runner.source_scope_declared(self.root))
+
+    def test_cached_answer_yields_to_a_symbolic_head_moved_to_another_branch(self):
+        self.memo_fixture()
+        self.memo_git("symbolic-ref", "HEAD", "refs/heads/declared")
+        self.assertTrue(self.runner.source_scope_declared(self.root))
+
+    def test_cached_answer_yields_to_a_same_size_ref_rewrite_with_restored_mtime(self):
+        _, declared, branch = self.memo_fixture()
+        ref = self.root / ".git" / branch
+        before = ref.stat()
+        with open(ref, "r+b") as stream:  # in place: same inode and size
+            stream.write(declared.encode() + b"\n")
+        os.utime(ref, ns=(before.st_atime_ns, before.st_mtime_ns))
+        after = ref.stat()
+        self.assertEqual((after.st_ino, after.st_size, after.st_mtime_ns),
+                         (before.st_ino, before.st_size, before.st_mtime_ns))
+        self.assertTrue(self.runner.source_scope_declared(self.root))
+
+    def test_refs_directory_swapped_during_the_probe_never_caches_undeclared(self):
+        undeclared, declared, branch = self.memo_fixture()
+        self.memo_git("merge", "-q", "--ff-only", "declared")
+        (self.root / self.runner.SOURCE_SCOPE_POLICY).unlink()
+        heads, parked = self.root / ".git/refs/heads", self.root / ".git/refs/heads.parked"
+        real = subprocess.run
+        def racer(command, **kwargs):
+            if "ls-tree" not in command:
+                return real(command, **kwargs)
+            # Reroute the whole ref directory to an undeclared commit only while
+            # Git runs, then restore every original file identity.
+            heads.rename(parked)
+            heads.mkdir()
+            (self.root / ".git" / branch).write_text(undeclared + "\n")
+            try:
+                return real(command, **kwargs)
+            finally:
+                for child in heads.iterdir():
+                    child.unlink()
+                heads.rmdir()
+                parked.rename(heads)
+        with patch.object(self.runner.subprocess, "run", side_effect=racer):
+            self.assertTrue(self.runner.source_scope_declared(self.root))
+        for _ in range(2):
+            self.assertTrue(self.runner.source_scope_declared(self.root))
+        self.assertEqual(self.memo_git("ls-tree", "HEAD", "--", self.runner.SOURCE_SCOPE_POLICY) != "", True)
+
     def test_head_moved_during_probe_is_not_memoized(self):
         real = subprocess.run
         subprocess.run(["git", "branch", "other"], cwd=self.root, check=True)
@@ -1803,8 +1889,8 @@ class ScopeControlCompatibility(unittest.TestCase):
         head = self.root / ".git/HEAD"
         original = head.read_bytes()
         def racing(command, **kwargs):
-            # The declared observation is made; HEAD flips to an undeclared
-            # branch for the probe and back afterwards (an ABA route change).
+            # HEAD flips to an undeclared branch for the probe and back afterwards
+            # (an ABA route change). The probe names the observed commit id.
             head.write_bytes(b"ref: refs/heads/other\n")
             try:
                 return real(command, **kwargs)
@@ -1812,10 +1898,21 @@ class ScopeControlCompatibility(unittest.TestCase):
                 head.unlink()
                 head.write_bytes(original)
         with patch.object(self.runner.subprocess, "run", side_effect=racing):
-            self.assertFalse(self.runner.source_scope_declared(self.root))
+            self.assertTrue(self.runner.source_scope_declared(self.root))
         self.assertEqual(self.runner._SOURCE_SCOPE_UNDECLARED_TREES, set())
         self.assertTrue(self.runner.source_scope_declared(self.root))
 
+    def test_config_changed_during_probe_is_not_memoized(self):
+        real = subprocess.run
+        config = self.root / ".git/config"
+        def racing(command, **kwargs):
+            try:
+                return real(command, **kwargs)
+            finally:
+                config.write_bytes(config.read_bytes() + b"[core]\n\tsynthetic = true\n")
+        with patch.object(self.runner.subprocess, "run", side_effect=racing):
+            self.assertFalse(self.runner.source_scope_declared(self.root))
+        self.assertEqual(self.runner._SOURCE_SCOPE_UNDECLARED_TREES, set())
 
 if __name__ == "__main__":
     unittest.main()

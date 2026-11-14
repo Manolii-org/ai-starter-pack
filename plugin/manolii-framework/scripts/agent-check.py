@@ -308,17 +308,22 @@ def _source_scope_git_controls(root: Path) -> tuple | None:
 
 # Undeclared fixed-probe answers, keyed by the complete control observation made
 # for that call: owner/control paths, config bytes and every HEAD route hop
-# (bytes plus descriptor identity) ending in a commit id. A commit id names an
-# immutable tree, so the answer is reused only while a fresh observation is
-# identical. Every call still re-runs pins, enclosing declarations, control
-# checks and the alias walk; any route change (commit, checkout, rewritten ref)
-# is a miss. Declared, unborn and packed-only routes are never memoized.
+# (bytes plus descriptor identity) ending in a loose commit id. Such a call
+# probes that observed immutable commit id, never a HEAD re-resolved while the
+# probe runs, so a stored answer is bound to the id it describes. Every call
+# still re-runs pins, enclosing declarations, control checks and the alias
+# walk; any route change (commit, checkout, rewritten ref) is a miss. Declared,
+# unborn and packed-only routes are never memoized and still probe HEAD.
 _SOURCE_SCOPE_UNDECLARED_TREES: set = set()
 
 
-def _source_scope_route_unchanged(observation: tuple) -> bool:
+def _source_scope_observation_unchanged(observation: tuple) -> bool:
+    """Cheap post-probe re-observation of the config bytes and HEAD route."""
     try:
-        return _source_scope_head_chain(Path(observation[1]), Path(observation[2])) == observation[-1]
+        gitdir, common = Path(observation[1]), Path(observation[2])
+        configs = tuple(_source_scope_control_bytes(path, optional=True)
+                        for path in (common / "config", gitdir / "config.worktree"))
+        return configs == observation[3] and _source_scope_head_chain(gitdir, common) == observation[-1]
     except (OSError, ValueError, TypeError, RuntimeError):
         return False
 
@@ -332,12 +337,18 @@ def _source_scope_tree_declared(owner: Path, environment: dict, timeout: int,
     def metadata(*arguments):
         return subprocess.run(["git", "--no-replace-objects", "-c", "protocol.allow=never", *arguments],
                               cwd=owner, env=environment, capture_output=True, timeout=timeout, check=False)
-    result = metadata("ls-tree", "-z", "HEAD", "--", SOURCE_SCOPE_POLICY)
+    # An observed loose route names its commit; probe that id, not a HEAD that
+    # could be re-routed while Git runs.
+    commit = "HEAD" if observation is None else observation[-1][-1][1].decode("ascii").strip()
+    result = metadata("ls-tree", "-z", commit, "--", SOURCE_SCOPE_POLICY)
     if result.stdout:
         return True
+    if observation is not None and result.returncode != 0:
+        # A verified loose commit id is never an unborn branch.
+        raise ValueError("source-scope metadata unavailable")
     if result.returncode == 0:
-        # Record only if HEAD did not move while the probe ran.
-        if key is not None and _source_scope_route_unchanged(observation):
+        # Defence in depth: record only if config and route were also unchanged.
+        if key is not None and _source_scope_observation_unchanged(observation):
             if len(_SOURCE_SCOPE_UNDECLARED_TREES) >= 256:
                 _SOURCE_SCOPE_UNDECLARED_TREES.clear()
             _SOURCE_SCOPE_UNDECLARED_TREES.add(key)
