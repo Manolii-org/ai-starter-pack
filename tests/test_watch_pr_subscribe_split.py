@@ -19,7 +19,7 @@ class WatchPrSubscribeSplitTests(unittest.TestCase):
 
     def test_docs_ci_does_not_always_subscribe_pr_activity(self):
         for text in self._surfaces():
-            self.assertIn("version: 2.1.0", text)
+            self.assertIn("version: 2.2.0", text)
             self.assertIn(
                 "### Step 2: Subscribe (split — do not always subscribe PR activity)",
                 text,
@@ -58,8 +58,9 @@ class WatchPrSubscribeSplitTests(unittest.TestCase):
                 "**3a. Product-red / CI-subscribe only — event-led, not a 60s sleep loop:**",
                 text,
             )
-            self.assertIn("Skip this loop for docs/CI `none`.", text)
-            self.assertIn("Re-arm the ≥20-minute heartbeat", text)
+            self.assertIn("Skip the model wait loop for docs/CI `none`.", text)
+            self.assertIn("Retain the qualified event/wake owner", text)
+            self.assertIn("Do not re-arm an unchanged one-shot chain", text)
 
 
 if __name__ == "__main__":
