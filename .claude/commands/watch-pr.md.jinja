@@ -1,9 +1,10 @@
 ---
 name: watch-pr
-version: 2.1.0
+version: 2.2.0
 description: "Persistent PR resolution loop — subscribes to activity, monitors CI, review comments (Human/CodeRabbit/Gemini/bots), and merge conflicts. Loops until PR is clear or max rounds reached."
 type: command
 requires_mcp: [github]
+requires_scripts: [scripts/pr-watch-observe.py]
 safety_tier: green
 required_entities: []
 tags:
@@ -19,27 +20,13 @@ Invoke as `/watch-pr [PR_NUMBER]` or `/watch-pr` (auto-detects from current bran
 
 ## Protocol
 
-### Step 0: Write Active-Task Checkpoint
+### Step 0: Retain the existing task
 
-```bash
-python3 - <<'EOF'
-import json, os, datetime
-os.makedirs('.ai/sessions', exist_ok=True)
-try:
-    data = json.load(open('.ai/sessions/active-task.json'))
-except Exception:
-    data = {}
-data.update({
-    'type': 'watch-pr',
-    'status': 'watching',
-    'round': 0,
-    'started_at': datetime.datetime.utcnow().isoformat() + 'Z',
-})
-json.dump(data, open('.ai/sessions/active-task.json', 'w'), indent=2)
-EOF
-```
-
-After Step 1 resolves the PR number and branch, patch those fields in. Update `round` at the top of each loop iteration.
+Read the existing accepted owner checkpoint before subscribing. Preserve its
+parent commitments, holds, budgets, instructions and other owners. Execute only
+trusted installed sources, never repository tools from an untrusted PR or fork. Missing or
+malformed custody is an infrastructure hold for persistence/continuation, not
+permission to reconstruct it or stop independent authorized implementation.
 
 ### Step 1: Resolve PR Number
 
@@ -49,7 +36,58 @@ git rev-parse --abbrev-ref HEAD
 
 Call `mcp__github__list_pull_requests(owner, repo, state:"open")` and match by branch name, or use the supplied PR_NUMBER.
 
+After resolving the native PR/head and accepted task owner, record a scoped
+observation with this code. Set `WATCH_OWNER`, `WATCH_REPOSITORY`, `WATCH_PR`,
+`WATCH_HEAD` and `WATCH_PHASE` from the existing trusted owner and native readback;
+phase is `watching`, `merged`, `closed` or `verifying`. These are observations,
+not execution, review or completion authority. Do not reset a lifetime repair
+ledger from a watch invocation or passive wake.
+
+```bash
+# pr-watch-observer:verified-bootstrap/v1
+set -euo pipefail
+expected='5b0436e628b655c25a4dc638ec9dbb0ba314c70248cdc2ddd5687b6ba2dd45ff'
+private_git_dir="$(git rev-parse --absolute-git-dir)"
+stage="$(mktemp "$private_git_dir/pr-watch-observer.XXXXXX")"
+trap 'rm -f -- "$stage"' EXIT
+trap 'exit 2' HUP INT TERM
+if [ -n "${CLAUDE_PLUGIN_ROOT:-}" ]; then
+  # This root comes from the registered trusted installation, not the PR.
+  head -c 65537 "$CLAUDE_PLUGIN_ROOT/scripts/pr-watch-observe.py" > "$stage"
+else
+  # Read raw object bytes; never execute a file from the PR worktree.
+  size="$(git cat-file -s HEAD:scripts/pr-watch-observe.py)"
+  case "$size" in ''|*[!0-9]*) exit 2 ;; esac
+  [ "$size" -le 65536 ] || exit 2
+  git --no-pager show --no-textconv --no-ext-diff HEAD:scripts/pr-watch-observe.py > "$stage"
+fi
+[ "$(wc -c < "$stage")" -le 65536 ] || exit 2
+printf '%s  %s\n' "$expected" "$stage" | sha256sum --check --status
+# Isolated mode excludes the PR cwd and PYTHONPATH from module loading.
+python3 -I "$stage"
+```
+
+Run this block from the trusted installed command definition. The pinned digest
+is derived from the reviewed framework helper; never take it from a PR payload.
+The bootstrap verifies bytes before Python and stages them in Git's private
+directory. A changed/unavailable helper holds without a worktree-execution fallback.
+Observations live in an owner/repository-bound sidecar beside the original
+checkpoint. The observer never writes that parent file; legacy unlocked writers
+cannot lose parent updates to this observer. Reuse the sidecar after head/phase
+changes. Unchanged observations perform no replacement. Parent completion,
+commitments, holds and budgets stay unchanged, including after this PR merges.
+
 ### Step 2: Subscribe (split — do not always subscribe PR activity)
+
+Prefer the exact owning client's qualified native Goal/Queue and relevant events.
+Before creating a new hosted heartbeat, require demonstrated same-owner execution,
+busy-session queuing/coalescing and original-environment recovery on that host.
+A configured schedule, notification or accepted message alone does not qualify it.
+Without qualified transport, create no new timer: retain the wake infrastructure
+hold and accepted existing repair owner; continue independent authorized work.
+Preserve existing user-authorized schedules, owners and provider-required bounded
+heartbeats. Never cancel or transfer them merely to satisfy this creation gate.
+
 
 If GitHub reports auto-merge **actually armed** (`autoMergeRequest` /
 `auto_merge`, not intended-later) **and** every changed path is inside
@@ -76,24 +114,27 @@ subscribe_github_ci(owner, repo, pr_number)   # Cursor Cloud only
 ```
 
 Docs/CI with **none** (no CI subscribe): do **not** enter the 60s poll /
-5-minute wait. GitHub auto-merge + Judge is the waiter. End the turn.
+5-minute wait. GitHub auto-merge + Judge is the waiter. Continue independent
+parent commitments; end the turn only if no runnable work remains.
 
-### Step 3: Outer Loop (max 5 rounds)
+### Step 3: Continue authorized work (existing repair budget)
 
-Track state as: **"Round N/5: [found issues] -> [dispatched fix] -> [waiting]"**
+Retain the existing lifetime repair ledger. Count failed repair attempts, not
+passive CI/review events, duplicate delivery or unchanged waits. The skill's configured repair cap and denial/backoff rules still apply.
 
-Update checkpoint at top of every round. Skip this loop for docs/CI `none`.
+Update scoped observations only when facts change. Skip the model wait loop for docs/CI `none`.
 
 **3a. Product-red / CI-subscribe only — event-led, not a 60s sleep loop:**
 - `mcp__github__pull_request_read` → check `head.sha` vs current `HEAD`
 - Check CI status per SHA
-- Check `mergeable` flag: `null` = still computing (re-poll), `false` = conflict, `true` = clean
+- Check `mergeable` flag: `null` = still computing (retain an eligible event or one bounded recovery), `false` = conflict, `true` = clean
 - List all review threads; mark unresolved ones
 
 **3b. Exit condition (ALL must be true):**
-- All CI checks pass on current HEAD SHA
+- Required CI checks pass on the current full HEAD SHA
 - Zero unresolved review threads
-- At least 5 minutes elapsed since last push
+- Qualifying independent current-head review and all merge/release gates from
+  `autonomy-follow-through` pass; elapsed time is never review evidence
 - No merge conflict
 
 **3c. Collect issues (priority order):**
@@ -108,26 +149,42 @@ Update checkpoint at top of every round. Skip this loop for docs/CI `none`.
 | Gemini Code Assist | `user.login` starts with `gemini` OR body starts with `<!-- Gemini Code Assist` |
 | Other bots | `user.type == "Bot"` or `user.login` ends with `[bot]` |
 
-**3d. Dispatch `/pr-resolve` with the collected issue list.**
+**3d. Continue repair in the existing execution owner.** Inspect actual findings,
+repair owned code, run relevant tests and publish the new head under existing
+budgets and protected review/merge controls. Re-read CI and independent review
+for that new full head. Use `/pr-resolve` only within this accepted owner or its
+already accepted repair worker; never start an overlapping editor. Route foreign
+dependencies through their existing owner and retain the handoff receipt.
+Publication/access failure preserves prepared implementation and holds only its
+dependent boundary; it does not make all implementation blocked.
 
-**3e. Re-arm the ≥20-minute heartbeat** (not a foreground 5-minute wait). If exit condition met → done. Otherwise increment round.
+**3e. Retain the qualified event/wake owner.** Use only that host's actual cadence
+and the skill's bounded recovery rule. Do not re-arm an unchanged one-shot chain
+or increment repair rounds for waiting. A wait needs a dependency, unblock
+condition, next action and evidence. Finish independent implementation/testing/
+review while deployment or access holds only dependent work.
 
 **3f. Before round N+1:** carry the existing subscription forward — `subscribe_pr_activity` is idempotent and the stream does not need resetting. Do NOT unsubscribe+resubscribe: both calls are connector-approval-gated (native claude.ai dialog, unsilenceable by repo config) and the reset buys nothing.
 
-### Step 4: Escalate at Round 5
+### Step 4: Escalate the affected exhausted repair
 
-If still unresolved after round 5:
+Only after the existing failed-repair budget is exhausted:
 1. Do NOT unsubscribe — `unsubscribe_pr_activity` is connector-approval-gated (native claude.ai dialog, unsilenceable by repo config) and buys nothing here: simply stop acting on the stream; the subscription lapses with the session, and merged/closed PRs are auto-unsubscribed by the platform. Call it only if the operator explicitly asks to stop watching.
 2. Post summary comment classifying each remaining issue as:
    - (a) caused by this PR's changes
    - (b) pre-existing / unrelated
    - (c) environmental / flaky
-3. Notify the user
-4. Set checkpoint `status: "escalated"`
+3. Notify once for a specific required intervention; unchanged evidence stays quiet
+4. Record the specific exhausted commitment and next action in its existing
+   ledger. Do not mark unrelated parent work escalated or discard its custody.
 
 ### On Successful Merge
 
-Set checkpoint `status: "merged"`, notify user with merge URL.
+Record only this PR's scoped `merged` observation and verify the native merge
+head. Continue the original task's requested post-merge verification, cleanup,
+issue and acceptance commitments. Keep the parent checkpoint unfinished until
+its requested outcome is verified. Notify only material progress, a specific
+required intervention or verified completion.
 
 ## Merge Conflict Protocol
 
