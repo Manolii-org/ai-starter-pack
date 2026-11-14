@@ -280,6 +280,7 @@ _exclude:
   - tests/test_pack_plugin_parity.py
   # Same shape: asserts on plugin/ build artifacts that never render.
   - tests/test_watch_pr_subscribe_split.py
+  - tests/test_watch_pr_continuity.py
   # Build artifacts / caches
   - .ruff_cache
   - .ruff_cache/**

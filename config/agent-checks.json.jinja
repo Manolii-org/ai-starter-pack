@@ -1,6 +1,6 @@
 {% set canonical %}{% include "config/agent-checks.json" %}{% endset %}
 {% set owner = canonical | from_json %}
-{% set checks = owner.checks | rejectattr('id', 'in', ['release-manifest-contract', 'feature-controls', 'feature-controls-distribution', 'assessment-sast-failure-contract', 'registry-bootstrap-contract', 'installer-layout-contract', 'native-owner-recipe-contract']) | list %}
+{% set checks = owner.checks | rejectattr('id', 'in', ['release-manifest-contract', 'feature-controls', 'feature-controls-distribution', 'assessment-sast-failure-contract', 'registry-bootstrap-contract', 'installer-layout-contract', 'native-owner-recipe-contract', 'watch-continuity-contract']) | list %}
 {% set environments = owner.environments | rejectattr('id', 'in', ['release-contract-python', 'feature-controls-python']) | list %}
 {# These exact Pack-maintenance commands require optional QA/projection code.
    The Linux executor tools/commands never become portable Mac dependencies.
