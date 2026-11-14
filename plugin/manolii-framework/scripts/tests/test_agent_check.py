@@ -2604,8 +2604,18 @@ class AgentCheckTests(unittest.TestCase):
         self.assertNotEqual(first, runner.dotenv_identity(self.root, plan, b"k" * 32))
         secret = self.root / ".env.local"
         secret.write_text("X=1")
-        with mock.patch.object(Path, "read_bytes", side_effect=PermissionError("denied")):
+        real_open = Path.open
+        opened = []
+
+        def deny_secret(path, *args, **kwargs):
+            if path == secret:
+                opened.append(path)
+                raise PermissionError("denied")
+            return real_open(path, *args, **kwargs)
+
+        with mock.patch.object(Path, "open", autospec=True, side_effect=deny_secret):
             identity = runner.dotenv_identity(self.root, plan, b"k" * 32)
+        self.assertTrue(opened, "the unreadable fallback was not exercised")
         self.assertIn(".env.local", identity)
 
     def test_dotenv_directory_contents_are_bound(self):
@@ -2634,12 +2644,22 @@ class AgentCheckTests(unittest.TestCase):
         plan = {"checks": [], "environments": []}
         secret = self.root / ".env.local"
         secret.write_text("X=1")
-        with mock.patch.object(Path, "read_bytes", side_effect=PermissionError("denied")):
+        real_open = Path.open
+        opened = []
+
+        def deny_secret(path, *args, **kwargs):
+            if path == secret:
+                opened.append(path)
+                raise PermissionError("denied")
+            return real_open(path, *args, **kwargs)
+
+        with mock.patch.object(Path, "open", autospec=True, side_effect=deny_secret):
             first = runner.dotenv_identity(self.root, plan, b"k" * 32)
             replacement = self.root / ".env.local.new"
             replacement.write_text("X=2")
             os.replace(replacement, secret)
             self.assertNotEqual(first, runner.dotenv_identity(self.root, plan, b"k" * 32))
+        self.assertTrue(opened, "the unreadable fallback was not exercised")
 
     def test_tool_cache_inside_a_symlinked_dependency_keeps_the_identity(self):
         runner = load("agent-check")

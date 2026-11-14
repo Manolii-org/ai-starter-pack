@@ -129,8 +129,9 @@ The 2026-11-12 E3 policy migration sets the existing
 `assessment-sast-failure-contract` in `config/agent-checks.json` to **180 seconds
 per command**, replacing its 120-second limit. This applies only to the Pack's
 maintainer contract: the same 22 pytest modules and the existing pinned-reference
-check. Its check identity, selectors, complete test scope, declared environment
-and provider remain unchanged. The contract uses the already provisioned
+check. Its check identity, selectors, complete test scope and provider remain
+unchanged. The check newly declares the `release-contract-python` environment,
+which the base recipe did not declare. The contract uses the already provisioned
 `release-contract-python` interpreter; its Jinja2 prerequisite must not depend on
 ambient Python packages.
 
