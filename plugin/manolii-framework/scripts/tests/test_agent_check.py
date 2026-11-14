@@ -436,6 +436,61 @@ class AgentCheckTests(unittest.TestCase):
         self.git("checkout", "HEAD", "--", "src/value.py")
         return path
 
+    def test_text_auto_lf_checkout_avoids_per_path_filtered_git_processes(self):
+        runner = load("agent-check")
+        self.git("config", "core.autocrlf", "false")
+        self.git("config", "core.eol", "lf")
+        (self.root / ".gitattributes").write_text("* text=auto\n")
+        for index in range(80):
+            (self.root / "src" / f"value-{index}.txt").write_text("synthetic LF content\n")
+        self.git("add", ".")
+        self.git("commit", "-qm", "synthetic text auto source")
+        self.git("update-ref", "refs/remotes/origin/main", "HEAD")
+        with mock.patch.object(runner, "git", wraps=runner.git) as calls:
+            self.assertEqual(runner.plan_for(self.root, self.config)["paths"], [])
+        filtered = [c for c in calls.call_args_list if "cat-file" in c.args and "--filters" in c.args]
+        self.assertEqual(filtered, [])
+        self.git("config", "core.autocrlf", "true")
+        with mock.patch.object(runner, "git", wraps=runner.git) as calls:
+            plan = runner.plan_for(self.root, self.config)
+        self.assertTrue(any("cat-file" in c.args and "--filters" in c.args for c in calls.call_args_list))
+        self.assertIn("src/value.py", plan["paths"])
+
+    def test_dotenv_limits_refuse_payload_read_and_disable_pass_reuse(self):
+        runner = load("agent-check")
+        plan = {"checks": [], "environments": []}
+        large = self.root / ".env.large"
+        large.write_bytes(b"synthetic-over-limit")
+        with mock.patch.object(runner, "READY_IDENTITY_MAX_BYTES", 2), mock.patch.object(Path, "open", side_effect=AssertionError("oversized payload read")):
+            self.assertIsNone(runner.dotenv_identity(self.root, plan, b"k" * 32)[".env.large"])
+        self.change_source()
+        with mock.patch.object(runner, "READY_IDENTITY_MAX_BYTES", 2), mock.patch("sys.stdout", new_callable=io.StringIO):
+            self.assertEqual(runner.main(["--repo-root", str(self.root)]), 0)
+            self.assertFalse(self.receipt()["cache_reusable"])
+            self.assertEqual(runner.main(["--repo-root", str(self.root)]), 0)
+            self.assertFalse(self.receipt()["cached"])
+            self.assertFalse(self.receipt()["cache_reusable"])
+
+    def test_dotenv_entry_limit_stops_before_directory_payloads_and_shared_byte_limit(self):
+        runner = load("agent-check")
+        plan = {"checks": [], "environments": []}
+        directory = self.root / ".env.d"
+        directory.mkdir()
+        for name in ("one", "two", "three"):
+            (directory / name).write_text("synthetic")
+        with mock.patch.object(runner, "READY_IDENTITY_MAX_ENTRIES", 2), mock.patch.object(Path, "open", side_effect=AssertionError("unbounded tree payload read")):
+            self.assertIn(None, runner.dotenv_identity(self.root, plan, b"k" * 32).values())
+            self.assertIsNone(runner.dotenv_bytes(directory))
+        for path in directory.iterdir():
+            path.unlink()
+        directory.rmdir()
+        (self.root / ".env.a").write_text("12")
+        (self.root / ".env.b").write_text("34")
+        with mock.patch.object(runner, "READY_IDENTITY_MAX_BYTES", 3):
+            result = runner.dotenv_identity(self.root, plan, b"k" * 32)
+        self.assertIsInstance(result[".env.a"], str)
+        self.assertIsNone(result[".env.b"])
+
     def test_clean_crlf_checkout_does_not_select_unchanged_checks(self):
         path = self.clean_conversion_fixture("text eol=crlf")
         self.assertIn(b"\r\n", path.read_bytes())
@@ -692,6 +747,79 @@ class AgentCheckTests(unittest.TestCase):
         self.run_check(env=env, expected=1)
         self.run_check("--provision", env=env)
         self.assertEqual((self.root / "node_modules/setting").read_text(), "second")
+
+    def test_pack_sast_only_change_requires_its_declared_release_python(self):
+        installed = SCRIPTS.parent
+        if not (installed / "scripts/build-plugin.py").is_file():
+            self.skipTest("pack-maintainer SAST policy is not an installed consumer input")
+        self.config = json.loads((SCRIPTS.parent / "config/agent-checks.json").read_text())
+        self.assertTrue(any(item["id"] == "assessment-sast-failure-contract"
+                            for item in self.config["checks"]),
+                        "pack-maintainer recipe must declare assessment-sast-failure-contract")
+        for check in self.config["checks"]:
+            for source in check.get("ci_sources", []):
+                path = self.root / source["path"]
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(path.read_text() + source["contains"] + "\n" if path.exists()
+                                else source["contains"] + "\n")
+        changed = self.root / "tests/test_routine_ci_repair_policy.py"
+        changed.parent.mkdir()
+        changed.write_text("# synthetic source-selection fixture\n")
+        self.save_config()
+        self.git("add", ".")
+        self.git("commit", "-qm", "fixture production recipe")
+        self.git("update-ref", "refs/remotes/origin/main", "HEAD")
+        changed.write_text("# changed synthetic source-selection fixture\n")
+        plan = json.loads(self.run_check("--plan").stdout)
+        self.assertEqual(plan["paths"], ["tests/test_routine_ci_repair_policy.py"])
+        self.assertEqual([item["id"] for item in plan["checks"]],
+                         ["assessment-sast-failure-contract"])
+        self.assertEqual([item["id"] for item in plan["environments"]],
+                         ["release-contract-python"])
+        selected = plan["checks"][0]
+        self.assertEqual({command[0] for command in selected["commands"]},
+                         {".ai/agent-checks/release-venv/bin/python"})
+        self.assertEqual(selected["timeout_seconds"], 180)
+        # An ambient interpreter cannot satisfy an unprovisioned declared env.
+        blocked = self.run_check(expected=1)
+        self.assertNotIn("AGENT-CHECK assessment-sast-failure-contract:", blocked.stdout)
+        self.assertTrue(any(item["id"] == "release-contract-python"
+                            and item["status"] == "unavailable"
+                            for item in self.receipt()["results"]))
+
+    def test_pack_sast_budget_preserves_execution_context_and_failure(self):
+        installed = SCRIPTS.parent
+        if not (installed / "scripts/build-plugin.py").is_file():
+            self.skipTest("pack-maintainer SAST policy is not an installed consumer input")
+        config = json.loads((SCRIPTS.parent / "config/agent-checks.json").read_text())
+        self.assertTrue(any(item["id"] == "assessment-sast-failure-contract"
+                            for item in config["checks"]),
+                        "pack-maintainer recipe must declare assessment-sast-failure-contract")
+        check = next(item for item in config["checks"]
+                     if item["id"] == "assessment-sast-failure-contract")
+        runner = load("agent-check")
+        control = {**check, "cwd": "src", "env": {"AGENT_CHECK_CONTROL": "retained"},
+                   "commands": [[sys.executable, "-c",
+                       "import os; assert os.environ['AGENT_CHECK_CONTROL']=='retained'; "
+                       "assert os.path.basename(os.getcwd())=='src'; raise SystemExit(7)"],
+                       [sys.executable, "-c", "raise AssertionError('later command ran')"]]}
+        calls, commands = [], []
+        native_run = runner.subprocess.run
+
+        def observe(*args, **kwargs):
+            if args[0] in control["commands"]:
+                commands.append(args[0])
+                calls.append(kwargs)
+            return native_run(*args, **kwargs)
+
+        with mock.patch.object(runner.subprocess, "run", side_effect=observe):
+            result = runner.execute(self.root, control, runner.git_environment())
+        self.assertEqual(result["id"], check["id"])
+        self.assertEqual((result["status"], result["reason"]), ("failed", "exit=7"))
+        self.assertEqual(commands, [control["commands"][0]])
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["timeout"], 180)
+        self.assertEqual(calls[0]["cwd"], self.root / "src")
 
     def test_later_setup_cannot_remove_an_earlier_readiness_postcondition(self):
         self.config["environments"] = [
@@ -2476,8 +2604,18 @@ class AgentCheckTests(unittest.TestCase):
         self.assertNotEqual(first, runner.dotenv_identity(self.root, plan, b"k" * 32))
         secret = self.root / ".env.local"
         secret.write_text("X=1")
-        with mock.patch.object(Path, "read_bytes", side_effect=PermissionError("denied")):
+        real_open = Path.open
+        opened = []
+
+        def deny_secret(path, *args, **kwargs):
+            if path == secret:
+                opened.append(path)
+                raise PermissionError("denied")
+            return real_open(path, *args, **kwargs)
+
+        with mock.patch.object(Path, "open", autospec=True, side_effect=deny_secret):
             identity = runner.dotenv_identity(self.root, plan, b"k" * 32)
+        self.assertTrue(opened, "the unreadable fallback was not exercised")
         self.assertIn(".env.local", identity)
 
     def test_dotenv_directory_contents_are_bound(self):
@@ -2506,12 +2644,22 @@ class AgentCheckTests(unittest.TestCase):
         plan = {"checks": [], "environments": []}
         secret = self.root / ".env.local"
         secret.write_text("X=1")
-        with mock.patch.object(Path, "read_bytes", side_effect=PermissionError("denied")):
+        real_open = Path.open
+        opened = []
+
+        def deny_secret(path, *args, **kwargs):
+            if path == secret:
+                opened.append(path)
+                raise PermissionError("denied")
+            return real_open(path, *args, **kwargs)
+
+        with mock.patch.object(Path, "open", autospec=True, side_effect=deny_secret):
             first = runner.dotenv_identity(self.root, plan, b"k" * 32)
             replacement = self.root / ".env.local.new"
             replacement.write_text("X=2")
             os.replace(replacement, secret)
             self.assertNotEqual(first, runner.dotenv_identity(self.root, plan, b"k" * 32))
+        self.assertTrue(opened, "the unreadable fallback was not exercised")
 
     def test_tool_cache_inside_a_symlinked_dependency_keeps_the_identity(self):
         runner = load("agent-check")
@@ -2551,6 +2699,25 @@ class AgentCheckTests(unittest.TestCase):
         self.assertFalse(self.receipt()["cached"])
 
 class SurfaceTests(unittest.TestCase):
+    def test_installer_rejects_malformed_checks_and_paths_without_writes_or_traceback(self):
+        cases = [None, {}, "checks", [None], ["check"], [{"paths": None}],
+                 [{"paths": "src/*"}], [{"paths": {}}], [{"paths": [None]}]]
+        for checks in cases:
+            with self.subTest(checks=checks), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                (root / "config").mkdir()
+                recipe = root / "config/agent-checks.json"
+                recipe.write_text(json.dumps({"schema_version": 1, "base": "origin/main", "checks": checks}))
+                before = recipe.read_bytes()
+                result = subprocess.run([sys.executable, str(SCRIPTS / "install-agent-validation.py"),
+                    "--repo-root", str(root), "--check"], capture_output=True, text=True, timeout=30,
+                    env=load("agent-check").git_environment())
+                self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+                self.assertIn("AGENT-VALIDATION-INSTALL-BLOCKED", result.stderr)
+                self.assertNotIn("Traceback", result.stderr)
+                self.assertEqual(recipe.read_bytes(), before)
+                self.assertFalse((root / "scripts").exists())
+
     def test_pack_generated_runners_and_contracts_select_existing_validation(self):
         installed = SCRIPTS.parent
         if not (installed / "scripts/build-plugin.py").is_file():
