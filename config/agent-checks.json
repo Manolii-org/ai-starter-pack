@@ -255,7 +255,7 @@
           "-q",
           "tests/test_copier_render.py",
           "-k",
-          "test_rendered_readme_counts_match_rendered_tree or test_release_capability_distribution_boundary or test_agent_validation_base_uses_owner_ref"
+          "test_rendered_readme_counts_match_rendered_tree or test_release_capability_distribution_boundary or test_agent_validation_base_uses_owner_ref or test_watch_continuity_maintainer_fixture_never_ships"
         ]
       ],
       "timeout_seconds": 180,
@@ -608,6 +608,41 @@
         {
           "path": ".github/workflows/plugin-eval-gate.yml",
           "contains": "python3 -m pytest scripts/tests/test_agent_validation_layout.py -q"
+        }
+      ]
+    },
+    {
+      "id": "watch-continuity-contract",
+      "environment": "release-contract-python",
+      "paths": [
+        ".claude/commands/watch-pr.md.jinja",
+        "plugin/manolii-framework/commands/watch-pr.md",
+        "registry/platform/framework/commands/watch-pr.md",
+        "tests/test_watch_pr_continuity.py",
+        "tests/test_watch_pr_subscribe_split.py",
+        "config/agent-checks.json",
+        "scripts/pr-watch-observe.py",
+        "plugin/manolii-framework/scripts/pr-watch-observe.py",
+        "registry/platform/framework/scripts/pr-watch-observe.py"
+      ],
+      "tools": [
+        "uv"
+      ],
+      "commands": [
+        [
+          ".ai/agent-checks/release-venv/bin/python",
+          "-m",
+          "pytest",
+          "-q",
+          "tests/test_watch_pr_continuity.py",
+          "tests/test_watch_pr_subscribe_split.py"
+        ]
+      ],
+      "timeout_seconds": 120,
+      "ci_sources": [
+        {
+          "path": ".github/workflows/plugin-eval-gate.yml",
+          "contains": "python3 -m pytest tests/ -q"
         }
       ]
     }
