@@ -223,6 +223,15 @@
         "registry/platform/framework/schemas/release-source-policy.v1.schema.json",
         "scripts/tests/test_release_source_policy.py",
         "scripts/tests/fixtures/release-manifest.c435.py",
+        "scripts/lib/delivery_component.py",
+        "scripts/build-plugin.py",
+        "scripts/build-registry.py",
+        "scripts/bootstrap-mirror.py",
+        "tests/test_delivery_component_distribution.py",
+        "plugin/manolii-framework/.github/actions/validate-release-manifest/**",
+        "registry/platform/framework/.github/actions/validate-release-manifest/**",
+        "plugin/manolii-framework/scripts/lib/delivery_component.py",
+        "registry/platform/framework/scripts/lib/delivery_component.py",
         ".github/workflows/release-tag.yml",
         "tests/test_release_tag_namespaces.py",
         "tests/test_hydrate_assessment.py",
@@ -269,6 +278,14 @@
           "tests/test_copier_render.py",
           "-k",
           "test_rendered_readme_counts_match_rendered_tree or test_release_capability_distribution_boundary or test_agent_validation_base_uses_owner_ref or test_watch_continuity_maintainer_fixture_never_ships"
+        ],
+        [
+          ".ai/agent-checks/release-venv/bin/python",
+          "-B",
+          "-m",
+          "pytest",
+          "-q",
+          "tests/test_delivery_component_distribution.py"
         ],
         [
           ".ai/agent-checks/release-venv/bin/python",
@@ -492,7 +509,12 @@
         "tests/test_native_guidance.py",
         ".claude/skills/autonomy-follow-through/**",
         "plugin/manolii-framework/scripts/lib/native_guidance.py",
-        "registry/platform/framework/scripts/lib/native_guidance.py"
+        "registry/platform/framework/scripts/lib/native_guidance.py",
+        "scripts/bootstrap-mirror.py",
+        "scripts/build-plugin.py",
+        "scripts/lib/delivery_component.py",
+        "tests/test_protected_review.py",
+        ".github/workflows/registry-lint.yml"
       ],
       "tools": [
         "uv"
@@ -502,6 +524,7 @@
           ".ai/agent-checks/release-venv/bin/python",
           "-m",
           "pytest",
+          "tests/test_protected_review.py",
           "tests/test_registry.py",
           "tests/test_native_guidance.py",
           "-q"
@@ -511,7 +534,7 @@
       "ci_sources": [
         {
           "path": ".github/workflows/registry-lint.yml",
-          "contains": "python3 -m pytest tests/test_registry.py tests/test_native_guidance.py -q"
+          "contains": "python3 -m pytest tests/test_protected_review.py tests/test_registry.py tests/test_native_guidance.py -q"
         }
       ]
     },

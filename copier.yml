@@ -329,6 +329,7 @@ _exclude:
   - tests/test_registry.py
   - tests/_registry_cases_*.py
   - tests/test_native_guidance.py
+  - tests/test_delivery_component_distribution.py
   - tests/test_session_terminal_callers.py
   - scripts/tests/test_agent_validation_layout.py
   # Release capability consumers use the portable action and their own product
