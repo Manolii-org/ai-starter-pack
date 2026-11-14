@@ -352,11 +352,14 @@ _exclude:
   # workflow-security-reusable.yml and generate their own baseline.
   - .github/workflows/workflow-security.yml
   # Pack-only source scan of distributed skills (scan once at the source);
-  # consumers fetch the gate at a pinned pack_ref when they need it.
+  # consumers fetch the gate at a pinned pack_ref when they need it. The
+  # matching test asserts on the excluded workflow and gate script, so a
+  # rendered consumer would fail at collection without excluding it too.
   - .github/workflows/skill-scan.yml
   - scripts/skill-scan-gate.py
   - config/zizmor-baseline.json
   - tests/test_workflow_security.py
+  - tests/test_security_assurance_reusables.py
   # Template-internal master content — present only in the master's
   # distribution copy (templates/ai-starter-pack/), declared TEMPLATE_ONLY in
   # scripts/check-pack-mirror-drift.py. Excluded so a render of the template
