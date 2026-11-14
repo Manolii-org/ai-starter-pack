@@ -2010,10 +2010,6 @@ class ScopeControlCompatibility(unittest.TestCase):
             self.assertFalse(self.runner.source_scope_declared(self.root))
         self.assertEqual(self.runner._SOURCE_SCOPE_UNDECLARED_TREES, set())
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class NestedScopeAndCommonDirectory(unittest.TestCase):
     """Review regressions: nested owners in ready trees and finalise commondir."""
 
@@ -2093,3 +2089,58 @@ class NestedScopeAndCommonDirectory(unittest.TestCase):
             with self.assertRaises(self.runner.SourceScopeError) as held:
                 self.runner.require_source_scope(other)
         self.assertIn("Git common-directory routing requires a qualified adapter", str(held.exception))
+
+    def nested_payload(self, owner):
+        (owner / "opaque.bin").write_bytes(b"synthetic nested payload\n")
+
+    def test_committed_only_nested_declaration_holds_before_payload_read(self):
+        owner = self.root / "deps/owned"
+        self.scoped_owner(owner)
+        for args in (("add", "."), ("-c", "commit.gpgsign=false", "commit", "-qm", "Declare")):
+            subprocess.run(["git", *args], cwd=owner, check=True, capture_output=True,
+                           env=self.runner.git_environment())
+        (owner / self.runner.SOURCE_SCOPE_POLICY).unlink()
+        with self.guarded_open("opaque.bin"):
+            with self.assertRaises(self.runner.SourceScopeError):
+                self.runner.ready_identity(self.root, {"ready_paths": ["deps"]})
+
+    def test_unmodelled_nested_git_metadata_is_unknown_not_held_and_unread(self):
+        # Submodule-style gitfile pointer and a shared clone's alternates.
+        modules = self.root / ".git/modules/vendor/dep"
+        modules.mkdir(parents=True)
+        pointer = self.root / "vendor/dep"
+        pointer.mkdir(parents=True)
+        (pointer / ".git").write_text("gitdir: ../../.git/modules/vendor/dep\n")
+        self.nested_payload(pointer)
+        shared = self.root / "deps/pkg"
+        self.init_source(self.other_root() / "origin")
+        subprocess.run(["git", "clone", "-q", "--shared", str(self.other_root() / "origin"), str(shared)],
+                       check=False, capture_output=True, env=self.runner.git_environment())
+        if not (shared / ".git").exists():
+            self.init_source(shared)
+            (shared / ".git/objects/info").mkdir(parents=True, exist_ok=True)
+            (shared / ".git/objects/info/alternates").write_text(str(self.other_root()) + "\n")
+        self.nested_payload(shared)
+        for ready in ("vendor", "deps"):
+            with self.subTest(ready=ready), self.guarded_open("opaque.bin"):
+                self.assertIsNone(self.runner.ready_identity(self.root, {"ready_paths": [ready]}))
+
+    def test_link_heavy_trees_check_each_directory_once_without_per_link_git(self):
+        subprocess.run(["git", "pack-refs", "--all"], cwd=self.root, check=True, capture_output=True,
+                       env=self.runner.git_environment())
+        store = self.root / "deps/.store"
+        for index in range(200):
+            (store / f"pkg{index}").mkdir(parents=True)
+            (store / f"pkg{index}/index.js").write_text("synthetic\n")
+            (self.root / f"deps/pkg{index}").symlink_to(Path(f".store/pkg{index}"), target_is_directory=True)
+        original, calls = subprocess.run, []
+        def counting(command, *args, **kwargs):
+            calls.append(command)
+            return original(command, *args, **kwargs)
+        with patch.object(self.runner.subprocess, "run", side_effect=counting):
+            self.assertIsNotNone(self.runner.ready_identity(self.root, {"ready_paths": ["deps"]}))
+        self.assertLess(len(calls), 20)
+
+
+if __name__ == "__main__":
+    unittest.main()

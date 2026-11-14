@@ -1011,6 +1011,10 @@ READY_IDENTITY_MAX_BYTES = 2_000_000_000
 READY_IDENTITY_CONTRACT = "agent-ready-content/v3"
 
 
+class _NestedScopeUnknown(RuntimeError):
+    """A nested owner's metadata is unmodelled: read nothing beneath it."""
+
+
 def ready_identity(root: Path, item: dict, *, key: bytes | None = None) -> str | None:
     """Bind owned dependency bytes, or return None to require fresh execution.
 
@@ -1075,23 +1079,36 @@ def ready_identity(root: Path, item: dict, *, key: bytes | None = None) -> str |
         finally:
             os.close(descriptor)
 
-    scope_checked: set[Path] = set()
+    # The repository root and its ancestors were checked above. Each directory
+    # below it is checked once per walk, outermost first, so a nested owner is
+    # seen before any entry or byte beneath it is read.
+    clear_directories: set[Path] = {root, root.resolve()}
 
-    def hold_nested_scope(directory: Path) -> None:
-        # A nested checkout inside a declared tree owns its own scope. Check
-        # its markers before listing entries or opening any payload under it.
-        try:
-            real = directory.resolve(strict=True)
-            if real in scope_checked:
-                return
-            if (_source_scope_exists(directory / SOURCE_SCOPE_POLICY)
-                    or _source_scope_exists(directory / ".git")):
-                require_source_scope(directory)
-            scope_checked.add(real)
-        except SourceScopeError:
-            raise
-        except (OSError, ValueError, TypeError, RuntimeError) as error:
-            raise _source_scope_failure(error) from None
+    def require_clear(directory: Path) -> None:
+        if not Path(os.path.abspath(directory)).is_relative_to(root) and not directory.is_relative_to(root.resolve()):
+            return  # open_owned refuses targets outside the owner root.
+        chain = []
+        current = directory
+        while current not in clear_directories and current != current.parent:
+            chain.append(current)
+            current = current.parent
+        for folder in reversed(chain):
+            try:
+                declared = _source_scope_exists(folder / SOURCE_SCOPE_POLICY)
+                nested = not declared and _source_scope_exists(folder / ".git")
+            except ValueError:
+                raise _NestedScopeUnknown() from None
+            if nested:
+                # Only a positive declaration holds. Unmodelled nested metadata
+                # (submodule pointers, alternates) stops this walk unread: the
+                # identity is unknown, so no cache is used and checks run fresh.
+                try:
+                    declared = source_scope_declared(folder)
+                except SourceScopeError:
+                    raise _NestedScopeUnknown() from None
+            if declared:
+                raise SourceScopeError("source-scope requires a reviewed isolated projection; full validation held")
+            clear_directories.add(folder)
 
     def add(relative: str, path: Path, details: os.stat_result) -> bool:
         nonlocal remaining_bytes
@@ -1101,7 +1118,8 @@ def ready_identity(root: Path, item: dict, *, key: bytes | None = None) -> str |
         link = os.readlink(path) if stat.S_ISLNK(details.st_mode) else None
         if link is not None:
             # A link target's owners need not be walked ancestors of this tree.
-            require_content_path_scope(path)
+            target_path = path.resolve(strict=True)
+            require_clear(target_path if target_path.is_dir() else target_path.parent)
         descriptor, resolved = open_owned(path)
         try:
             target = os.fstat(descriptor)
@@ -1140,7 +1158,7 @@ def ready_identity(root: Path, item: dict, *, key: bytes | None = None) -> str |
             path = ready_path(root, name)
             # Owners between the repository root and this declared tree hold
             # before any of its bytes are read.
-            require_content_path_scope(path)
+            require_clear(Path(os.path.abspath(path)).parent)
             try:
                 details = path.lstat()
             except FileNotFoundError:
@@ -1180,7 +1198,7 @@ def ready_identity(root: Path, item: dict, *, key: bytes | None = None) -> str |
                     os.close(descriptor)
                     continue
                 visited.add(real)
-                hold_nested_scope(directory)
+                require_clear(real)
                 entries = names(descriptor, count=True)
                 if state(os.fstat(descriptor)) != before_state:
                     return None
@@ -1202,7 +1220,7 @@ def ready_identity(root: Path, item: dict, *, key: bytes | None = None) -> str |
             return None
         return digest.hexdigest()
     except SourceScopeError:
-        raise  # A scope hold is not an unknown identity that permits execution.
+        raise  # A declared scope hold is not an unknown identity.
     except (OSError, RuntimeError, ValueError):
         # Unknown identity is not missing readiness and is never a cache key.
         return None
