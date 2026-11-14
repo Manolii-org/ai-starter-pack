@@ -53,10 +53,24 @@ jobs:
         run: |
           set -euo pipefail
           status=0
-          for dir in plugin/manolii-framework/skills .claude/skills; do
+          for dir in plugin/manolii-framework/skills .claude/skills plugin/manolii-framework/agents .claude/agents; do
             [ -d "$dir" ] || continue
             out="$RUNNER_TEMP/skill-scan-$(echo "$dir" | tr '/.' '__').json"
+            # SkillSpector writes the report, then exits 1 when the risk score
+            # exceeds its threshold and 2 when the scan is incomplete. Evaluate
+            # the report on 0/1; treat 2+ or a missing report as a scanner error.
+            set +e
             skillspector scan "$dir" --recursive --no-llm --format json --output "$out" >/dev/null
-            python3 scripts/skill-scan-gate.py "$out" --fail-on HIGH || status=$?
+            rc=$?
+            set -e
+            if [ "$rc" -ge 2 ] || [ ! -s "$out" ]; then
+              echo "::error::SkillSpector scan of $dir failed (exit $rc)"
+              status=2
+              continue
+            fi
+            echo "### SkillSpector: \`$dir\`" >> "$GITHUB_STEP_SUMMARY"
+            if ! python3 scripts/skill-scan-gate.py "$out" --fail-on HIGH | tee -a "$GITHUB_STEP_SUMMARY"; then
+              [ "$status" -eq 2 ] || status=1
+            fi
           done
           exit "$status"

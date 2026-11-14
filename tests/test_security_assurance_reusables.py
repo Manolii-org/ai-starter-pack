@@ -138,3 +138,24 @@ def test_pre_commit_secret_scan_is_optional_and_local():
     assert "command -v gitleaks" in hook
     assert "--staged" in hook
     assert "SKIP_GITLEAKS" in hook
+
+
+def test_coderabbit_round1_regressions():
+    """CodeRabbit review on #341: five verified findings."""
+    secret = (WF / "secret-scan-reusable.yml").read_text(encoding="utf-8")
+    # TruffleHog must fail on recorded scan errors, not only findings.
+    assert "--fail-on-scan-errors" in secret
+    # OSV runs before the inert decision and is consulted by it.
+    jobs = _load("secret-scan-reusable.yml")["jobs"]["npm-audit"]["steps"]
+    names = [s.get("name", "") for s in jobs]
+    osv_i = next(i for i, n in enumerate(names) if n.startswith("OSV-Scanner"))
+    detect_i = names.index("Detect npm lockfile")
+    assert osv_i < detect_i
+    assert "OSV_AUDITED" in jobs[detect_i]["env"]
+    assert 'echo "audited=true"' in jobs[osv_i]["run"]
+    # Skill scan covers agents and evaluates the report on SkillSpector exit 1.
+    skill = (WF / "skill-scan.yml").read_text(encoding="utf-8")
+    assert ".claude/agents" in skill and "plugin/manolii-framework/agents" in skill
+    assert "set +e" in skill and '"$rc" -ge 2' in skill
+    # Pack-only tests are not rendered into consumers.
+    assert "- tests/test_security_assurance_reusables.py" in (ROOT / "copier.yml").read_text(encoding="utf-8")
