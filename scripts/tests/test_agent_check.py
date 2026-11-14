@@ -2628,6 +2628,19 @@ class AgentCheckTests(unittest.TestCase):
         value.write_text("MODE=bad!")  # same names: only the contents changed
         self.assertNotEqual(first, runner.dotenv_identity(self.root, plan, b"k" * 32))
 
+    def test_directory_link_inside_a_dotenv_directory_is_unknown(self):
+        # A nested link to a directory cannot be bound by its link text alone:
+        # a change under the target must never permit cached-PASS reuse.
+        runner = load("agent-check")
+        plan = {"checks": [], "environments": []}
+        shared = self.root / "shared-env"
+        shared.mkdir()
+        (shared / "app").write_text("MODE=good")
+        (self.root / ".env.d").mkdir()
+        (self.root / ".env.d/linked").symlink_to(shared, target_is_directory=True)
+        identity = runner.dotenv_identity(self.root, plan, b"k" * 32)
+        self.assertIn(None, identity.values())
+
     def test_link_inside_a_dotenv_directory_binds_its_target_contents(self):
         runner = load("agent-check")
         plan = {"checks": [], "environments": []}
