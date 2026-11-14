@@ -49,18 +49,28 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     needs: changed-files
+    # returntocorp/semgrep-action was archived on 2024-04-09. Semgrep's own
+    # image, pinned by digest, is the maintained path (needs a Docker-capable
+    # runner). Keep in step with static-review-reusable.yml.
+    container:
+      image: semgrep/semgrep:1.184.0@sha256:cc1b68266f267878b39739373ea9985b9a78e5d64497dd875c8de100b22695ed
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
+          persist-credentials: false
           fetch-depth: 0
-      - name: Run Semgrep on changed files
-        uses: returntocorp/semgrep-action@713efdd345f3035192eaa63f56867b88e63e4e5d # v1
-        with:
-          config: >-
-            p/default
-            p/secrets
-            p/owasp-top-ten
-          # To add custom rules: create .semgrep/ directory with *.yaml rule files
+      - name: Run Semgrep (report only findings the PR introduces)
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        shell: sh
+        run: |
+          set -eu
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          set -- scan --metrics=off --error --disable-version-check \
+            --config p/default --config p/secrets --config p/owasp-top-ten
+          # To add custom rules, add: --config .semgrep/rules
+          if [ -n "${PR_BASE_SHA:-}" ]; then set -- "$@" --baseline-commit "$PR_BASE_SHA"; fi
+          semgrep "$@"
 
   bandit:
     name: Bandit (Python)

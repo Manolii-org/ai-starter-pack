@@ -20,6 +20,26 @@ on:
         type: string
         default: '3.14'
         description: Python version.
+      semgrep_runs_on:
+        type: string
+        default: ''
+        description: >-
+          Runner label for the Semgrep job. Empty follows runs_on. The job runs
+          in Semgrep's own container image, so it needs a Docker-capable runner
+          (ubuntu-latest or self-hosted with Docker; ubuntu-slim cannot run job
+          containers).
+      semgrep_config:
+        type: string
+        default: 'p/default p/secrets p/owasp-top-ten'
+        description: >-
+          Space-separated Semgrep configs (registry rulesets or repo paths).
+          Registry rules are fetched at run time and never vendored.
+      semgrep_local_rules:
+        type: string
+        default: ''
+        description: >-
+          Optional repo path of extra rule files (for example .semgrep/rules).
+          Empty adds nothing, which matches the v1 behaviour.
 
 permissions:
   contents: read
@@ -52,22 +72,48 @@ jobs:
 
   semgrep:
     name: Semgrep
-    runs-on: ${{ inputs.runs_on }}
+    runs-on: ${{ inputs.semgrep_runs_on || inputs.runs_on }}
     timeout-minutes: 15
     needs: changed-files
+    # returntocorp/semgrep-action was archived on 2024-04-09. Semgrep's own
+    # image, pinned by digest, is the maintained path. Bump tag and digest
+    # together (Renovate docker manager).
+    container:
+      image: semgrep/semgrep:1.184.0@sha256:cc1b68266f267878b39739373ea9985b9a78e5d64497dd875c8de100b22695ed
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           persist-credentials: false
           fetch-depth: 0
-      - name: Run Semgrep on changed files
-        uses: returntocorp/semgrep-action@713efdd345f3035192eaa63f56867b88e63e4e5d # v1
-        with:
-          config: >-
-            p/default
-            p/secrets
-            p/owasp-top-ten
-          # To add custom rules: create .semgrep/ directory with *.yaml rule files
+      - name: Run Semgrep (PR and merge queue report only findings the change introduces)
+        env:
+          SEMGREP_CONFIG: ${{ inputs.semgrep_config }}
+          SEMGREP_LOCAL_RULES: ${{ inputs.semgrep_local_rules }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          MQ_BASE_SHA: ${{ github.event.merge_group.base_sha }}
+        shell: sh
+        run: |
+          # POSIX sh: the Semgrep image is not guaranteed to ship bash.
+          set -eu
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          set -- scan --metrics=off --error --disable-version-check
+          for c in $SEMGREP_CONFIG; do set -- "$@" --config "$c"; done
+          if [ -n "$SEMGREP_LOCAL_RULES" ]; then
+            if [ -e "$SEMGREP_LOCAL_RULES" ]; then
+              set -- "$@" --config "$SEMGREP_LOCAL_RULES"
+            else
+              echo "::warning::semgrep_local_rules=$SEMGREP_LOCAL_RULES does not exist; ignoring"
+            fi
+          fi
+          base="${PR_BASE_SHA:-${MQ_BASE_SHA:-}}"
+          if [ -n "$base" ]; then
+            echo "Reporting findings introduced since ${base}"
+            set -- "$@" --baseline-commit "$base"
+          else
+            echo "No base commit for event; scanning the whole checkout"
+          fi
+          semgrep "$@"
+
 
   bandit:
     name: Bandit (Python)
