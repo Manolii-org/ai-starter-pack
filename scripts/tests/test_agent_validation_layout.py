@@ -1793,7 +1793,7 @@ def test_installer_layout_suite_has_automatic_full_owner_recipe_and_native_cover
     assert {"scripts/install-agent-validation.py", "scripts/tests/test_agent_validation_layout.py",
             "docs/agent-validation-layout.md", "config/agent-checks.json"} <= set(check["paths"])
     workflow = yaml.safe_load((ROOT / ".github/workflows/plugin-eval-gate.yml").read_text())
-    assert workflow["jobs"]["eval-gate"]["timeout-minutes"] == 15
+    assert workflow["jobs"]["eval-gate"]["timeout-minutes"] == 25
     command = "python3 -m pytest scripts/tests/test_agent_validation_layout.py -q"
     assert any(command in step.get("run", "").splitlines()
                for step in workflow["jobs"]["eval-gate"]["steps"])
