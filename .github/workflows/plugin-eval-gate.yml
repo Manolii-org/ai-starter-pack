@@ -3,7 +3,7 @@ name: Plugin Eval Gate
 # Gates the generated Claude Code plugin: it must build from the canonical
 # .claude/ source, pass structural verification, prove every hook FIRES, and the
 # committed plugin/ artifact must match a fresh build (no stale checked-in copy).
-# Pure Python + copier — no external CLI or secrets required.
+# Python + Copier and an explicit public Linux isolation toolchain; no secrets.
 
 on:
   push:
@@ -48,6 +48,66 @@ jobs:
 
       - name: Install build deps
         run: pip install --quiet copier jinja2
+
+      - name: Install public Linux source-executor prerequisites
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! sudo -n apt-get update; then
+            echo "INCOMPLETE: public Linux package metadata unavailable" >&2
+            exit 2
+          fi
+          # Resolve and pin the actual signed repository candidates on this
+          # runner; do not invent a version for the moving ubuntu-latest image.
+          # Consume all metadata so an early consumer exit cannot SIGPIPE the
+          # producer under pipefail; emit only the first Candidate value.
+          if ! bubblewrap_version="$(apt-cache policy bubblewrap | awk '/Candidate:/ && !seen {print $2; seen=1}')" || \
+              ! build_version="$(apt-cache policy build-essential | awk '/Candidate:/ && !seen {print $2; seen=1}')"; then
+            echo "INCOMPLETE: public Linux prerequisite metadata query failed" >&2
+            exit 2
+          fi
+          for version in "$bubblewrap_version" "$build_version"; do
+            if [ -z "$version" ] || [ "$version" = '(none)' ]; then
+              echo "INCOMPLETE: public Linux prerequisite candidate unavailable" >&2
+              exit 2
+            fi
+          done
+          if ! sudo -n apt-get install --no-install-recommends -y \
+              "bubblewrap=$bubblewrap_version" "build-essential=$build_version"; then
+            echo "INCOMPLETE: public Linux prerequisite installation failed" >&2
+            exit 2
+          fi
+          dpkg-query --show bubblewrap build-essential
+
+      - name: Verify Linux source-executor capability
+        shell: bash
+        run: |
+          set -euo pipefail
+          for tool in /usr/bin/bwrap /usr/bin/cc; do
+            if [ ! -x "$tool" ] || ! "$tool" --version; then
+              echo "INCOMPLETE: Linux source-executor tool unavailable" >&2
+              exit 2
+            fi
+          done
+          # Only public system ELF inputs are used for this prerequisite probe.
+          # The actual contracts below separately seal their pinned source,
+          # adapter and runtime bytes; this probe is not a closure receipt.
+          if [ "$(uname -m)" != x86_64 ] || ! timeout 30s /usr/bin/bwrap \
+              --unshare-all --unshare-user --disable-userns --die-with-parent \
+              --new-session --cap-drop ALL --clearenv \
+              --ro-bind /usr/bin/true /bin/true \
+              --ro-bind /lib/x86_64-linux-gnu/libc.so.6 /lib/x86_64-linux-gnu/libc.so.6 \
+              --ro-bind /lib64/ld-linux-x86-64.so.2 /lib64/ld-linux-x86-64.so.2 \
+              -- /bin/true; then
+            echo "INCOMPLETE: Linux namespace/runtime capability unavailable or denied" >&2
+            exit 2
+          fi
+
+      - name: Observe public adapter subjects (not qualification)
+        run: python3 scripts/source-adapter-probe.py
+
+      - name: Linux source-executor contracts
+        run: python3 -m unittest discover -s scripts/tests -p test_source_executor.py -v
 
       - name: Build manolii-framework — verify() + hook-firing smoke test
         # build-plugin.py exits non-zero on: surviving Jinja, missing plugin.json,

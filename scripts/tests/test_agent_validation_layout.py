@@ -10,6 +10,7 @@ import re
 import shutil
 import subprocess
 import sys
+import types
 
 import pytest
 import yaml
@@ -188,6 +189,24 @@ def test_alias_git_identity_declares_nonsecurity_sha1(producers, consumer, monke
     for value in record["layout"]["aliases"].values():
         assert value["blob"] == expected
         assert value["sha256"] == hashlib.sha256(raw).hexdigest()
+
+
+@pytest.mark.parametrize("kind", ["source", "plugin", "registry"])
+def test_absolute_layout_under_ambient_alias_uses_selected_owner(producers, consumer, tmp_path, kind):
+    """The wrapper's selected lexical inputs reach the refactored plan helper."""
+    alias = tmp_path / "ambient-parent"
+    alias.symlink_to(consumer.parent, target_is_directory=True)
+    requested = alias / consumer.name
+    layout = requested / LAYOUT_NAME
+    module = imported(producers[kind][0])
+    before = snapshot(consumer)
+    assert module.main(["--repo-root", str(requested), "--layout", str(layout), "--dry-run"]) == 0
+    assert snapshot(consumer) == before
+    assert module.main(["--repo-root", str(requested), "--layout", str(layout)]) == 0
+    receipt = json.loads((consumer / RECEIPT).read_text())
+    assert set(receipt["files"]) == set(NAMES)
+    assert (consumer / ".github/skills/agent-validation/SKILL.md").is_file()
+    assert alias.is_symlink()
 
 
 @pytest.mark.parametrize("kind", ["source", "plugin", "registry"])
@@ -1337,7 +1356,7 @@ def test_failed_privacy_change_reports_actual_held_mode(
 
 
 @pytest.mark.parametrize("kind", ["ancestor", "leaf"])
-def test_missing_link_handle_flags_preserve_legacy_recipe_cli(producers, consumer, tmp_path, kind):
+def test_writer_missing_link_handle_flags_preserve_legacy_recipe_cli(producers, consumer, tmp_path, kind):
     for rel in (".claude/skills", ".cursor/skills"):
         (consumer / rel).unlink()
         (consumer / rel).mkdir()
@@ -1349,10 +1368,19 @@ def test_missing_link_handle_flags_preserve_legacy_recipe_cli(producers, consume
     alias.symlink_to(recipes if kind == "ancestor" else recipes / "checks.json")
     supplied = alias / "checks.json" if kind == "ancestor" else alias
     source = producers["source"][0]
-    wrapper = ("import os,runpy,sys\n"
-               "for name in ('O_PATH','O_NOFOLLOW','O_SYMLINK'):\n"
-               "    if hasattr(os,name): delattr(os,name)\n"
-               "sys.argv=sys.argv[1:]\nrunpy.run_path(sys.argv[0],run_name='__main__')\n")
+    # This varies only the writer. The reader retains the host's actual
+    # primitives; actual process-global missing-reader cases hold below.
+    wrapper = ("import os,runpy,sys,types\n"
+               "module=runpy.run_path(sys.argv[1],run_name='writer_fallback_fixture')\n"
+               "namespace=module['main'].__globals__\n"
+               "writer=types.SimpleNamespace(**{name:value for name,value in vars(os).items() "
+               "if name not in ('O_PATH','O_NOFOLLOW','O_SYMLINK')})\n"
+               "namespace['os']=writer\n"
+               "namespace['DIRFD_ATOMIC']=(writer.open in writer.supports_dir_fd "
+               "and writer.rename in writer.supports_dir_fd "
+               "and hasattr(writer,'O_NOFOLLOW') and hasattr(writer,'O_DIRECTORY'))\n"
+               "assert namespace['DIRFD_ATOMIC'] is False\n"
+               "raise SystemExit(module['main'](sys.argv[2:]))\n")
     environment = {**ENV, **{k: os.environ[k] for k in (
         "HOME", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy",
         "SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "NODE_EXTRA_CA_CERTS") if k in os.environ}}
@@ -1378,9 +1406,10 @@ def test_missing_link_handle_flags_preserve_legacy_recipe_cli(producers, consume
 
 
 @pytest.mark.parametrize("changed", ["alias", "canonical"])
-def test_portable_link_recipe_inputs_still_revalidate(producers, consumer, tmp_path, monkeypatch, changed):
-    for name in ("O_PATH", "O_NOFOLLOW", "O_SYMLINK"):
-        monkeypatch.delattr(os, name, raising=False)
+def test_writer_portable_link_recipe_inputs_still_revalidate(producers, consumer, tmp_path, monkeypatch, changed):
+    # Writer fallback does not grant metadata authority to an incapable host.
+    writer = types.SimpleNamespace(**{name: value for name, value in vars(os).items()
+                                     if name not in ("O_PATH", "O_NOFOLLOW", "O_SYMLINK")})
     for rel in (".claude/skills", ".cursor/skills"):
         (consumer / rel).unlink()
         (consumer / rel).mkdir()
@@ -1391,6 +1420,10 @@ def test_portable_link_recipe_inputs_still_revalidate(producers, consumer, tmp_p
     alias = tmp_path / "portable-recipe-alias"
     alias.symlink_to(recipes, target_is_directory=True)
     module = imported(producers["source"][0])
+    monkeypatch.setattr(module, "os", writer)
+    monkeypatch.setattr(module, "DIRFD_ATOMIC", writer.open in writer.supports_dir_fd
+                        and writer.rename in writer.supports_dir_fd
+                        and hasattr(writer, "O_NOFOLLOW") and hasattr(writer, "O_DIRECTORY"))
     assert module.DIRFD_ATOMIC is False
     original = module.build_plan
     changed_inputs = []
@@ -1422,6 +1455,71 @@ def test_missing_link_handle_flags_do_not_qualify_explicit_layout(producers, con
     before = snapshot(consumer)
     assert module.main(["--repo-root", str(consumer), "--layout", LAYOUT_NAME, *flags]) == 2
     assert snapshot(consumer) == before
+
+
+@pytest.mark.parametrize("missing", ["nofollow", "directory", "both"])
+@pytest.mark.parametrize("flags", [(), ("--check",), ("--dry-run",)])
+def test_process_global_missing_metadata_reader_holds_before_payload(
+        producers, consumer, tmp_path, missing, flags):
+    """Missing reader APIs hold; writer-only positives grant no host parity."""
+    outside = tmp_path / "synthetic-opaque-owner"
+    (outside / ".ai").mkdir(parents=True)
+    (outside / ".ai/source-scope-policy.json").write_text('{"synthetic":"opaque"}\n')
+    recipe = outside / "checks.json"
+    recipe.write_text('{"synthetic":"PRIVATE_PAYLOAD_SENTINEL"}\n')
+    alias = tmp_path / "synthetic-recipe-alias"
+    alias.symlink_to(recipe)
+    source = producers["source"][0]
+    wrapper = r'''import os,runpy,sys
+from pathlib import Path
+script,owner,supplied,missing=sys.argv[1:5]
+owner=Path(owner).resolve(); outside=Path(supplied).resolve().parent
+payloads=[owner/'AGENTS.md',owner/'CLAUDE.md',owner/'config/agent-checks.json',
+          owner/'.github/skills/owner.md',outside/'checks.json',outside/'.ai/source-scope-policy.json']
+payload_paths={path.resolve() for path in payloads}
+payload_ids={(path.stat().st_dev,path.stat().st_ino) for path in payloads}
+directory_ids={(path.stat().st_dev,path.stat().st_ino) for root in [owner,outside]
+               for path in [root,*root.rglob('*')] if path.is_dir() and not path.is_symlink()}
+removed=['O_NOFOLLOW'] if missing=='nofollow' else ['O_DIRECTORY'] if missing=='directory' else ['O_NOFOLLOW','O_DIRECTORY']
+for name in removed:
+ if hasattr(os,name):delattr(os,name)
+module=runpy.run_path(script,run_name='missing_metadata_fixture')
+attempts=[]
+def audit(event,args):
+ if event=='open':
+  selected=args[0]
+  if isinstance(selected,(str,bytes,os.PathLike)):
+   denied=Path(os.fsdecode(selected)).resolve() in payload_paths
+  elif isinstance(selected,int):
+   details=os.fstat(selected);denied=(details.st_dev,details.st_ino) in payload_ids
+  else:denied=False
+  if denied:attempts.append('payload');raise AssertionError('opaque payload opened')
+ elif event=='os.scandir':
+  selected=args[0]
+  if isinstance(selected,int):
+   details=os.fstat(selected);denied=(details.st_dev,details.st_ino) in directory_ids
+  else:
+   path=Path(selected).resolve();denied=path.is_relative_to(owner) or path.is_relative_to(outside)
+  if denied:attempts.append('enumeration');raise AssertionError('owner data enumerated')
+sys.addaudithook(audit)
+code=module['main'](['--repo-root',str(owner),'--recipes',supplied,*sys.argv[5:]])
+assert code==2,code
+assert attempts==[],attempts
+print('missing metadata reader held; zero payload opens or owner enumeration')
+raise SystemExit(code)
+'''
+    before = snapshot(consumer)
+    outside_before = snapshot(outside)
+    result = subprocess.run([sys.executable, "-B", "-c", wrapper,
+        str(source / "scripts/install-agent-validation.py"), str(consumer), str(alias), missing, *flags],
+        env=ENV, cwd=tmp_path, capture_output=True, text=True, timeout=30)
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "zero payload opens or owner enumeration" in result.stdout
+    assert "source-scope metadata unavailable" in result.stderr
+    assert "no qualified" in result.stderr and "metadata reader" in result.stderr
+    assert "PRIVATE_PAYLOAD_SENTINEL" not in result.stderr
+    assert snapshot(consumer) == before
+    assert snapshot(outside) == outside_before
 
 
 @pytest.mark.parametrize("cleanup_error", [False, True])

@@ -686,11 +686,24 @@ def build_plan(args):
     explicit = args.layout is not None
     if explicit and not DIRFD_ATOMIC:
         raise ValueError("explicit layout requires no-follow directory-descriptor replacement support")
-    root = args.repo_root.absolute() if explicit else args.repo_root.resolve()
+    requested_root = args.repo_root.absolute()
+    # Public reviewed runner code is read here, never an owner data file.
+    # Refuse before layout, recipes, owner prose or output materialization.
+    scope_runner = load_module("agent_check_scope", SOURCE / "scripts/agent-check.py")
+    scope_runner.require_source_scope(requested_root)
+    # Preserve the explicit layout's final-root alias rejection while allowing
+    # ordinary ambient prefixes such as macOS /tmp. Never resolve away lexical
+    # policy ancestry before the independent scope probe above.
+    root = requested_root.parent.resolve() / requested_root.name if explicit else requested_root.resolve()
+    recipe_path = args.recipes.absolute() if args.recipes else root / "config/agent-checks.json"
+    if args.recipes:
+        # watch() snapshots regular-file payloads, so both the lexical owner and
+        # a legacy linked input's selected target must hold before any plan I/O.
+        scope_runner.require_content_path_scope(recipe_path)
     plan = OutputPlan(root, explicit)
     complete = False
     try:
-        result = _build_plan(args, plan)
+        result = _build_plan(args, plan, requested_root=requested_root, recipe_path=recipe_path)
         complete = True
         return result
     finally:
@@ -698,13 +711,16 @@ def build_plan(args):
             plan.close()
 
 
-def _build_plan(args, plan: OutputPlan):
+def _build_plan(args, plan: OutputPlan, *, requested_root: Path, recipe_path: Path):
     explicit, root = plan.layout, plan.root
     context: dict = {}
     if explicit:
-        _, context = layout_context(plan, args.layout)
+        layout = args.layout
+        if layout.is_absolute() and layout.is_relative_to(requested_root):
+            layout = root / layout.relative_to(requested_root)
+        _, context = layout_context(plan, layout)
     owned = plan.regular_path(safe(root, "config/agent-checks.json"))
-    recipe_path = args.recipes.absolute() if args.recipes else owned
+    recipe_path = recipe_path if args.recipes else owned
     if args.recipes and not explicit:
         # Legacy explicit recipe inputs may traverse links. Watch that mapping
         # as well as the canonical regular input; destinations stay strict.

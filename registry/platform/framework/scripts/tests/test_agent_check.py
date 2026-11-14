@@ -244,8 +244,11 @@ class AgentCheckTests(unittest.TestCase):
         (self.root / "module").mkdir()
         self.run_check()
         (self.root / "module/.git").write_text("gitdir: fixture")
-        self.run_check(expected=2)
-        self.assertFalse((self.root / ".ai/agent-checks/receipt.json").exists())
+        # An initialized nested repository is an unqualified nested owner: held
+        # before any cache reuse. The gate ignores receipts on a held run.
+        held = self.run_check(expected=4)
+        self.assertIn("SOURCE-SCOPE-HELD", held.stdout + held.stderr)
+        self.assertNotIn("AGENT-CHECK-CACHED", held.stdout)
 
     def test_empty_directory_replacing_a_regular_tracked_file_stays_blocked(self):
         (self.root / "src/value.py").unlink()
@@ -372,8 +375,13 @@ class AgentCheckTests(unittest.TestCase):
         self.git("update-index", "--add", "--cacheinfo", "160000," + head + ",module")
         (self.root / "module").mkdir()
         runner = load("agent-check")
+        original = os.open
+        def no_directory_open(path, flags, *args, **kwargs):
+            if flags & getattr(os, "O_DIRECTORY", 0) and Path(path) == self.root / "module":
+                raise AssertionError("unsupported directory open")
+            return original(path, flags, *args, **kwargs)
         with mock.patch.object(runner.os, "supports_fd", set()), \
-             mock.patch.object(runner.os, "open", side_effect=AssertionError("unsupported directory open")):
+             mock.patch.object(runner.os, "open", side_effect=no_directory_open):
             with self.assertRaisesRegex(ValueError, "raw-input validation adapter"):
                 runner.raw_tracked_inputs(self.root)
 
@@ -384,10 +392,14 @@ class AgentCheckTests(unittest.TestCase):
         runner = load("agent-check")
         original = os.open
         for timeout in (False, True):
-            descriptors = []
+            descriptors, control_descriptors = [], []
             def opened(*args, **kwargs):
                 descriptor = original(*args, **kwargs)
-                descriptors.append(descriptor)
+                # Git control files now have their own bounded no-follow reader;
+                # retain the exact one-directory-descriptor contract and prove
+                # those extra metadata descriptors are closed as well.
+                target = descriptors if Path(args[0]) == self.root / "module" else control_descriptors
+                target.append(descriptor)
                 return descriptor
             try:
                 with mock.patch.object(runner.os, "open", side_effect=opened):
@@ -398,11 +410,11 @@ class AgentCheckTests(unittest.TestCase):
                     else:
                         self.assertEqual(runner.empty_gitlink_identity(self.root, "module"), head)
                 self.assertEqual(len(descriptors), 1)
-                for descriptor in descriptors:
+                for descriptor in descriptors + control_descriptors:
                     with self.assertRaises(OSError):
                         os.fstat(descriptor)
             finally:
-                for descriptor in descriptors:
+                for descriptor in descriptors + control_descriptors:
                     try:
                         os.close(descriptor)
                     except OSError:
@@ -411,15 +423,28 @@ class AgentCheckTests(unittest.TestCase):
     def test_git_reads_are_bounded_and_timeout_revokes_old_evidence(self):
         runner = load("agent-check")
         calls = []
+        head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.root, capture_output=True,
+                              check=True).stdout
         def bounded(command, **kwargs):
             calls.append(command)
             self.assertGreater(kwargs["timeout"], 0)
             self.assertLessEqual(kwargs["timeout"], 30)
-            return subprocess.CompletedProcess(command, 0, b"", b"")
-        with mock.patch.object(runner.subprocess, "run", side_effect=bounded):
+            # Git's own HEAD^{commit} resolution must agree before any reuse.
+            return subprocess.CompletedProcess(command, 0, head if command[-1:] == ["HEAD^{commit}"] else b"", b"")
+        checks = mock.Mock(wraps=runner.source_scope_declared)
+        with mock.patch.object(runner.subprocess, "run", side_effect=bounded), \
+             mock.patch.object(runner, "source_scope_declared", checks):
             runner.git(self.root, "ls-files")
             runner.require_unfiltered_tracked_inputs(self.root)
-        self.assertEqual(len(calls), 4)
+        # Every entry re-observes scope; an identical observation reuses the
+        # undeclared fixed-probe answer instead of forking Git again.
+        self.assertEqual(checks.call_count, 2)
+        scope_reads = [command for command in calls if command[-1:] == [runner.SOURCE_SCOPE_POLICY]]
+        self.assertEqual(len(scope_reads), 1)
+        resolutions = [command for command in calls if command[-1:] == ["HEAD^{commit}"]]
+        self.assertEqual(len(resolutions), 2)  # before and after the one listing
+        # One names-only listing checks committed nested declarations.
+        self.assertEqual(len(calls) - len(scope_reads) - len(resolutions), 5)
         self.run_check()
         with mock.patch.object(runner, "plan_for", side_effect=subprocess.TimeoutExpired(["git"], 30)):
             self.assertEqual(runner.main(["--repo-root", str(self.root), "--provider", "codex"]), 2)
