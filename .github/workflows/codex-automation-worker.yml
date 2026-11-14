@@ -1,0 +1,70 @@
+name: Codex Automation Worker
+# Trusted default-branch controller. The unprivileged "Codex Automation Request"
+# producer carries no credentials; this job admits its exact run and inert
+# artifact, verifies explicit role consent, appends durable custody before any
+# model work, and runs credential-free guest passes through a text-only broker.
+on:
+  # Required privilege split: trusted workflow_sha checkout only; exact upstream run,
+  # PR freshness and inert request admission are enforced before account/model use.
+  workflow_run: # zizmor: ignore[dangerous-triggers]
+    workflows: ["Codex Automation Request"]
+    types: [completed]
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+  statuses: write
+  actions: read
+concurrency:
+  group: codex-automation-${{ github.event.workflow_run.pull_requests[0].number || github.event.workflow_run.id }}-${{ github.event.workflow_run.head_sha }}
+  cancel-in-progress: false
+jobs:
+  execute:
+    name: Trusted subscription automation (advisory)
+    # Off by default. Enable only after the selected-workflow host, intended
+    # account, explicit automation consent and funding controls are qualified.
+    if: >-
+      vars.CODEX_AUTOMATION_ENABLED == 'true' &&
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'pull_request'
+    runs-on: ${{ fromJSON(vars.CODEX_AUTOMATION_RUNNER || '"ubuntu-24.04"') }}
+    timeout-minutes: 60
+    continue-on-error: true
+    steps:
+      - name: Check out trusted controller revision
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: trusted
+          persist-credentials: false
+          sparse-checkout: |
+            scripts
+            .claude/agents
+            .claude/skills
+      - name: Admit exact request
+        id: prepare
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CODEX_AUTOMATION_ENABLED: ${{ vars.CODEX_AUTOMATION_ENABLED }}
+        run: python3 -I trusted/scripts/ci/codex_automation_worker.py prepare
+      - name: Run consented, custody-fenced guest passes
+        id: worker
+        if: steps.prepare.outputs.needed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CODEX_AUTOMATION_ENABLED: ${{ vars.CODEX_AUTOMATION_ENABLED }}
+        run: python3 -I trusted/scripts/ci/codex_automation_worker.py run
+      - name: Retain result and inference receipts
+        if: always() && steps.worker.outputs.artifact != ''
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ${{ steps.worker.outputs.artifact }}
+          path: ${{ runner.temp }}/codex-automation/result
+          if-no-files-found: error
+          retention-days: 30
+      - name: Publish advisory outcome after retention
+        if: steps.worker.outputs.artifact != '' && success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CODEX_AUTOMATION_ENABLED: ${{ vars.CODEX_AUTOMATION_ENABLED }}
+        run: python3 -I trusted/scripts/ci/codex_automation_worker.py publish

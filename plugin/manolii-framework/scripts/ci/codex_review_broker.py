@@ -9,6 +9,7 @@ controller code, with a socket directory created by that controller.
 from __future__ import annotations
 
 import base64
+from datetime import datetime, timezone
 import hashlib
 from contextlib import contextmanager
 from email.message import Message
@@ -284,6 +285,14 @@ def text_request(raw, server):
             or any(item.get("type", "message") != "message" for item in value["input"])):
         raise ValueError("tool-free stateless text required")
     return canonical
+
+
+def text_input_chars(canonical):
+    """Actual admitted input size: instructions plus every input text part."""
+    value = json.loads(canonical)
+    return len(value.get("instructions", "")) + sum(
+        len(part["text"]) for item in value["input"] for part in item["content"]
+    )
 
 
 class BrokerError(Exception):
@@ -628,6 +637,8 @@ class ModelBroker(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
         self.subscription = subscription
         self.text_only = text_only
         self.last_text_receipt = None
+        # One nonsecret receipt per validated text completion, in order.
+        self.text_receipts = []
         self.expected_effort = expected_effort
         self.transport = transport
         self.max_requests = max_requests
@@ -745,6 +756,7 @@ class ModelBroker(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
         if self.text_only:
             result["execution_contract"] = "text_only"
             result["text_completion"] = self.last_text_receipt
+            result["text_completions"] = [dict(row) for row in self.text_receipts]
         return result
 
     def remember_reasoning(self, body, content_type):
@@ -828,7 +840,8 @@ class BrokerHandler(BaseHTTPRequestHandler):
             if len(raw) != length:
                 raise ValueError("short body")
             raw = (text_request if self.server.text_only else review_request)(raw, self.server)
-        except (OSError, ValueError, TypeError, RecursionError):
+            input_chars = text_input_chars(raw) if self.server.text_only else None
+        except (OSError, ValueError, TypeError, RecursionError, KeyError):
             self.reject(400, "invalid_request")
             return
         try:
@@ -894,6 +907,11 @@ class BrokerHandler(BaseHTTPRequestHandler):
                         self.server.last_text_receipt = {
                             key: value for key, value in text_result.items() if key != "text"
                         }
+                        self.server.text_receipts.append({
+                            **self.server.last_text_receipt,
+                            "input_chars": input_chars,
+                            "observed_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                        })
                 self.send_response(200)
                 self.send_header("Content-Type", content_type)
                 self.send_header("Content-Length", str(len(body)))

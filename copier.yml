@@ -195,6 +195,9 @@ _exclude:
   - tests/codex_review_isolation_probe.py
   - tests/test_codex_review_isolation_probe.py
   - tests/test_codex_automation_adapter.py
+  - tests/test_codex_automation_guest.py
+  - tests/test_codex_automation_receipts.py
+  - tests/test_codex_automation_worker.py
   # The pack's own leaf context manifest (master context governance); a rendered
   # instance must author its own, never inherit the template's identity.
   - /.ai/repo-context.yaml
@@ -389,6 +392,10 @@ _exclude:
   - "{% if not codex_review %}.github/workflows/codex-security-diff-scan.yml{% endif %}"
   - "{% if not codex_review %}.github/workflows/codex-review-worker.yml{% endif %}"
   - "{% if not codex_review %}.github/workflows/codex-review-recovery.yml{% endif %}"
+  - "{% if not codex_review %}.github/workflows/codex-automation-request.yml{% endif %}"
+  - "{% if not codex_review %}.github/workflows/codex-automation-worker.yml{% endif %}"
+  - "{% if not codex_review %}scripts/ci/codex-automation-worker.json{% endif %}"
+  - "{% if not codex_review %}scripts/ci/codex-automation-runtime{% endif %}"
   - "{% if not codex_review %}tests/test_codex_review_workflows.py{% endif %}"
   # isolation_profile=strict: the maintainer's Doppler / LiteLLM / fleet-coupled files.
   - "{% if isolation_profile == 'strict' %}.github/workflows/setup-env-secret.yml{% endif %}"
@@ -412,6 +419,7 @@ _exclude:
 # `copier update` (report §4 Lever A / ADR-0023 Decision 1).
 _skip_if_exists:
   - scripts/ci/codex-review-worker.json
+  - scripts/ci/codex-automation-worker.json
   - CLAUDE.md
   - config/agent-checks.json
   # QA framework owner config + host hook files a consumer may already own

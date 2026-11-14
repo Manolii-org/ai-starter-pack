@@ -467,6 +467,15 @@
         "tests/test_broad_agents_complete_input.py",
         "tests/test_judge_source_evidence.py",
         "tests/test_codex_subscription_text.py",
+        "scripts/ci/codex_automation_guest.py",
+        "scripts/ci/codex_automation_receipts.py",
+        "scripts/ci/codex_automation_worker.py",
+        "scripts/ci/codex-automation-worker.json",
+        "scripts/ci/codex_review_broker.py",
+        ".github/workflows/codex-automation-worker.yml",
+        "tests/test_codex_automation_guest.py",
+        "tests/test_codex_automation_receipts.py",
+        "tests/test_codex_automation_worker.py",
         "config/agent-checks.json"
       ],
       "tools": [
@@ -484,7 +493,10 @@
           "tests/test_specialists_thinking_starvation.py",
           "tests/test_broad_agents_complete_input.py",
           "tests/test_judge_source_evidence.py",
-          "tests/test_codex_subscription_text.py"
+          "tests/test_codex_subscription_text.py",
+          "tests/test_codex_automation_guest.py",
+          "tests/test_codex_automation_receipts.py",
+          "tests/test_codex_automation_worker.py"
         ]
       ],
       "ci_sources": [
@@ -493,7 +505,7 @@
           "contains": "python3 -m pytest tests/ -q"
         }
       ],
-      "timeout_seconds": 120
+      "timeout_seconds": 240
     },
     {
       "id": "registry-bootstrap-contract",

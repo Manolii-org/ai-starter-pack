@@ -88,6 +88,44 @@ review nor permission to rerun. It writes no automatic success or release. This
 keeps the execution fence durable while the full controller and reconciler are
 being implemented. A lost acknowledgement or competing claim never admits work.
 
+## Trusted assessment controller
+
+`.github/workflows/codex-automation-worker.yml` runs only after the producer
+completes, only when `vars.CODEX_AUTOMATION_ENABLED == 'true'`, and only from
+the accepted `workflow_sha` checkout (no PR source, no secrets, no OIDC).
+`scripts/ci/codex_automation_worker.py` then:
+
+1. `prepare`: admits the exact producer run and inert request against the
+   reviewed policy in `scripts/ci/codex-automation-worker.json`
+   (`codex-automation-worker/v1`: allowed bases, hold labels, fixed role
+   roster, sensitivity, effort, request/time bounds). The policy file is
+   instance-owned in consumer renders.
+2. `run`: reads explicit automation consent for every role it needs
+   (`assessment`, `judge`) without spending; a missing consent or runner
+   admission is `blocked_credentials` and claims nothing. It then appends and
+   reads back durable custody before any model work. Each guest pass runs under
+   `automation_session` (same account lock and official CLI refresh owner as
+   review; no second refresh chain) through a text-only broker, inside the
+   networkless, read-only `codex-automation-runtime` image built only from the
+   accepted closure. The assessment pass returns candidates; the host writes
+   them into a read-only hand-off for the judge pass. A held assessment never
+   reaches the Judge; quota exhaustion stops without retry.
+3. `publish`: posts the Judge outcome captured by the guest as an advisory
+   comment (`codex-automation-assessment:v1`). The guest runs the Judge's
+   unchanged decision logic; only its GitHub writes are captured.
+
+Each validated broker completion becomes one `automation.inference/v2` receipt
+(`scripts/ci/codex_automation_receipts.py`), retained as
+`inference-receipts.jsonl` in the result artifact: provider-reported model and
+usage, actual admitted input size, trusted run/attempt/base/head/workflow
+coordinates and a per-completion attempt ID. `cost_usd` stays unknown. The
+contract mirrors the orchestrating repository's reader; spent completions are
+measured even when a later stage holds.
+
+Not covered by this controller: triage/critic/implementation/autofix roles,
+source mutation and publication, SAST execution inside the guest, and any live
+host, account or funding qualification. Security roles remain held.
+
 ## Completion of the train
 
 The in-progress pipeline integration adds an explicit `CODEX_AUTOMATION_MODE=required`
