@@ -1296,6 +1296,10 @@ def dotenv_bytes(path: Path, *, budget: list[int] | None = None) -> bytes | None
                         continue
                     if entry.is_file():
                         row.append(digest_file(entry))
+                    elif entry.is_dir():
+                        # Link text cannot bind a directory's contents: fail closed
+                        # to an unknown identity so cached PASS reuse is disabled.
+                        return None
                     rows.append(row)
                 elif entry.is_dir():
                     rows.append([relative, "dir"])
