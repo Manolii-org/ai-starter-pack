@@ -420,6 +420,23 @@ def source_scope_declared(root: Path) -> bool:
     return False
 
 
+def require_evidence_route(root: Path, path: Path) -> None:
+    """Gate log, receipt, ledger and bypass I/O stays in this owner.
+
+    A route through a link that leaves the owner, or lands in a declared or
+    unqualified owner, holds before any evidence file is created or read.
+    """
+    real_root = root.resolve()
+    resolved = path.resolve()
+    if not resolved.is_relative_to(real_root):
+        raise SourceScopeHeld("FINALISE-GATE SOURCE-SCOPE-HELD: no qualified content projection; no hand-off authority.")
+    if resolved != real_root / path.relative_to(root):
+        existing = resolved
+        while not existing.exists() and existing != real_root:
+            existing = existing.parent
+        require_source_scope(existing if existing.is_dir() else existing.parent)
+
+
 def require_source_scope(root: Path) -> None:
     if source_scope_declared(root):
         raise SourceScopeHeld("FINALISE-GATE SOURCE-SCOPE-HELD: no qualified content projection; no hand-off authority.")
@@ -704,10 +721,14 @@ def run_checks(root: Path, provider: str, timeout: int) -> dict:
     """Run agent-check and classify the outcome as pass|fail|incomplete."""
     if source_scope_declared(root):
         return {"outcome": "source-scope-held", "summary": "no qualified content projection; full validation held"}
+    state = root / GATE_STATE
+    try:
+        require_evidence_route(root, state / LOG_NAME)
+    except SourceScopeHeld:
+        return {"outcome": "source-scope-held", "summary": "evidence route leaves this owner; held"}
     runner = agent_check_path(root)
     if runner is None:
         return {"outcome": "incomplete", "summary": "scripts/agent-check.py is not installed"}
-    state = root / GATE_STATE
     state.mkdir(parents=True, exist_ok=True)
     log_path = state / LOG_NAME
     start = time.monotonic()
@@ -806,11 +827,12 @@ def record(root: Path, entry: dict) -> None:
     """Append one cost/outcome row; never let telemetry break the hand-off."""
     try:
         path = root / GATE_STATE / LEDGER_NAME
+        require_evidence_route(root, path)
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(entry, sort_keys=True) + "\n")
-    except OSError:
-        pass
+    except (OSError, SourceScopeHeld):
+        pass  # telemetry never writes outside this owner
 
 
 def record_bypass(root: Path, provider: str, source: str) -> None:
@@ -818,6 +840,7 @@ def record_bypass(root: Path, provider: str, source: str) -> None:
         head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=root, capture_output=True,
                               text=True, timeout=5).stdout.strip()
         path = root / ".ai" / "bypass-log.jsonl"
+        require_evidence_route(root, path)
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps({
@@ -825,7 +848,7 @@ def record_bypass(root: Path, provider: str, source: str) -> None:
                 "scope": "finalise-gate", "head": head, "user": provider,
                 "reason": f"{BYPASS_ENV}=off ({source})",
             }) + "\n")
-    except (OSError, subprocess.SubprocessError):
+    except (OSError, subprocess.SubprocessError, SourceScopeHeld):
         pass
 
 
@@ -961,6 +984,8 @@ def gate_one(root: Path, provider: str, bypass_inline: bool, trigger: str,
     if source_scope_declared(root):
         return "deny", "FINALISE-GATE SOURCE-SCOPE-HELD: no qualified content projection; no hand-off authority."
     try:
+        for evidence in (root / ".ai" / "bypass-log.jsonl", root / GATE_STATE / LEDGER_NAME):
+            require_evidence_route(root, evidence)
         section, present = load_qa_config(root)
         mode, source = resolve_mode(section, present, bypass_inline)
     except SourceScopeHeld as exc:

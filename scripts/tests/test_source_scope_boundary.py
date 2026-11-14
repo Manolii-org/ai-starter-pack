@@ -2290,6 +2290,32 @@ class NestedScopeAndCommonDirectory(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     module._source_scope_nested_working(self.root, {}, 30)
 
+    def test_gate_evidence_routed_outside_the_owner_holds_before_io(self):
+        scoped = self.other_root()
+        self.init_source(scoped)
+        (scoped / ".ai").mkdir()
+        (scoped / self.runner.SOURCE_SCOPE_POLICY).write_bytes(self.raw)
+        (scoped / "state").mkdir()
+        (scoped / "state/receipt.json").write_text("{}")
+        plain = self.other_root()
+        state = self.root / ".ai/agent-checks"
+        state.rename(self.root / ".ai/agent-checks-original")
+        for target in (scoped / "state", plain):
+            with self.subTest(target=target.name):
+                if state.is_symlink():
+                    state.unlink()
+                state.symlink_to(target, target_is_directory=True)
+                before = sorted(path.name for path in target.iterdir())
+                with patch.object(self.finalise, "load_qa_config", return_value=({"mode": "block"}, True)), \
+                     patch.object(self.finalise, "agent_check_path", side_effect=AssertionError("agent-check located")), \
+                     patch.object(Path, "read_text", side_effect=AssertionError("external receipt read")):
+                    decision, message = self.finalise.gate_one(self.root, "codex", False, "push")
+                    self.assertEqual(decision, "deny")
+                    self.assertIn("SOURCE-SCOPE-HELD", message)
+                    self.assertEqual(self.finalise.run_checks(self.root, "codex", 10)["outcome"], "source-scope-held")
+                    self.finalise.record(self.root, {"probe": True})
+                self.assertEqual(sorted(path.name for path in target.iterdir()), before)
+
     def test_link_heavy_trees_check_each_directory_once_without_per_link_git(self):
         subprocess.run(["git", "pack-refs", "--all"], cwd=self.root, check=True, capture_output=True,
                        env=self.runner.git_environment())
