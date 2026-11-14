@@ -43,5 +43,16 @@
     ],
     "category": "happy_path",
     "tags": []
+  },
+  {
+    "id": "continuation-unqualified-new-schedule",
+    "prompt": "A hosted chat can create an hourly schedule but has no demonstrated same-owner execution or busy-session queue. A separate existing user-authorized schedule belongs to its original task.",
+    "expectedBehaviors": [
+      "Create no new timer from configuration or delivered-notification proof alone",
+      "Retain the missing wake as infrastructure and continue independent authorized implementation",
+      "Preserve the separate existing schedule, owner, budgets and unfinished commitments"
+    ],
+    "category": "edge_case",
+    "tags": []
   }
 ]

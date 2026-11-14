@@ -11,7 +11,7 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github/workflows/pr-assessment.yml"
-JOBS = ("classify", "specialists", "broad-agents", "judge")
+JOBS = ("classify", "review-routing", "specialists", "broad-agents", "judge")
 PACK = "Manolii-org/ai-starter-pack"
 FLY = ["self-hosted", "fly"]
 pytestmark = pytest.mark.skipif(not WORKFLOW.exists(), reason="standalone workflow absent")
@@ -154,7 +154,7 @@ def test_existing_json_truthiness_behavior(selector, override, expected):
     assert _evaluate(selector, _context(**{"vars.CI_RUNNER_OVERRIDE": override})) == expected
 
 
-def test_four_selectors_share_one_policy_and_sast_is_unchanged():
+def test_all_selectors_share_one_policy_and_sast_is_unchanged():
     jobs = yaml.safe_load(WORKFLOW.read_text())["jobs"]
     assert len({jobs[job]["runs-on"] for job in JOBS}) == 1
     assert jobs["sast"]["runs-on"] == "ubuntu-latest"

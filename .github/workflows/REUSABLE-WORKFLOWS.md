@@ -137,7 +137,13 @@ receipt writers are unsupported and may not invoke this action.
 
 ## Provider Wiring
 
-Default: **Anthropic** (`ANTHROPIC_API_KEY` direct). Opt-in: **Proxy mode** (`ANTHROPIC_BASE_URL` + `LITELLM_MASTER_KEY`).
+Default: **Governed proxy** (`ANTHROPIC_BASE_URL` + `LITELLM_MASTER_KEY`).
+`ANTHROPIC_BASE_URL` is the Messages compatibility wire, not a provider pin.
+External consumers can explicitly opt into the existing Anthropic transport.
+Assessment maps `provider_mode=proxy` to the supported `direct` runtime mode;
+its committed external admission is still required. Proxy mode leaves the
+trusted runtime's version-compatible default unset. A restrictive `CLIENT_AI_POLICY` flag alone remains a hold
+until the owner declares a compatible route.
 
 Guard-then-wire: Always validate secrets exist before wiring. Use this guard step FIRST:
 
@@ -188,8 +194,9 @@ table.
 | **integration-admission-reusable** | `config_path=config/integration-admission.json`, `base_sha` (req), `head_sha` (req), `installation_id` (req), `accepted_producer` (req), `pack_ref=v1`, `evidence_bundle_json=[]`, `runs_on=ubuntu-latest`, `shadow=true: boolean`, `timeout_minutes=15: number` | none | `plan`, `verdict` |
 | **migration-run-gate-reusable** | `db_image` (req), `db_ports_json` (req), `db_env_json` (req), `db_options=''`, `migrations_env_json` (req), `workdir=.`, `adapter=alembic`, `python_version=3.12`, `runs_on=ubuntu-latest`, `install_command` (req), `setup_command=''`, `run_prefix=''`, `downgrade_steps=1`, `alembic_check=false: boolean`, `url_env_var=ALEMBIC_DATABASE_URL` | none | none |
 | **outcome-check-reusable** | `outcome` (req), `operation` (req), `summary` (req), `head_sha=''` | none | none |
-| **pr-assessment-reusable** | `provider_mode=anthropic`, `litellm_proxy_url=''`, `model=''`, `runs_on=ubuntu-latest`, `pack_ref=v1`, `trusted_sync_author_id=215220684: number`, `jev_judge_shadow=off`, `jev_entity=''` | `ANTHROPIC_API_KEY`, `LITELLM_MASTER_KEY`, `JEV_TYPESAFE_API_KEY` | none |
-| **pr-autofix-loop-reusable** | `provider_mode=anthropic`, `litellm_proxy_url=''`, `model=''`, `runs_on=ubuntu-latest`, `max_successful_fixes=1`, `trusted_agent_bots=''` | `ANTHROPIC_API_KEY`, `LITELLM_MASTER_KEY`, `GH_PAT` | `activation` |
+| **pr-assessment-reusable** | `provider_mode=proxy`, `litellm_proxy_url=''`, `model=''`, `runs_on=ubuntu-latest`, `pack_ref=v1`, `trusted_sync_author_id=215220684: number`, `jev_judge_shadow=off`, `jev_entity=''` | `ANTHROPIC_API_KEY`, `LITELLM_MASTER_KEY`, `JEV_TYPESAFE_API_KEY` | none |
+| **pr-autofix-execution-reusable** | `provider_mode=proxy`, `litellm_proxy_url=''`, `model=''`, `runs_on=ubuntu-latest`, `max_successful_fixes=1`, `trusted_agent_bots=''`, `variant` (req), `skip=''`, `pr_number=''`, `head_ref=''`, `head_sha=''`, `trigger_workflow=''`, `trigger_run_url=''`, `allowed_bots=''` | `ANTHROPIC_API_KEY`, `LITELLM_MASTER_KEY`, `GH_PAT`, `MN_GH_AUTOMATION_TOKEN`, `LLM_API_KEY` | `activation`, `publication`, `published_sha` |
+| **pr-autofix-loop-reusable** | `provider_mode=proxy`, `litellm_proxy_url=''`, `model=''`, `runs_on=ubuntu-latest`, `max_successful_fixes=1`, `trusted_agent_bots=''` | `ANTHROPIC_API_KEY`, `LITELLM_MASTER_KEY`, `GH_PAT` | `published_sha`, `publication`, `activation` |
 | **pre-production-tier-reusable** | `gates` (req), `budget_minutes=45: number`, `job_timeout_minutes=60: number`, `runs_on=ubuntu-latest`, `max_parallel=4: number`, `environment=''`, `checkout_fetch_depth=0: number`, `open_issue_on_failure=false: boolean` | `GATE_SECRETS` | `verdict`, `breakdown` |
 | **restore-drill-reusable** | `resource_group` (req), `sql_server` (req), `source_database` (req), `sanity_queries=SELECT COUNT(*) AS table_count FROM INFORMATION_SCHEMA.TABLES`, `db_auth=sql-auth`, `sqlcmd_version=1.9.0`, `sqlcmd_sha256=b896bac71cf6ad8feca125bb42be61999116d8566a078ed475893372ccf8c0f2`, `timeout_minutes=45: number`, `runs_on=ubuntu-latest` | `DRILL_SQL_USER`, `DRILL_SQL_PASSWORD`, `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID` | none |
 | **secret-scan-reusable** | `runs_on=ubuntu-latest`, `node_version=24`, `python_version=3.12`, `require_gitleaks_license=false: boolean`, `npm_audit_omit_dev=false: boolean`, `gitleaks_version=8.30.0`, `fail_on_inert=false: boolean` | `GITLEAKS_LICENSE` | `npm_audit_activation`, `pip_audit_activation` |
@@ -234,23 +241,34 @@ jobs:
 
 ### Proxy Mode
 
+The deterministic draft/skip-label scan behavior described below is pending a
+reviewed release containing that implementation. The caller example remains
+pinned to v1.25.1, whose classifier skips drafts and `skip-ai-review` PRs; its
+dependent SAST job therefore skips too. Copying that historical example does
+not provide the newer scan guarantee. After publication, update both the
+workflow `uses` pin and matching `pack_ref` to the same supporting immutable
+release before relying on the behavior below.
+
 Callers of `pr-assessment-reusable` must include `ready_for_review`,
-`converted_to_draft`, and `edited` in `on.pull_request.types`. `classify` runs only when
-`github.event_name == 'pull_request'` and `draft != true`. Without
-`ready_for_review`, a PR opened as a draft never starts assessment when it
-is marked ready. `converted_to_draft` starts a skip run; `edited` re-runs
-assessment when the title/body changes without a push — metadata-based
-checks (scope-adherence under-delivery) would otherwise keep evaluating
-the stale description. Callers must also
-set workflow-level `concurrency` with `cancel-in-progress: true` so an
-in-flight LLM/SAST run is cancelled. Do not add `paths` or `paths-ignore`
-on the caller: GitHub applies those filters to `converted_to_draft`, so a
-revert that leaves only ignored files plus convert-to-draft never occupies
-the concurrency group. Downstream jobs require classify success so SAST
-does not start when classify is skipped.
-`workflow_dispatch` is not a supported assessment path: `classify` does
-not run, and later jobs would otherwise read empty `github.base_ref` and
-`github.event.pull_request.number`.
+`converted_to_draft` and `edited` in `on.pull_request.types`. Deterministic
+`classify` runs on `pull_request`, including drafts, without model credentials.
+Every observed nonempty diff selects the existing full SAST scan after classify
+success. Unknown paths stay conservative; AI-review skip labels, mechanical
+titles and trusted sync exclusions apply only to optional model routing.
+
+`review-routing` retains the existing model classifier, credentials and provider
+validation behind an explicit non-draft guard. Specialists, broad agents and
+Judge also require non-draft status, classify success and review-routing
+success. A model routing denial does not block deterministic source scans.
+Ready events enable optional review; converted-to-draft events keep source
+qualification running. Edited events refresh metadata-based review scope.
+
+Set workflow-level `concurrency` with `cancel-in-progress: true` so older runs
+are superseded. Do not add caller `paths` or `paths-ignore`: those filters also
+apply to `converted_to_draft` and can prevent the latest event from occupying
+the concurrency group. `workflow_dispatch` remains unsupported: classify does
+not run without a pull-request payload. Unchanged ready-verdict reuse is not
+implemented; it requires separately qualified provenance.
 
 ```yaml
 name: PR Assessment
@@ -622,13 +640,35 @@ jobs:
 Thin caller for review-comment Autofix. **Keep `runs_on` at `ubuntu-latest`**
 (hosted control-plane). See `docs/fly-runner-setup.md`.
 
-Caller owns triggers + concurrency. OSS / Buro universes use `provider_mode: proxy`.
+Caller owns triggers and concurrency, and selects its entity's approved provider.
+The existing anthropic/proxy executor is excluded when a verified retained-session
+claim is present. Never change provider just to resume a blocked native owner.
+
+`activation` remains the legacy execution-file signal, not successful handling. Additive
+`publication` and `published_sha` outputs report verified controller publication.
+The editor uses read-only code credentials; optional `GH_PAT` is available only
+to the trusted publisher. Without it, local repair can proceed and unpublished
+Git objects are retained for seven days, but publication remains unfinished.
+New-head CI/review/merge and the parent outcome require separate verification.
+See [custody and publication](../../docs/pr-autofix-loop-policy.md). The public
+caller delegates to `pr-autofix-execution-reusable.yml` at the same framework
+commit. Copy installations must adopt both workflow files atomically. The existing
+caller lock covers editing and isolated publication; the additive nested job
+names require review if consumer policies bind individual check names. The
+internal workflow is an implementation detail; retain the public caller API.
 
 **Optional `workflow_run`:** The reusable supports `workflow_run` triggers to retry
 failed CI (e.g., when Static Review, PR Assessment, or Secret Scan workflows fail).
 Autofix will only run on Pull Requests, not scheduled runs or other workflow_run events.
 
-**Relay acceptance:** Autofix processes comments starting with `**[@` posted by
+**Native review routing:** Approved native Codex/CodeRabbit bot events are admitted
+directly using immutable IDs; optional `AUTOFIX_TRUSTED_REVIEWER_IDS` replaces the
+JSON string-array policy. Include `edited` review/comment types for updated
+findings. The built-in-token relay is presentation-only and cannot trigger a
+new issue-comment workflow. It needs no PAT. See the event policy above; original
+owner custody remains mandatory.
+
+**Legacy relay format compatibility:** Autofix processes comments starting with `**[@` posted by
 `github-actions[bot]` (typically relayed by `bot-review-relay.yml`). The pack owns
 relay transport — do **not** install `manolii-org/master` `auto-address-review.yml`
 on the same repo alongside pack Autofix (creates duplicate processing).
@@ -690,8 +730,9 @@ inputs that the action ignored, so Autofix never ran — after upgrading it
 pushes `[autofix]` commits and spends tokens. A dispatched agent step that
 produces no `execution_file` fails the job; skips (loop-break, budget,
 `skip-ai-review`, bot actors other than the relay, actors without write
-access) stay green. `GH_PAT` is optional; pushes made with `github.token` do
-not re-trigger PR checks.
+access) stay green. `GH_PAT` is optional; without it the trusted publisher
+does not push, retains unpublished Git objects, and reports
+`publication_credential_unavailable`.
 
 **Model (lean by default).** The agent always runs with an explicit model:
 the reusable's `model` input, or the standalone's repository variable

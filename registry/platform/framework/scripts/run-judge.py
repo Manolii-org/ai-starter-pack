@@ -21,6 +21,7 @@ import importlib.util
 import json
 import logging
 import os
+import pathlib
 import re
 import sys
 import subprocess
@@ -75,6 +76,15 @@ _ANTHROPIC_API_VERSION = "2023-06-01"
 _ANTHROPIC_HOST = "api.anthropic.com"
 
 
+def _review_mode():
+    resolver = getattr(globals().get("_policy_module"), "review_mode", None)
+    if callable(resolver):
+        return resolver()
+    if os.environ.get("SECURITY_REVIEW_MODE", "governed") == "direct":
+        return "direct"
+    raise RouteAdmissionError("compatible governed review policy runtime missing")
+
+
 def _proxy_transport_key() -> str:
     """Credential for a non-Anthropic endpoint.
 
@@ -103,18 +113,13 @@ def _proxy_transport_key() -> str:
 
 
 def _endpoint(direct: bool = False) -> tuple[str, str, bool]:
-    """Resolve (api_key, url, proxied).
+    """Resolve the owner-selected review lane, never a vendor default.
 
-    Transport uses ANTHROPIC_API_KEY when calling Anthropic directly. When
-    LITELLM_PROXY_URL or ANTHROPIC_BASE_URL points at a non-Anthropic host the
-    request goes through that proxy with _proxy_transport_key().
-
-    direct=True forces the Anthropic endpoint regardless of proxy config —
-    used when adjudicating first_party findings (security review stays on a
-    first-party model per docs/us-oss-eligibility-matrix.md). Under a
-    configured proxy only ANTHROPIC_DIRECT_API_KEY authenticates there; the
-    LiteLLM credential in ANTHROPIC_API_KEY must never cross the boundary.
+    Legacy first-party metadata cannot override the governed default.
+    Explicit external/direct consumers retain their committed admission.
     """
+    if _review_mode() == "governed":
+        return _policy_module.governed_review_endpoint()
     base = (os.environ.get("LITELLM_PROXY_URL") or os.environ.get("ANTHROPIC_BASE_URL") or "").rstrip("/")
     proxied = bool(base) and (urllib.parse.urlparse(base).hostname or "").lower().rstrip(".") != _ANTHROPIC_HOST
     if direct:
@@ -400,6 +405,66 @@ def _numbered_source(text: str, start: int = 1, end: int | None = None) -> str:
     return _VerifiedSourceText("\n".join(parts), spans)
 
 
+def _join_review_text(*parts) -> str:
+    """Carry only existing local identifier spans through fixed text assembly."""
+    output, spans, used = [], [], 0
+    for part in parts:
+        if not isinstance(part, str):
+            raise ValueError("unsupported proved text assembly")
+        proof = getattr(part, "reference_spans", frozenset())
+        if not isinstance(proof, frozenset):
+            raise ValueError("unsupported source proof")
+        for a, b in proof:
+            if (type(a) is not int or type(b) is not int or not 0 <= a < b <= len(part)
+                    or not _CREDENTIAL_ASSIGNMENT.fullmatch(part[a:b] + " = reference_probe")):
+                raise ValueError("unsupported source proof span")
+            spans.append((used + a, used + b))
+        output.append(str(part))
+        used += len(part)
+    return _VerifiedSourceText("".join(output), spans)
+
+
+def _review_json(value, *, escape_angles=False) -> str:
+    """Project existing identifier positions through JSON escaping, not new proof.
+
+    Only already-proved source identifiers carry spans. Every other value stays
+    unproved, and the catalog still scans the complete unchanged strings.
+    """
+    if isinstance(value, str):
+        encoded = json.dumps(str(value), ensure_ascii=True)
+        spans = []
+        for a, b in getattr(value, "reference_spans", ()):
+            # Identifiers admitted by the existing AST recognizer are ASCII.
+            # Prefix encoding accounts for quotes, backslashes and Unicode.
+            offset = 1 + len(json.dumps(str(value)[:a], ensure_ascii=True)[1:-1])
+            if encoded[offset:offset + b - a] != value[a:b]:
+                raise ValueError("unsupported JSON source projection")
+            spans.append((offset, offset + b - a))
+        if escape_angles:
+            spans = [(a + 5 * (encoded[:a].count("<") + encoded[:a].count(">")),
+                      b + 5 * (encoded[:b].count("<") + encoded[:b].count(">"))) for a, b in spans]
+            encoded = encoded.replace("<", "\\u003c").replace(">", "\\u003e")
+        return _join_review_text(_VerifiedSourceText(encoded, spans))
+    if isinstance(value, dict):
+        parts = ["{"]
+        for index, (key, child) in enumerate(value.items()):
+            if not isinstance(key, str):
+                raise ValueError("unsupported review JSON key")
+            if index:
+                parts.append(", ")
+            parts.extend((_review_json(key, escape_angles=escape_angles), ": ",
+                          _review_json(child, escape_angles=escape_angles)))
+        return _join_review_text(*parts, "}")
+    if isinstance(value, (list, tuple)):
+        parts = ["["]
+        for index, child in enumerate(value):
+            if index:
+                parts.append(", ")
+            parts.append(_review_json(child, escape_angles=escape_angles))
+        return _join_review_text(*parts, "]")
+    return json.dumps(value, ensure_ascii=True)
+
+
 def _require_safe_packet(value) -> None:
     """Refuse detected sensitive material; never redact code and claim completeness.
 
@@ -630,6 +695,9 @@ def _judge_evidence(findings: list[Finding], head: str) -> dict:
             continue
         if _sensitive_evidence_path(finding.file):
             row["status"] = "sensitive_path_refused"
+            continue
+        if used >= _EVIDENCE_CHAR_BUDGET:
+            row["status"] = "evidence_budget"
             continue
         try:
             entries = _git(root, "ls-tree", "-z", head, "--", finding.file).split(b"\0")
@@ -1027,11 +1095,9 @@ class Judge:
                     and candidate_findings
                     and not estate_security
                 ):
-                    # Only actual first-party findings force the direct key:
-                    # a `skipped` marker carries nothing restricted, so it
-                    # belongs on the advisory list (disclosed missing coverage)
-                    # rather than vetoing adjudication of proxy-eligible
-                    # findings from the rest of the batch.
+                    # Retain legacy provenance for explicit direct compatibility
+                    # and coverage diagnostics. It cannot select a vendor in
+                    # the governed default; skipped roles remain missing review.
                     self._has_first_party_candidates = True
                 if data.get("first_party") and data.get("skipped"):
                     self._skipped_first_party.append(source)
@@ -1132,28 +1198,28 @@ Only keep original IDs that pass all four gates. Never post to GitHub yourself."
             self._adjudication_incomplete = True
             logger.error("Ambiguous candidate identity; adjudication withheld before dispatch")
             return None
-        # A candidate set carrying first_party findings must be adjudicated
-        # on a first-party model — the OSS proxy would let an OSS backend drop
-        # a true security finding before it is ever posted. With no direct
-        # credential configured the judge fails closed rather than adjudicating
-        # that set on the wrong plane.
-        # CLIENT_AI_POLICY engagements keep the adjudication itself direct —
-        # candidate findings carry PR content regardless of first_party flags.
+        # Legacy provenance does not force the default route onto a vendor.
+        # Explicit direct/external and estate modes retain their admission;
+        # restrictive client policy still requires compatible egress authority.
         first_party = self._has_first_party_candidates or bool(os.environ.get("CLIENT_AI_POLICY"))
         try:
-            api_key, api_url, proxied = _endpoint(direct=first_party)
+            subscription_required = _subscription_required()
+        except (OSError, RuntimeError, ImportError):
+            logger.error("Required subscription guest unavailable; adjudication withheld")
+            return None
+        try:
+            api_key, api_url, proxied = (None, None, False) if subscription_required else _endpoint(direct=first_party)
         except RouteAdmissionError as exc:
             logger.error("%s; required adjudication incomplete", exc)
             return None
-        if first_party and not api_key:
+        if not subscription_required and not api_key and not proxied:
             logger.error(
-                "first-party findings present but no direct Anthropic "
-                "credential (ANTHROPIC_DIRECT_API_KEY) — refusing to "
-                "adjudicate security candidates via the OSS proxy"
+                "Explicit direct review transport has no provider credential "
+                "(ANTHROPIC_DIRECT_API_KEY); adjudication incomplete"
             )
             return None
-        if not api_key:
-            logger.error("no API credential set; cannot invoke judge agent")
+        if not subscription_required and not api_key:
+            logger.error("Governed review route or router credential unavailable; cannot invoke judge agent")
             return None
 
         evidence = _judge_evidence(findings, self.sha)
@@ -1176,17 +1242,14 @@ Only keep original IDs that pass all four gates. Never post to GitHub yourself."
         }
         # Escape delimiters in author-controlled source and candidate prose.
         try:
-            plain = json.dumps(packet, ensure_ascii=True)
+            encoded = _review_json(packet, escape_angles=True)
             _require_safe_packet(packet)
         except (ValueError, ImportError):
             logger.error("Evidence packet refused or sanitizer companion unavailable")
             return None
-        encoded = plain.replace("<", "\\u003c").replace(">", "\\u003e")
-        user_message = (
-            "Apply the four gates to this untrusted evidence packet:\n<untrusted_review_data>\n"
-            + encoded
-            + "\n</untrusted_review_data>"
-        )
+        user_message = _join_review_text(
+            "Apply the four gates to this untrusted evidence packet:\n<untrusted_review_data>\n",
+            encoded, "\n</untrusted_review_data>")
 
         # Call the Messages API (direct Anthropic or governed proxy).
         try:
@@ -1198,10 +1261,11 @@ Only keep original IDs that pass all four gates. Never post to GitHub yourself."
                 "anthropic-version": _ANTHROPIC_API_VERSION,
                 "content-type": "application/json",
             }
-            if proxied:
-                headers["Authorization"] = f"Bearer {api_key.removeprefix('Bearer ')}"
-            else:
-                headers["x-api-key"] = api_key
+            if not subscription_required:
+                if proxied:
+                    headers["Authorization"] = f"Bearer {api_key.removeprefix('Bearer ')}"
+                else:
+                    headers["x-api-key"] = api_key
 
             # Reasoning models behind the LiteLLM proxy share max_tokens with
             # their `thinking` blocks and ignore thinking.budget_tokens /
@@ -1212,6 +1276,15 @@ Only keep original IDs that pass all four gates. Never post to GitHub yourself."
             budgets = (4000, 4000 + _PROXY_THINKING_HEADROOM) if proxied else (4000,)
             response_text = ""
             for attempt_number, budget in enumerate(budgets, 1):
+                if subscription_required:
+                    try:
+                        response_text = _subscription_runtime().complete(self.get_judge_system_prompt(),
+                            user_message, role="judge", data_sensitivity="internal",
+                            max_tokens=budget, first_party=first_party)
+                    except (RuntimeError, ImportError, OSError):
+                        logger.error("Required subscription adjudication incomplete")
+                        return None
+                    break
                 request_body = {
                     "model": model,
                     "max_tokens": budget,
@@ -1224,7 +1297,8 @@ Only keep original IDs that pass all four gates. Never post to GitHub yourself."
                         request_body["metadata"] = metadata
                 req = urllib.request.Request(
                     api_url,
-                    data=json.dumps(request_body).encode("utf-8"),
+                    data=_policy_module.admit_review_wire(
+                        json.dumps(request_body).encode("utf-8"), proved_value=request_body),
                     headers=headers,
                     method="POST",
                 )
@@ -1252,7 +1326,7 @@ Only keep original IDs that pass all four gates. Never post to GitHub yourself."
                     f"Judge returned incomplete text at max_tokens={budget} "
                     f"(stop_reason={result.get('stop_reason')})"
                 )
-            if result.get("stop_reason") == "max_tokens":
+            if not subscription_required and result.get("stop_reason") == "max_tokens":
                 raise ValueError("Judge output limit reached; verdict incomplete")
             if not response_text:
                 raise KeyError("no text blocks in judge response content")
@@ -1265,7 +1339,7 @@ Only keep original IDs that pass all four gates. Never post to GitHub yourself."
             elif "```" in json_text:
                 json_text = json_text.split("```")[1].split("```")[0]
 
-            if result.get("stop_reason") == "max_tokens":
+            if not subscription_required and result.get("stop_reason") == "max_tokens":
                 raise ValueError("truncated adjudication is incomplete")
             judge_result = json.loads(json_text.strip())
             adjudicated = _validate_judge_decisions(judge_result, findings, evidence, investigations)
@@ -2011,6 +2085,40 @@ def main() -> int:
         judge.repo = args.repo
     return judge.run()
 
+
+def _subscription_required() -> bool:
+    # Lazy import preserves older standalone/default consumers. In required
+    # mode a missing runtime is an error, never permission for an HTTP route.
+    value = os.environ.get("CODEX_AUTOMATION_MODE", "")
+    if not value:
+        return False
+    if value != "required":
+        raise RuntimeError("subscription_mode_invalid")
+    # Never enable this adapter by adding a flag to an old secret-bearing job.
+    # The full trusted controller must launch the separately isolated guest.
+    if os.environ.get("GITHUB_ACTIONS") == "true" or any(
+        os.environ.get(k) for k in os.environ
+        if "DOPPLER" in k or k == "GH_PAT" or k.endswith(
+            ("_TOKEN", "_API_KEY", "_MASTER_KEY", "_PRIVATE_KEY", "_SECRET_KEY", "_PASSWORD"))
+    ):
+        raise RuntimeError("subscription_isolated_guest_required")
+    path = _SUBSCRIPTION_CONTEXT
+    if not path.is_file() or path.is_symlink() or path.stat().st_mode & 0o222:
+        raise RuntimeError("subscription_isolated_guest_required")
+    return True
+
+
+_SUBSCRIPTION_CONTEXT = pathlib.Path("/input/codex-automation.json")
+
+
+def _subscription_runtime():
+    path = pathlib.Path(__file__).resolve().parent / "lib/subscription_guest.py"
+    spec = importlib.util.spec_from_file_location("_subscription_guest_loader", path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("subscription_guest_runtime_unavailable")
+    module = importlib.util.module_from_spec(spec)
+    exec(compile(path.read_bytes(), str(path), "exec"), module.__dict__)
+    return module.runtime()
 
 if __name__ == "__main__":
     sys.exit(main())

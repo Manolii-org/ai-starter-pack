@@ -1,0 +1,10 @@
+{
+  "entity": "example",
+  "organization": {"slug": "example-org", "id": "1000000000000001"},
+  "lookback_minutes": 60,
+  "routes": [
+    {"project_id": "2000000000000001", "environment": "production", "repo": "Example-org/api", "runtime_id": "production:Example-org/api"},
+    {"project_id": "2000000000000002", "environment": "production", "repo": "Example-org/web", "runtime_id": "production:Example-org/web",
+     "note": "A shared project would add one route per (project_id, environment)."}
+  ]
+}

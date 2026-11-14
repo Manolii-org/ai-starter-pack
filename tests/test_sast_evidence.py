@@ -45,7 +45,8 @@ def report(scanner, findings=False):
         row = dict(check_id='rule.example', path='app.py', start={'line': 1},
                    extra={'message': 'Review input validation', 'severity': 'WARNING'})
         return {'version': '1.185.0', 'results': [row, copy.deepcopy(row)] if findings else [],
-                'errors': [], 'paths': {'scanned': ['app.py', 'scripts/lib/sast_evidence.py']}, 'skipped_rules': []}
+                'errors': [], 'paths': {'scanned': ['app.py', 'scripts/lib/sast_evidence.py']}, 'skipped_rules': [],
+                'time': {'fixpoint_timeouts': []}}
     row = dict(test_id='B101', filename='./app.py', line_number=1,
                issue_text='Review assertion', issue_severity='LOW')
     return {'results': [row, copy.deepcopy(row)] if findings else [], 'errors': [],
@@ -755,3 +756,51 @@ def test_legacy_report_shape_still_normalizes_with_its_observed_version():
     assert set(rows[0]) == {'finding_id', 'rule', 'file', 'line', 'message', 'severity'}
     # Format compatibility does not make an old tool pin current qualification.
     assert module.SCANNER_VERSIONS['semgrep'] == '1.185.0'
+
+
+@pytest.mark.parametrize('relative', ['scripts/lib/sast_evidence.py',
+                                      'plugin/manolii-framework/scripts/lib/sast_evidence.py',
+                                      'registry/platform/framework/scripts/lib/sast_evidence.py'])
+@pytest.mark.parametrize('present,profile,count', [
+    (False, None, None), (True, None, None), (True, {}, None),
+    (True, {'fixpoint_timeouts': None}, None),
+    (True, {'fixpoint_timeouts': {}}, None),
+    (True, {'fixpoint_timeouts': []}, 0),
+    (True, {'fixpoint_timeouts': [{'error_type': 'Fixpoint timeout',
+                                 'severity': 'warn', 'message': 'Synthetic profiling limit'}]}, 1),
+])
+def test_optional_profiling_limits_are_audit_metadata(present, profile, count, relative):
+    module = load(ROOT / relative)
+    data = report('semgrep', True)
+    if present:
+        data['time'] = profile
+    else:
+        del data['time']
+    state, rows = module.normalize('semgrep', module.encoded(data), 0, '1.185.0')
+    assert state['status'] == 'complete' and len(rows) == 2
+    assert state['profiling_limits'] == {
+        'status': 'available' if count is not None else 'unknown',
+        'reported_fixpoint_entries': count,
+    }
+    assert state['scope'] == 'configured scanner targets; not whole data-flow coverage'
+
+
+def test_optional_profiling_preserves_native_completion():
+    module = load()
+    data = report('semgrep', True)
+    data['time'].update(rules=['rule.example'], profiling_times={'core_time': 0.1})
+    state, rows = module.normalize('semgrep', module.encoded(data), 0, '1.185.0')
+    assert state['status'] == 'complete' and len(rows) == 2
+    assert state['profiling_limits']['reported_fixpoint_entries'] == 0
+
+
+@pytest.mark.parametrize('profile', [None, {'fixpoint_timeouts': [{'message': 'Synthetic limit'}]}])
+def test_public_native_error_still_fails_with_optional_profiling(profile):
+    module = load()
+    data = report('semgrep', True)
+    data['time'] = profile
+    data['errors'] = [{'code': 2, 'level': 'warn', 'type': 'Timeout',
+                       'path': 'app.py', 'message': 'Synthetic native timeout'}]
+    state, rows = module.normalize('semgrep', module.encoded(data), 0, '1.185.0')
+    assert state['status'] == 'incomplete' and state['reason'] == 'scanner_reported_errors'
+    assert len(rows) == 2

@@ -349,3 +349,72 @@ def test_documented_callers_pin_pack_ref_to_the_uses_sha():
             assert _re.search(rf"pack_ref:\s*['\"]?{sha}\b", block), (
                 f"{name} example must set pack_ref: {sha}")
     assert checked >= 3
+
+
+@pytest.mark.parametrize('ref,ok',[
+    ('$/.github/workflows/internal.yml',True),('$/.github/workflows/inner.yaml',True),
+    ('$/.github/workflows/../other.yml',False),('$/.github/workflows/inner.yml@main',False),
+    ('$/other/workflow.yml',False),('$/action',False),('$/.github/workflows/nested/inner.yml',False)])
+def test_same_commit_workflow_pin_spelling_is_bounded(ref,ok):
+    assert (pins.classify(ref,[]) is None) is ok
+
+
+def test_actionlint_view_changes_only_actual_job_uses_and_keeps_source_positions():
+    source='''name: example
+on: workflow_call
+jobs:
+  a:
+    uses: "$/.github/workflows/inner.yml"
+    with:
+      example: $/.github/workflows/data.yml
+  b:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo '$/.github/workflows/script.yml'
+'''
+    view=pins.actionlint_view(source)
+    assert view==source.replace('uses: "$/.github/workflows/inner.yml"','uses: "./.github/workflows/inner.yml"')
+    assert len(view)==len(source) and view.count('\n')==source.count('\n')
+
+
+@pytest.mark.parametrize('ref',['$/.github/workflows/../other.yml','$/other/workflow.yml','$/.github/workflows/inner.yml@main'])
+def test_invalid_self_calls_are_not_hidden_from_actionlint(ref):
+    source='jobs:\n  a:\n    uses: '+ref+'\n'
+    assert pins.actionlint_view(source)==source
+
+
+def test_linter_signal_exit_cannot_be_reported_as_success(tmp_path,monkeypatch):
+    workflow=tmp_path/'test.yml';workflow.write_text('name: test\non: workflow_call\njobs: {}\n')
+    monkeypatch.setattr(pins.subprocess,'run',lambda *a,**kw:subprocess.CompletedProcess(a,-9))
+    assert pins.lint_workflows(tmp_path,[workflow])==2
+
+
+@pytest.mark.parametrize('case',['valid','missing-input','unknown-secret','unknown-job-field','missing-target','duplicate-key'])
+def test_actual_actionlint_retains_errors_for_adapted_calls(tmp_path,monkeypatch,case):
+    import shutil
+    if shutil.which('actionlint') is None:
+        pytest.skip('actual pinned actionlint is not installed in this unit-test environment')
+    subprocess.run(['git','init','-q',str(tmp_path)],check=True,capture_output=True)
+    directory=tmp_path/'.github/workflows';directory.mkdir(parents=True)
+    child=directory/'child.yml'
+    child.write_text('name: child\non:\n  workflow_call:\n    inputs:\n      label:\n        required: true\n        type: string\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo test\n')
+    source='name: caller\non: workflow_call\njobs:\n  invoke:\n    uses: $/.github/workflows/child.yml\n'
+    if case!='missing-input':source+='    with:\n      label: example\n'
+    if case=='unknown-secret':source+='    secrets:\n      unrecognized: ${{ secrets.UNKNOWN }}\n'
+    if case=='unknown-job-field':source+='    not-a-job-field: true\n'
+    if case=='missing-target':source=source.replace('child.yml','absent.yml')
+    if case=='duplicate-key':source+='    uses: $/.github/workflows/child.yml\n'
+    caller=directory/'caller.yml';caller.write_text(source)
+    monkeypatch.chdir(tmp_path)
+    result=pins.lint_workflows(Path('.'),[Path('.github/workflows/caller.yml')])
+    assert (result==0)==(case=='valid')
+    assert caller.read_text()==source  # The executable workflow is never rewritten.
+
+
+def test_workflow_security_runs_the_compatibility_validator_without_ignores():
+    for name,prefix in [('workflow-security.yml',''),('workflow-security-reusable.yml','../pack/')]:
+        import yaml
+        spec=yaml.safe_load((ROOT/'.github/workflows'/name).read_text())
+        step=next(s for job in spec['jobs'].values() for s in job['steps'] if s.get('name')=='actionlint')
+        assert step['run']==f'python3 {prefix}scripts/check-pinned-uses.py --actionlint'
+        assert '-ignore' not in step['run']

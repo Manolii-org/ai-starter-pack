@@ -133,6 +133,7 @@ def test_broad_cli_uses_runner_stamps_and_removes_own_control_file(launch, tmp_p
 
 
 def test_specialist_cli_writes_failed_protected_role_with_current_binding(launch, tmp_path, monkeypatch):
+    monkeypatch.setenv("SECURITY_REVIEW_MODE", "direct")
     _, instance, _, _ = launch
     specialists = load('run-specialists.py')
     source = tmp_path / 'input.diff'
@@ -150,16 +151,67 @@ def test_specialist_cli_writes_failed_protected_role_with_current_binding(launch
     assert row['_assessment']['head'] == 'a'*40
 
 
+def _assert_trusted_phase_outputs(jobs):
+    routing, judge = jobs['review-routing'], jobs['judge']
+    assert 'classify' in routing['needs']
+    assert {'classify', 'review-routing'} <= set(judge['needs'])
+    # Each successful producer is an independent required conjunction; a
+    # missing, skipped or failed phase cannot supply a selected role inventory.
+    for job, required in ((routing, ('classify',)),
+                          (judge, ('classify', 'review-routing'))):
+        clauses = {''.join(part.split()) for part in job['if'].split('&&')}
+        for name in required:
+            assert f"needs.{name}.result=='success'" in clauses
+    producer = next(row for row in routing['steps'] if row.get('id') == 'classify')
+    assert 'python3 scripts/run-pr-classifier.py' in producer['run']
+    assert '--output /tmp/classifier-output.json' in producer['run']
+    step = next(row for row in judge['steps'] if row.get('name') == 'Run judge')
+    for output, variable, environment in (
+        ('invoke_skills', 'SKILLS', 'REVIEW_SKILLS'),
+        ('invoke_agents', 'AGENTS', 'REVIEW_AGENTS'),
+    ):
+        assert routing['outputs'][output] == '${{ steps.classify.outputs.' + output + ' }}'
+        assert f"d.get('{output}',[])" in producer['run']
+        assert f'echo "{output}=${variable}"' in producer['run']
+        assert step['env'][environment] == '${{ needs.review-routing.outputs.' + output + ' }}'
+    assert 'python3 scripts/run-judge.py' in step['run']
+
+
 @pytest.mark.parametrize('workflow', ['pr-assessment.yml', 'pr-assessment-reusable.yml'])
 def test_workflow_passes_both_trusted_phase_outputs_to_real_judge(workflow):
     path = ROOT / '.github/workflows' / workflow
     if not path.exists() and workflow == 'pr-assessment-reusable.yml':
         pytest.skip('reusable workflow is pack-only; consumer caller checked separately')
+    _assert_trusted_phase_outputs(yaml.safe_load(path.read_text())['jobs'])
+
+
+@pytest.mark.parametrize('workflow', ['pr-assessment.yml', 'pr-assessment-reusable.yml'])
+@pytest.mark.parametrize('broken', ['conservative-inventory', 'routing-output',
+                                   'producer-command', 'routing-dependency',
+                                   'judge-dependency', 'classify-success',
+                                   'routing-success'])
+def test_phase_output_contract_rejects_missing_or_wrong_producer(workflow, broken):
+    path = ROOT / '.github/workflows' / workflow
+    if not path.exists() and workflow == 'pr-assessment-reusable.yml':
+        pytest.skip('reusable workflow is pack-only; consumer caller checked separately')
     jobs = yaml.safe_load(path.read_text())['jobs']
-    step = next(row for row in jobs['judge']['steps'] if row.get('name') == 'Run judge')
-    assert step['env']['REVIEW_SKILLS'] == '${{ needs.classify.outputs.invoke_skills }}'
-    assert step['env']['REVIEW_AGENTS'] == '${{ needs.classify.outputs.invoke_agents }}'
-    assert 'python3 scripts/run-judge.py' in step['run']
+    routing, judge = jobs['review-routing'], jobs['judge']
+    if broken == 'conservative-inventory':
+        step = next(row for row in judge['steps'] if row.get('name') == 'Run judge')
+        step['env']['REVIEW_SKILLS'] = '${{ needs.classify.outputs.invoke_skills }}'
+    elif broken == 'routing-output':
+        routing['outputs']['invoke_agents'] = '${{ steps.other.outputs.invoke_agents }}'
+    elif broken == 'producer-command':
+        next(row for row in routing['steps'] if row.get('id') == 'classify')['run'] = 'true'
+    elif broken == 'routing-dependency':
+        routing['needs'] = []
+    elif broken == 'judge-dependency':
+        judge['needs'].remove('review-routing')
+    else:
+        name = 'classify' if broken == 'classify-success' else 'review-routing'
+        judge['if'] = judge['if'].replace(f"needs.{name}.result == 'success'", 'true')
+    with pytest.raises(AssertionError):
+        _assert_trusted_phase_outputs(jobs)
 
 
 def test_duplicate_fields_do_not_override_incomplete_marker(launch):

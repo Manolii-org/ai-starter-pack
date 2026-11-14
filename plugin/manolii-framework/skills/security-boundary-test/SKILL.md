@@ -5,9 +5,9 @@ description: "Flags diffs that introduce/modify security boundaries (silo, allow
 type: skill
 disable-model-invocation: true  # slash/CI-invoked checklist — removed from model-facing catalogue to cut per-session tokens (2026-07-06); delete this line to restore auto-invocation
 model: haiku
-advisor_model: claude-sonnet-4-6
+advisor_model: sonnet
+required_security_review: true
 data_sensitivity: internal
-first_party: true  # eligibility matrix: security review stays on Anthropic even under OSS routing
 max_tokens: 800
 safety_tier: green
 requires_mcp: []

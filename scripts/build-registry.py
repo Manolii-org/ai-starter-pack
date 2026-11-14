@@ -71,13 +71,22 @@ def refresh_policy(target: Path, check: bool = False, include_continuation: bool
         # materialisation. A late conflict must leave earlier assets untouched.
         names = POLICY_SKILLS + ("autonomy-follow-through",) if include_continuation else POLICY_SKILLS
         for name in names:
-            for leaf in ("SKILL.md", "evals/cases.json"):
+            leaves = ("SKILL.md", "evals/cases.json", "review-evidence.md") if name == "autonomy-follow-through" else ("SKILL.md", "evals/cases.json")
+            for leaf in leaves:
                 rel = f"platform/framework/skills/{name}/{leaf}"
                 source = resolver._read_source(REPO, f".claude/skills/{name}/{leaf}")
                 if source is None:
                     raise ValueError(f"unsafe or unreadable policy source: {name}/{leaf}")
                 outputs[rel] = source[0]
                 snapshots[rel] = native.file_snapshot(target, rel, resolver)
+        if include_continuation:
+            # The policy/companion contract needs its matching checked writer.
+            rel = 'platform/framework/scripts/lib/native_guidance.py'
+            source = resolver._read_source(REPO, 'scripts/lib/native_guidance.py')
+            if source is None:
+                raise ValueError('native policy writer source unavailable')
+            outputs[rel] = source[0]
+            snapshots[rel] = native.file_snapshot(target, rel, resolver)
         stale = [rel for rel in outputs if snapshots[rel] is None or snapshots[rel][0] != outputs[rel]]
         if not check:
             native.apply_outputs(target, outputs, snapshots, resolver)
@@ -138,7 +147,7 @@ def main() -> None:
     ap.add_argument("--registry-root", type=Path,
                     help="with --policy-only, an established private mirror's registry directory")
     ap.add_argument("--include-continuation", action="store_true",
-                    help="with --policy-only, also refresh the owner-continuation skill and cases")
+                    help="with --policy-only, refresh continuation policy, companion, cases and matched native writer")
     args = ap.parse_args()
     if args.registry_root and not args.policy_only:
         ap.error("--registry-root requires --policy-only")

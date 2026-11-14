@@ -140,18 +140,6 @@
       "severity": "High"
     },
     {
-      "fingerprint": "365b05175c9d4266",
-      "ident": "bot-conditions",
-      "path": ".github/workflows/pr-autofix-loop-reusable.yml",
-      "severity": "High"
-    },
-    {
-      "fingerprint": "839fead46958b9a7",
-      "ident": "bot-conditions",
-      "path": ".github/workflows/pr-autofix-loop.yml",
-      "severity": "High"
-    },
-    {
       "fingerprint": "4124b1bb1915a1cb",
       "ident": "dangerous-triggers",
       "path": ".github/workflows/pr-autofix-loop.yml",
@@ -160,12 +148,6 @@
     {
       "fingerprint": "93219d4bff3c511a",
       "ident": "dangerous-triggers",
-      "path": ".github/workflows/pr-autofix-loop.yml",
-      "severity": "High"
-    },
-    {
-      "fingerprint": "86c52650bc514a65",
-      "ident": "excessive-permissions",
       "path": ".github/workflows/pr-autofix-loop.yml",
       "severity": "High"
     },

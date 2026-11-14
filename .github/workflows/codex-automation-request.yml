@@ -1,0 +1,62 @@
+name: Codex Automation Request
+
+# Unprivileged producer only. The default-branch controller must authenticate
+# the completed run and inert artifact before account or model admission.
+on:
+  pull_request:
+    branches: [main, master, develop]
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: codex-automation-request-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  request:
+    if: >-
+      vars.CODEX_AUTOMATION_ENABLED == 'true' &&
+      github.event.pull_request.draft == false &&
+      github.event.pull_request.head.repo.id == github.event.repository.id &&
+      !contains(github.event.pull_request.labels.*.name, 'skip-ai-review')
+    runs-on: ubuntu-slim
+    timeout-minutes: 3
+    steps:
+      - name: Write inert exact-revision request
+        id: request
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json, os, re
+          from pathlib import Path
+
+          event = json.loads(Path(os.environ['GITHUB_EVENT_PATH']).read_text())
+          pr, repository = event['pull_request'], event['repository']
+          assert pr['state'] == 'open' and pr['draft'] is False
+          assert type(pr['number']) is int and pr['number'] > 0
+          for side in ('base', 'head'):
+              assert pr[side]['repo']['id'] == repository['id']
+              assert re.fullmatch(r'[a-f0-9]{40}', pr[side]['sha'])
+          run_id, attempt = int(os.environ['GITHUB_RUN_ID']), int(os.environ['GITHUB_RUN_ATTEMPT'])
+          assert run_id > 0 and attempt > 0
+          request = {
+              'schema': 'codex-automation-request/v1', 'repository': repository['full_name'],
+              'pull_request': pr['number'], 'base_sha': pr['base']['sha'], 'head_sha': pr['head']['sha'],
+              'operation': 'assessment', 'request_run_id': run_id, 'request_run_attempt': attempt,
+          }
+          directory = Path(os.environ['RUNNER_TEMP']) / 'codex-automation-request'
+          directory.mkdir()
+          (directory / 'request.json').write_text(json.dumps(request, sort_keys=True) + '\n')
+          name = f"codex-automation-request-{pr['number']}-{pr['head']['sha']}"
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write(f'artifact={name}\n')
+          PY
+      - name: Retain inert request
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ${{ steps.request.outputs.artifact }}
+          path: ${{ runner.temp }}/codex-automation-request/request.json
+          if-no-files-found: error
+          retention-days: 7

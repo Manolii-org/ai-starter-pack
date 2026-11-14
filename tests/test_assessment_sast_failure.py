@@ -22,7 +22,8 @@ def run_step(workflow, name, tmp_path, **environment):
 
 
 def reports(tmp_path):
-    semgrep = {'version': '1.185.0', 'results': [], 'errors': [], 'paths': {'scanned': ['fixture.py']}}
+    semgrep = {'version': '1.185.0', 'results': [], 'errors': [], 'paths': {'scanned': ['fixture.py']},
+               'time': {'fixpoint_timeouts': []}}
     bandit = {'results': [], 'errors': [], 'metrics': {'_totals': {'loc': 1}, 'fixture.py': {'loc': 1}}}
     (tmp_path / 'semgrep-results.json').write_text(json.dumps(semgrep))
     (tmp_path / 'bandit-results.json').write_text(json.dumps(bandit))
@@ -304,3 +305,70 @@ def test_runner_policy_alone_selects_its_owning_recipe():
     check = next(c for c in config['checks'] if c['id'] == 'assessment-sast-failure-contract')
     assert matches(['tests/test_pr_assessment_runner_policy.py'], check['paths'])
     assert 'tests/test_pr_assessment_runner_policy.py' in check['commands'][0]
+
+
+@pytest.mark.parametrize('workflow', WORKFLOWS)
+@pytest.mark.parametrize('present,profile,count', [
+    (False, None, None), (True, None, None), (True, {}, None),
+    (True, {'fixpoint_timeouts': None}, None),
+    (True, {'fixpoint_timeouts': {}}, None),
+    (True, {'fixpoint_timeouts': []}, 0),
+    (True, {'fixpoint_timeouts': [{'error_type': 'Fixpoint timeout',
+                                 'severity': 'warn', 'message': 'Synthetic profiling limit'}]}, 1),
+])
+def test_optional_profiling_limits_do_not_replace_native_completion(
+        tmp_path, workflow, present, profile, count):
+    semgrep, _ = reports(tmp_path)
+    if present:
+        semgrep['time'] = profile
+    else:
+        del semgrep['time']
+    (tmp_path / 'semgrep-results.json').write_text(json.dumps(semgrep))
+    result = run_step(workflow, 'Merge SAST findings', tmp_path)
+    assert result.returncode == 0, result.stderr
+    assert json.loads((tmp_path / '.ai/sast-findings.json').read_text()) == []
+    expected = {'status': 'available' if count is not None else 'unknown',
+                'reported_fixpoint_entries': count}
+    assert {'semgrep_profile_audit': expected} in [
+        json.loads(line) for line in result.stdout.splitlines() if line.startswith('{')]
+
+
+@pytest.mark.parametrize('workflow', WORKFLOWS)
+def test_optional_profiling_preserves_normal_timing_metadata(tmp_path, workflow):
+    semgrep, _ = reports(tmp_path)
+    semgrep['time'].update(rules=['fixture.rule'], total_bytes=5,
+                          profiling_times={'core_time': 0.1})
+    (tmp_path / 'semgrep-results.json').write_text(json.dumps(semgrep))
+    result = run_step(workflow, 'Merge SAST findings', tmp_path)
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize('workflow', WORKFLOWS)
+@pytest.mark.parametrize('profile', [None, {'fixpoint_timeouts': [{'message': 'Synthetic limit'}]}])
+def test_public_native_error_still_fails_with_optional_profiling(tmp_path, workflow, profile):
+    semgrep, _ = reports(tmp_path)
+    semgrep['time'] = profile
+    semgrep['results'] = [{'check_id': 'fixture.rule', 'path': 'fixture.py', 'start': {'line': 1},
+                           'extra': {'message': 'Synthetic finding', 'severity': 'WARNING'}}]
+    semgrep['errors'] = [{'code': 2, 'level': 'warn', 'type': 'Timeout',
+                         'path': 'fixture.py', 'message': 'Synthetic native timeout'}]
+    (tmp_path / 'semgrep-results.json').write_text(json.dumps(semgrep))
+    result = run_step(workflow, 'Merge SAST findings', tmp_path, SEMGREP_EXIT='1')
+    assert result.returncode != 0
+    assert 'semgrep: incomplete or malformed report' in result.stderr
+    assert not (tmp_path / '.ai/sast-findings.json').exists()
+
+
+@pytest.mark.parametrize('workflow', WORKFLOWS)
+def test_raw_scanner_diagnostics_survive_failure_without_becoming_findings(workflow):
+    spec = yaml.load((ROOT / '.github/workflows' / workflow).read_text(), Loader=yaml.BaseLoader)
+    steps = spec['jobs']['sast']['steps']
+    step = next(s for s in steps if s.get('name') == 'Retain raw scanner diagnostics')
+    assert step['if'] == 'always()'
+    assert step['uses'] == 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02'
+    assert step['with']['name'] == 'sast-scanner-diagnostics'
+    assert step['with']['path'].splitlines() == ['/tmp/semgrep-results.json', '/tmp/bandit-results.json']
+    assert step['with']['retention-days'] == '7'
+    assert step['with']['if-no-files-found'] == 'warn'
+    assert steps.index(step) > next(i for i, s in enumerate(steps) if s.get('name') == 'Merge SAST findings')
+    assert '--time' in next(s['run'] for s in steps if s.get('name') == 'Run Semgrep')
