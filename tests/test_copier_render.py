@@ -542,7 +542,7 @@ def test_skip_if_exists_contract(has_native_lock):
     copier_config = yaml.safe_load((ROOT / "copier.yml").read_text())
     skip_if_exists = set(copier_config.get("_skip_if_exists", []))
 
-    expected = {"CLAUDE.md", ".claude/model-routing.json", ".claude/mcp.json", ".claude/hooks/session-start.sh", "ai-manifest.yaml", "config/agent-checks.json", "scripts/ci/codex-review-worker.json",
+    expected = {"CLAUDE.md", ".claude/model-routing.json", ".claude/mcp.json", ".claude/hooks/session-start.sh", "ai-manifest.yaml", "config/agent-checks.json", "scripts/ci/codex-review-worker.json", "scripts/ci/codex-automation-worker.json",
                 # QA framework owner config + host hook files (docs/qa-framework.md)
                 "config/qa.json", ".cursor/hooks.json", ".codex/hooks.json",
                 ".githooks/pre-push"}
@@ -975,6 +975,10 @@ STRICT_EXCLUDED = {
     ".github/workflows/codex-security-diff-scan.yml",
     ".github/workflows/codex-review-worker.yml",
     ".github/workflows/codex-review-recovery.yml",
+    ".github/workflows/codex-automation-request.yml",
+    ".github/workflows/codex-automation-worker.yml",
+    "scripts/ci/codex-automation-worker.json",
+    "scripts/ci/codex-automation-runtime/Dockerfile",
     ".github/workflows/setup-env-secret.yml",
     ".github/workflows/dependabot-manual-automerge.yml",
     ".github/workflows/monitor-litellm.yml",
@@ -1086,6 +1090,9 @@ def test_standard_keeps_codex_review_unless_opted_out(default_render, tmp_path):
     codex = {".github/workflows/codex-pr-review.yml", ".github/workflows/codex-security-diff-scan.yml",
              ".github/workflows/codex-review-worker.yml", ".github/workflows/codex-review-recovery.yml"}
     codex.add("tests/test_codex_review_workflows.py")
+    # The subscription automation producer/controller depend on the review runtime.
+    codex |= {".github/workflows/codex-automation-request.yml", ".github/workflows/codex-automation-worker.yml",
+              "scripts/ci/codex-automation-worker.json", "scripts/ci/codex-automation-runtime/Dockerfile"}
     assert codex <= file_set(default_render)
     dst = tmp_path / "nocodex"
     dst.mkdir()
