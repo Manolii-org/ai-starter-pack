@@ -473,7 +473,7 @@ def test_changed_prose_during_render_is_not_clobbered(producers, consumer, monke
     assert snapshot(consumer) == observed["snapshot"]
 
 
-def test_atomic_replacement_failure_retains_original_and_recovery(producers, consumer, monkeypatch):
+def test_atomic_replacement_failure_retains_original_and_recovery(producers, consumer, monkeypatch, capsys):
     module = imported(producers["source"][0])
     original = module.os.replace
 
@@ -489,7 +489,17 @@ def test_atomic_replacement_failure_retains_original_and_recovery(producers, con
     record = json.loads((consumer / RECOVERY).read_text())
     assert record["status"] == "prepared"
     assert "scripts/agent-check.py" in record["completed"]
-    assert not list(consumer.rglob(".agent-validation-*"))
+    # Failed writes now retain their private owned inode instead of using
+    # a racy pathname unlink. Bind recovery evidence to this owned orphan.
+    leftovers = list(consumer.rglob(".agent-validation-*"))
+    assert len(leftovers) == 1 and leftovers[0].is_file() and not leftovers[0].is_symlink()
+    owned = leftovers[0].stat()
+    assert owned.st_mode & 0o777 == 0o600
+    error = capsys.readouterr().err
+    temporary_record = json.loads(error.split("AGENT-VALIDATION-TEMPORARY-RECOVERY: ", 1)[1].splitlines()[0])
+    assert temporary_record["held_identity"] == {"device": owned.st_dev, "inode": owned.st_ino}
+    assert temporary_record["held_mode"] == "0600" and temporary_record["private"] is True
+    assert temporary_record["name"] == leftovers[0].name
     git(consumer, "add", ".")
     assert not git(consumer, "ls-files", "--", RECOVERY)
 
@@ -560,7 +570,7 @@ def test_temp_name_collision_preserves_other_writer_file(
     assert plan.completed == []
 
 
-def test_cleanup_failure_retains_primary_error_and_closes_parent(
+def test_failed_replace_retains_owned_private_temp_and_closes_parent(
         replacement_kernel, tmp_path, monkeypatch, capsys):
     module = replacement_kernel
     root = tmp_path / "cleanup"
@@ -577,7 +587,7 @@ def test_cleanup_failure_retains_primary_error_and_closes_parent(
         raise primary
 
     def fail_unlink(*args, **kwargs):
-        raise PermissionError(errno.EACCES, "synthetic temporary cleanup denial")
+        raise AssertionError("failure cleanup must never unlink a pathname")
 
     monkeypatch.setattr(module.os, "replace", fail_replace)
     monkeypatch.setattr(module.os, "unlink", fail_unlink)
@@ -587,8 +597,10 @@ def test_cleanup_failure_retains_primary_error_and_closes_parent(
     assert path.read_bytes() == b"Owner bytes.\n"
     assert plan.completed == []
     error = capsys.readouterr().err
-    assert "AGENT-VALIDATION-CLEANUP:" in error
-    assert "synthetic temporary cleanup denial" in error
+    record = json.loads(error.split("AGENT-VALIDATION-TEMPORARY-RECOVERY: ", 1)[1].splitlines()[0])
+    assert record["private"] is True
+    assert record["held_mode"] == "0600"
+    assert record["held_links"] == 1
     assert json.loads(error.split("AGENT-VALIDATION-RECOVERY: ", 1)[1])["reason"] == str(primary)
     leftovers = list(root.glob(".agent-validation-*"))
     assert len(leftovers) == 1
@@ -1087,3 +1099,604 @@ def test_consumer_skill_contract_rejects_missing_requirements(tmp_path, bad):
     path.write_text("---\n" + yaml.safe_dump(metadata) + "---\n" + body)
     with pytest.raises(AssertionError):
         consumer_skill_contract(path)
+
+
+def test_plan_link_replacement_refused_when_snapshot_metadata_repeats(tmp_path, monkeypatch):
+    """Inode pinning cannot rely on timestamp resolution or a reused snapshot."""
+    module = imported(ROOT)
+    root = tmp_path / "link-plan"
+    root.mkdir()
+    (root / "target").mkdir()
+    alias = root / "alias"
+    alias.symlink_to("target", target_is_directory=True)
+    original_open, original_state = module.os.open, module.state
+    opened = []
+
+    def observe_open(path, flags, *args, **kwargs):
+        descriptor = original_open(path, flags, *args, **kwargs)
+        if Path(path) == alias:
+            opened.append(descriptor)
+        return descriptor
+
+    monkeypatch.setattr(module.os, "open", observe_open)
+    plan = module.OutputPlan(root)
+    expected = plan.watch(alias)
+    alias.unlink()
+    alias.symlink_to("target", target_is_directory=True)
+    monkeypatch.setattr(module, "state", lambda path: expected if path == alias else original_state(path))
+    try:
+        with pytest.raises(ValueError, match="link identity changed"):
+            plan.revalidate()
+    finally:
+        close = getattr(plan, "close", None)
+        if close is not None:
+            close()
+    assert opened
+    for descriptor in opened:
+        with pytest.raises(OSError) as closed:
+            os.fstat(descriptor)
+        assert closed.value.errno == errno.EBADF
+
+
+@pytest.mark.parametrize("replacement", ["link", "regular"])
+def test_failed_cleanup_preserves_another_writers_temp_entry(
+        replacement_kernel, tmp_path, monkeypatch, capsys, replacement):
+    """Failure cleanup owns the original descriptor, never a replacement path."""
+    module = replacement_kernel
+    root = tmp_path / "changed-temp"
+    root.mkdir()
+    path = root / "owner.txt"
+    path.write_bytes(b"Owner bytes.\n")
+    outside = tmp_path / "outside.txt"
+    outside.write_bytes(b"Outside bytes.\n")
+    outside.chmod(0o644)
+    primary = OSError(errno.ENOSPC, "synthetic replacement failure")
+    names = []
+
+    def replace_after_other_writer(src, dst, **kwargs):
+        descriptor = kwargs["src_dir_fd"]
+        module.os.unlink(src, dir_fd=descriptor)
+        if replacement == "link":
+            module.os.symlink(str(outside), src, dir_fd=descriptor)
+        else:
+            handle = module.os.open(src, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644,
+                                    dir_fd=descriptor)
+            os.fchmod(handle, 0o644)
+            with os.fdopen(handle, "wb") as stream:
+                stream.write(b"Other writer bytes.\n")
+        names.append(root / src)
+        raise primary
+
+    monkeypatch.setattr(module.os, "replace", replace_after_other_writer)
+    plan = module.OutputPlan(root)
+    plan.add(path, b"Replacement.\n", "fixture")
+    with pytest.raises(OSError) as caught:
+        plan.apply([path])
+    assert caught.value is primary
+    assert path.read_bytes() == b"Owner bytes.\n"
+    assert outside.read_bytes() == b"Outside bytes.\n"
+    assert outside.stat().st_mode & 0o777 == 0o644
+    assert len(names) == 1
+    if replacement == "link":
+        assert names[0].is_symlink() and os.readlink(names[0]) == str(outside)
+    else:
+        assert names[0].read_bytes() == b"Other writer bytes.\n"
+        assert names[0].stat().st_mode & 0o777 == 0o644
+    assert "temporary path no longer names the owned file" in capsys.readouterr().err
+
+
+def test_completed_rename_error_keeps_published_output_mode(
+        replacement_kernel, tmp_path, monkeypatch, capsys):
+    """An ambiguous completed rename is not an unpublished private orphan."""
+    module = replacement_kernel
+    root = tmp_path / "ambiguous-rename"
+    root.mkdir()
+    path = root / "owner.txt"
+    path.write_bytes(b"Owner bytes.\n")
+    path.chmod(0o644)
+    plan = module.OutputPlan(root)
+    plan.add(path, b"Replacement.\n", "fixture")
+    original = module.os.replace
+    primary = OSError(errno.EIO, "synthetic error after completed rename")
+
+    def completed_then_error(*args, **kwargs):
+        original(*args, **kwargs)
+        raise primary
+
+    monkeypatch.setattr(module.os, "replace", completed_then_error)
+    with pytest.raises(OSError) as caught:
+        plan.apply([path])
+    assert caught.value is primary
+    assert path.read_bytes() == b"Replacement.\n"
+    assert path.stat().st_mode & 0o777 == 0o644
+    assert not list(root.glob(".agent-validation-*"))
+    assert plan.completed == []
+    report = capsys.readouterr().err.split("AGENT-VALIDATION-RECOVERY: ", 1)[1]
+    assert json.loads(report)["reason"] == str(primary)
+
+
+@pytest.mark.parametrize("replacement", ["link", "regular"])
+def test_failed_cleanup_preserves_replacement_after_final_name_snapshot(
+        replacement_kernel, tmp_path, monkeypatch, capsys, replacement):
+    """A checked basename never authorizes a later unlink of another inode."""
+    module = replacement_kernel
+    root = tmp_path / "cleanup-last-stat"
+    root.mkdir()
+    path = root / "owner.txt"
+    path.write_bytes(b"Owner bytes.\n")
+    outside = tmp_path / "outside.txt"
+    outside.write_bytes(b"Outside bytes.\n")
+    outside.chmod(0o644)
+    primary = OSError(errno.ENOSPC, "synthetic replacement failure")
+    original_stat, original_unlink, original_open = module.os.stat, module.os.unlink, module.os.open
+    checked = []
+
+    def replace_after_last_snapshot(name, *args, **kwargs):
+        observed = original_stat(name, *args, **kwargs)
+        if isinstance(name, str) and name.startswith(".agent-validation-") and "dir_fd" in kwargs:
+            checked.append(name)
+            if len(checked) == 2:
+                parent = kwargs["dir_fd"]
+                original_unlink(name, dir_fd=parent)
+                if replacement == "link":
+                    module.os.symlink(str(outside), name, dir_fd=parent)
+                else:
+                    handle = original_open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                                           0o644, dir_fd=parent)
+                    os.fchmod(handle, 0o644)
+                    with os.fdopen(handle, "wb") as stream:
+                        stream.write(b"Other writer bytes.\n")
+        return observed
+
+    monkeypatch.setattr(module.os, "stat", replace_after_last_snapshot)
+    monkeypatch.setattr(module.os, "replace", lambda *args, **kwargs: (_ for _ in ()).throw(primary))
+    plan = module.OutputPlan(root)
+    plan.add(path, b"Replacement.\n", "fixture")
+    with pytest.raises(OSError) as caught:
+        plan.apply([path])
+    assert caught.value is primary
+    assert len(checked) == 2
+    other = root / checked[-1]
+    if replacement == "link":
+        assert other.is_symlink() and os.readlink(other) == str(outside)
+    else:
+        assert other.read_bytes() == b"Other writer bytes.\n"
+        assert other.stat().st_mode & 0o777 == 0o644
+    assert outside.read_bytes() == b"Outside bytes.\n"
+    assert outside.stat().st_mode & 0o777 == 0o644
+    assert path.read_bytes() == b"Owner bytes.\n"
+    assert plan.completed == []
+    error = capsys.readouterr().err
+    record = json.loads(error.split("AGENT-VALIDATION-TEMPORARY-RECOVERY: ", 1)[1].splitlines()[0])
+    assert record["held_mode"] == "0600"
+    assert record["name_observation"] == "owned_at_check"
+    assert record["name"] == checked[-1]
+
+
+def test_moved_temporary_is_not_claimed_private(
+        replacement_kernel, tmp_path, monkeypatch, capsys):
+    """A missing name can be an ambiguous completed move, so do not chmod it."""
+    module = replacement_kernel
+    root = tmp_path / "cleanup-moved"
+    root.mkdir()
+    path, moved = root / "owner.txt", root / "moved.txt"
+    path.write_bytes(b"Owner bytes.\n")
+    path.chmod(0o644)
+    primary = OSError(errno.EIO, "synthetic error after another move")
+    original = module.os.replace
+
+    def moved_then_error(src, dst, **kwargs):
+        original(src, "moved.txt", **kwargs)
+        raise primary
+
+    monkeypatch.setattr(module.os, "replace", moved_then_error)
+    plan = module.OutputPlan(root)
+    plan.add(path, b"Replacement.\n", "fixture")
+    with pytest.raises(OSError) as caught:
+        plan.apply([path])
+    assert caught.value is primary
+    assert path.read_bytes() == b"Owner bytes.\n"
+    assert moved.read_bytes() == b"Replacement.\n"
+    assert moved.stat().st_mode & 0o777 == 0o644
+    assert not list(root.glob(".agent-validation-*"))
+    assert "AGENT-VALIDATION-TEMPORARY-RECOVERY:" not in capsys.readouterr().err
+
+
+def test_failed_privacy_change_reports_actual_held_mode(
+        replacement_kernel, tmp_path, monkeypatch, capsys):
+    """A denied chmod preserves the primary failure without claiming privacy."""
+    module = replacement_kernel
+    root = tmp_path / "cleanup-privacy-denied"
+    root.mkdir()
+    path = root / "owner.txt"
+    path.write_bytes(b"Owner bytes.\n")
+    path.chmod(0o644)
+    primary = OSError(errno.ENOSPC, "synthetic replacement failure")
+    original_fchmod = module.os.fchmod
+
+    def deny_privacy(handle, mode):
+        if mode == 0o600:
+            raise PermissionError(errno.EACCES, "synthetic privacy denial")
+        return original_fchmod(handle, mode)
+
+    monkeypatch.setattr(module.os, "fchmod", deny_privacy)
+    monkeypatch.setattr(module.os, "replace", lambda *args, **kwargs: (_ for _ in ()).throw(primary))
+    plan = module.OutputPlan(root)
+    plan.add(path, b"Replacement.\n", "fixture")
+    with pytest.raises(OSError) as caught:
+        plan.apply([path])
+    assert caught.value is primary
+    leftovers = list(root.glob(".agent-validation-*"))
+    assert len(leftovers) == 1
+    assert leftovers[0].stat().st_mode & 0o777 == 0o644
+    error = capsys.readouterr().err
+    assert "synthetic privacy denial" in error
+    record = json.loads(error.split("AGENT-VALIDATION-TEMPORARY-RECOVERY: ", 1)[1].splitlines()[0])
+    assert record["held_mode"] == "0644"
+    assert record["private"] is False
+
+
+@pytest.mark.parametrize("kind", ["ancestor", "leaf"])
+def test_missing_link_handle_flags_preserve_legacy_recipe_cli(producers, consumer, tmp_path, kind):
+    for rel in (".claude/skills", ".cursor/skills"):
+        (consumer / rel).unlink()
+        (consumer / rel).mkdir()
+    recipes = tmp_path / "portable-recipes"
+    recipes.mkdir()
+    raw = b'{"schema_version":1,"base":"origin/main","checks":[]}\n'
+    (recipes / "checks.json").write_bytes(raw)
+    alias = tmp_path / "portable-recipe-alias"
+    alias.symlink_to(recipes if kind == "ancestor" else recipes / "checks.json")
+    supplied = alias / "checks.json" if kind == "ancestor" else alias
+    source = producers["source"][0]
+    wrapper = ("import os,runpy,sys\n"
+               "for name in ('O_PATH','O_NOFOLLOW','O_SYMLINK'):\n"
+               "    if hasattr(os,name): delattr(os,name)\n"
+               "sys.argv=sys.argv[1:]\nrunpy.run_path(sys.argv[0],run_name='__main__')\n")
+    environment = {**ENV, **{k: os.environ[k] for k in (
+        "HOME", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy",
+        "SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "NODE_EXTRA_CA_CERTS") if k in os.environ}}
+    def run(*flags):
+        return subprocess.run([sys.executable, "-B", "-c", wrapper,
+            str(source / "scripts/install-agent-validation.py"), "--repo-root", str(consumer),
+            "--recipes", str(supplied), *flags], env=environment, cwd=tmp_path,
+            capture_output=True, text=True, timeout=30)
+    before = snapshot(consumer)
+    dry, check = run("--dry-run"), run("--check")
+    assert dry.returncode == 0, dry.stderr
+    assert check.returncode == 1, check.stderr
+    assert snapshot(consumer) == before
+    applied = run()
+    assert applied.returncode == 0, applied.stderr
+    assert (consumer / "config/agent-checks.json").read_bytes() == raw
+    after = snapshot(consumer)
+    for flags in [("--check",), ("--dry-run",), ()]:
+        result = run(*flags)
+        assert result.returncode == 0, result.stderr
+        assert snapshot(consumer) == after
+    assert alias.is_symlink()
+
+
+@pytest.mark.parametrize("changed", ["alias", "canonical"])
+def test_portable_link_recipe_inputs_still_revalidate(producers, consumer, tmp_path, monkeypatch, changed):
+    for name in ("O_PATH", "O_NOFOLLOW", "O_SYMLINK"):
+        monkeypatch.delattr(os, name, raising=False)
+    for rel in (".claude/skills", ".cursor/skills"):
+        (consumer / rel).unlink()
+        (consumer / rel).mkdir()
+    recipes = tmp_path / "portable-recipes"
+    recipes.mkdir()
+    recipe = recipes / "checks.json"
+    recipe.write_bytes((consumer / "config/agent-checks.json").read_bytes())
+    alias = tmp_path / "portable-recipe-alias"
+    alias.symlink_to(recipes, target_is_directory=True)
+    module = imported(producers["source"][0])
+    assert module.DIRFD_ATOMIC is False
+    original = module.build_plan
+    changed_inputs = []
+    def altered(args):
+        plan = original(args)
+        if changed == "alias":
+            alternate = tmp_path / "alternate-recipes"
+            alternate.mkdir()
+            (alternate / "checks.json").write_bytes(recipe.read_bytes())
+            alias.unlink()
+            alias.symlink_to(alternate, target_is_directory=True)
+        else:
+            recipe.write_bytes(recipe.read_bytes() + b"\n")
+        changed_inputs.append(changed)
+        return plan
+    monkeypatch.setattr(module, "build_plan", altered)
+    before = snapshot(consumer)
+    assert module.main(["--repo-root", str(consumer), "--recipes", str(alias / "checks.json")]) == 2
+    assert changed_inputs == [changed]
+    assert snapshot(consumer) == before
+
+
+@pytest.mark.parametrize("flags", [(), ("--check",), ("--dry-run",)])
+def test_missing_link_handle_flags_do_not_qualify_explicit_layout(producers, consumer, monkeypatch, flags):
+    for name in ("O_PATH", "O_NOFOLLOW", "O_SYMLINK"):
+        monkeypatch.delattr(os, name, raising=False)
+    module = imported(producers["source"][0])
+    assert module.DIRFD_ATOMIC is False
+    before = snapshot(consumer)
+    assert module.main(["--repo-root", str(consumer), "--layout", LAYOUT_NAME, *flags]) == 2
+    assert snapshot(consumer) == before
+
+
+@pytest.mark.parametrize("cleanup_error", [False, True])
+def test_link_fileio_failure_closes_descriptor_without_masking_primary(tmp_path, monkeypatch, cleanup_error):
+    module = imported(ROOT)
+    root = tmp_path / "constructor-failure"
+    root.mkdir()
+    (root / "target").write_text("synthetic")
+    alias = root / "alias"
+    alias.symlink_to("target")
+    opened = []
+    original_open, original_close = os.open, os.close
+    primary = ValueError("synthetic FileIO initialization failure")
+    def opening(path, flags, *args, **kwargs):
+        fd = original_open(path, flags, *args, **kwargs)
+        if Path(path) == alias:
+            opened.append(fd)
+        return fd
+    def closing(fd):
+        original_close(fd)
+        if cleanup_error and fd in opened:
+            raise OSError(errno.EIO, "synthetic close reporting failure")
+    def construct(*args, **kwargs):
+        raise primary
+    monkeypatch.setattr(module.os, "open", opening)
+    monkeypatch.setattr(module.os, "close", closing)
+    monkeypatch.setattr(module.io, "FileIO", construct)
+    plan = module.OutputPlan(root)
+    try:
+        with pytest.raises(ValueError) as error:
+            plan.watch(alias)
+        assert error.value is primary
+        assert len(opened) == 1
+        with pytest.raises(OSError) as closed:
+            os.fstat(opened[0])
+        assert closed.value.errno == errno.EBADF
+        assert plan._link_handles == {}
+        if cleanup_error:
+            assert isinstance(error.value.__context__, OSError)
+            assert error.value.__context__.errno == errno.EIO
+    finally:
+        plan.close()
+        for fd in opened:
+            try:
+                os.fstat(fd)
+            except OSError:
+                continue
+            original_close(fd)
+
+
+@pytest.mark.skipif(not hasattr(os, "O_PATH") or not hasattr(os, "O_NOFOLLOW"),
+                    reason="actual O_PATH directory constructor behavior requires these host flags")
+def test_link_replaced_with_directory_closes_actual_constructor_failure(tmp_path, monkeypatch):
+    module = imported(ROOT)
+    root = tmp_path / "directory-race"
+    root.mkdir()
+    (root / "target").mkdir()
+    alias = root / "alias"
+    alias.symlink_to("target", target_is_directory=True)
+    original_open = os.open
+    opened = []
+    def opening(path, flags, *args, **kwargs):
+        if Path(path) == alias:
+            alias.rename(root / "retained-alias")
+            alias.mkdir()
+        fd = original_open(path, flags, *args, **kwargs)
+        if Path(path) == alias:
+            opened.append(fd)
+        return fd
+    monkeypatch.setattr(module.os, "open", opening)
+    plan = module.OutputPlan(root)
+    try:
+        with pytest.raises(IsADirectoryError):
+            plan.watch(alias)
+        assert len(opened) == 1
+        with pytest.raises(OSError) as closed:
+            os.fstat(opened[0])
+        assert closed.value.errno == errno.EBADF
+        assert plan._link_handles == {}
+    finally:
+        plan.close()
+        for fd in opened:
+            try:
+                os.fstat(fd)
+            except OSError:
+                continue
+            os.close(fd)
+
+
+@pytest.mark.skipif(not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "O_DIRECTORY"),
+                    reason="requires actual no-follow directory descriptor support")
+def test_explicit_layout_never_downgrades_with_directory_descriptors_only(tmp_path, monkeypatch):
+    for name in ("O_PATH", "O_SYMLINK"):
+        monkeypatch.delattr(os, name, raising=False)
+    module = imported(ROOT)
+    assert module.DIRFD_ATOMIC is True
+    root = tmp_path / "explicit-no-link-handle"
+    root.mkdir()
+    (root / "target").mkdir()
+    alias = root / "alias"
+    alias.symlink_to("target", target_is_directory=True)
+    plan = module.OutputPlan(root, layout=True)
+    try:
+        with pytest.raises(ValueError, match="symlink"):
+            plan.watch(alias)
+        assert plan._link_handles == {}
+    finally:
+        plan.close()
+
+
+@pytest.mark.parametrize("directory", [".", "scripts", "docs", ".ai/agent-checks"])
+def test_retained_temporary_context_locates_same_basename_across_selected_directories(
+        replacement_kernel, tmp_path, monkeypatch, capsys, directory):
+    module = replacement_kernel
+    root = tmp_path / "selected-directory"
+    root.mkdir()
+    parent = root if directory == "." else root / directory
+    parent.mkdir(parents=True, exist_ok=True)
+    path = parent / "owner.txt"
+    path.write_bytes(b"Owner bytes.\n")
+    path.chmod(0o644)
+    plan = module.OutputPlan(root)
+    plan.add(path, b"Replacement.\n", "fixture")
+    original = module.os.replace
+    failures = []
+    monkeypatch.setattr(module.os, "urandom", lambda count: bytes([23] * count))
+
+    def actual_basename_error(src, dst, **kwargs):
+        path.rename(parent / "owner-saved.txt")
+        path.mkdir()
+        try:
+            return original(src, dst, **kwargs)
+        except OSError as error:
+            failures.append(error)
+            raise
+
+    monkeypatch.setattr(module.os, "replace", actual_basename_error)
+    with pytest.raises(IsADirectoryError) as caught:
+        plan.apply([path])
+    assert caught.value is failures[0]
+    assert Path(caught.value.filename).name == caught.value.filename
+    assert caught.value.filename2 == "owner.txt"
+    error = capsys.readouterr().err
+    record = json.loads(error.split("AGENT-VALIDATION-TEMPORARY-RECOVERY: ", 1)[1].splitlines()[0])
+    assert "selected_parent" in record, record
+    assert record["selected_parent"] == str(parent)
+    assert record["selected_parent_observation"] == "historical_selection"
+    assert record["held_parent_identity"] == {"device": parent.stat().st_dev, "inode": parent.stat().st_ino}
+    assert record["name"] == ".agent-validation-" + bytes([23] * 16).hex()
+    orphan = Path(record["selected_parent"]) / record["name"]
+    assert orphan.read_bytes() == b"Replacement.\n"
+    assert record["held_identity"] == {"device": orphan.stat().st_dev, "inode": orphan.stat().st_ino}
+    assert record["private"] is True and record["held_mode"] == "0600"
+    assert record["name_observation"] == "owned_at_check"
+    assert path.is_dir() and (parent / "owner-saved.txt").read_bytes() == b"Owner bytes.\n"
+
+
+def test_retained_temporary_selected_parent_remains_historical_after_rename(
+        replacement_kernel, tmp_path, monkeypatch, capsys):
+    module = replacement_kernel
+    root = tmp_path / "selected-parent-rename"
+    parent = root / "scripts"
+    parent.mkdir(parents=True)
+    path = parent / "owner.txt"
+    path.write_bytes(b"Owner bytes.\n")
+    moved = root / "moved-scripts"
+    plan = module.OutputPlan(root)
+    plan.add(path, b"Replacement.\n", "fixture")
+    original = module.os.replace
+    observed = {}
+
+    def rename_parent_before_actual_error(src, dst, **kwargs):
+        parent.rename(moved)
+        parent.mkdir()
+        decoy = parent / src
+        decoy.write_bytes(b"Other writer temporary.\n")
+        decoy.chmod(0o644)
+        observed["decoy"] = decoy
+        observed["identity"] = (decoy.stat().st_dev, decoy.stat().st_ino)
+        (moved / "owner.txt").rename(moved / "owner-saved.txt")
+        (moved / "owner.txt").mkdir()
+        return original(src, dst, **kwargs)
+
+    monkeypatch.setattr(module.os, "replace", rename_parent_before_actual_error)
+    with pytest.raises(IsADirectoryError):
+        plan.apply([path])
+    record = json.loads(capsys.readouterr().err.split("AGENT-VALIDATION-TEMPORARY-RECOVERY: ", 1)[1].splitlines()[0])
+    assert "selected_parent" in record, record
+    assert record["selected_parent"] == str(parent)
+    assert record["selected_parent_observation"] == "historical_selection"
+    assert record["held_parent_identity"] == {"device": moved.stat().st_dev, "inode": moved.stat().st_ino}
+    assert record["held_parent_identity"] != {"device": parent.stat().st_dev, "inode": parent.stat().st_ino}
+    orphan = moved / record["name"]
+    assert orphan.read_bytes() == b"Replacement.\n" and orphan.stat().st_mode & 0o777 == 0o600
+    assert record["held_identity"] == {"device": orphan.stat().st_dev, "inode": orphan.stat().st_ino}
+    decoy = observed["decoy"]
+    assert (decoy.stat().st_dev, decoy.stat().st_ino) == observed["identity"]
+    assert decoy.read_bytes() == b"Other writer temporary.\n" and decoy.stat().st_mode & 0o777 == 0o644
+    assert record["private"] is True
+
+
+def test_retained_temporary_context_survives_privacy_cleanup_failure(
+        replacement_kernel, tmp_path, monkeypatch, capsys):
+    module = replacement_kernel
+    root = tmp_path / "selected-cleanup-denied"
+    parent = root / "docs"
+    parent.mkdir(parents=True)
+    path = parent / "owner.txt"
+    path.write_bytes(b"Owner bytes.\n")
+    path.chmod(0o644)
+    plan = module.OutputPlan(root)
+    plan.add(path, b"Replacement.\n", "fixture")
+    replace, chmod = module.os.replace, module.os.fchmod
+
+    def actual_error(src, dst, **kwargs):
+        path.rename(parent / "owner-saved.txt")
+        path.mkdir()
+        return replace(src, dst, **kwargs)
+
+    def privacy_denied(handle, mode):
+        if mode == 0o600:
+            raise PermissionError(errno.EACCES, "synthetic privacy cleanup denial")
+        return chmod(handle, mode)
+
+    monkeypatch.setattr(module.os, "replace", actual_error)
+    monkeypatch.setattr(module.os, "fchmod", privacy_denied)
+    with pytest.raises(IsADirectoryError) as caught:
+        plan.apply([path])
+    assert caught.value.filename2 == "owner.txt"
+    error = capsys.readouterr().err
+    assert "synthetic privacy cleanup denial" in error
+    record = json.loads(error.split("AGENT-VALIDATION-TEMPORARY-RECOVERY: ", 1)[1].splitlines()[0])
+    assert "selected_parent" in record, record
+    assert record["selected_parent"] == str(parent)
+    orphan = parent / record["name"]
+    assert orphan.read_bytes() == b"Replacement.\n" and orphan.stat().st_mode & 0o777 == 0o644
+    assert record["held_mode"] == "0644" and record["private"] is False
+    assert record["held_identity"] == {"device": orphan.stat().st_dev, "inode": orphan.stat().st_ino}
+
+
+def test_retained_temporary_legacy_helper_call_preserves_name_and_unknown_path(
+        replacement_kernel, tmp_path, capsys):
+    module = replacement_kernel
+    name = ".agent-validation-legacy"
+    path = tmp_path / name
+    path.write_bytes(b"Owned temporary.\n")
+    parent = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    handle = os.open(path, os.O_WRONLY | os.O_NOFOLLOW)
+    try:
+        module.cleanup_owned_temporary(name, handle, parent, OSError("primary"))
+    finally:
+        os.close(handle)
+        os.close(parent)
+    record = json.loads(capsys.readouterr().err.split("AGENT-VALIDATION-TEMPORARY-RECOVERY: ", 1)[1].splitlines()[0])
+    assert record["name"] == name and record["name_observation"] == "owned_at_check"
+    assert "selected_parent" in record, record
+    assert record["selected_parent"] is None and record["selected_parent_observation"] == "unknown"
+    assert record["held_parent_identity"] == {"device": tmp_path.stat().st_dev, "inode": tmp_path.stat().st_ino}
+    assert record["private"] is True and path.stat().st_mode & 0o777 == 0o600
+
+
+def test_installer_layout_suite_has_automatic_full_owner_recipe_and_native_coverage():
+    config = json.loads((ROOT / "config/agent-checks.json").read_text())
+    checks = [value for value in config["checks"] if value["id"] == "installer-layout-contract"]
+    assert len(checks) == 1, "the complete installer layout suite needs an automatic owner check"
+    check = checks[0]
+    assert check["commands"] == [[".ai/agent-checks/release-venv/bin/python", "-B", "-m", "pytest",
+                                  "scripts/tests/test_agent_validation_layout.py", "-q"]]
+    assert check["environment"] == "release-contract-python" and check["tools"] == ["uv"]
+    assert check["timeout_seconds"] == 360
+    assert {"scripts/install-agent-validation.py", "scripts/tests/test_agent_validation_layout.py",
+            "docs/agent-validation-layout.md", "config/agent-checks.json"} <= set(check["paths"])
+    workflow = yaml.safe_load((ROOT / ".github/workflows/plugin-eval-gate.yml").read_text())
+    assert workflow["jobs"]["eval-gate"]["timeout-minutes"] == 15
+    command = "python3 -m pytest scripts/tests/test_agent_validation_layout.py -q"
+    assert any(command in step.get("run", "").splitlines()
+               for step in workflow["jobs"]["eval-gate"]["steps"])
+    assert check["ci_sources"] == [{"path": ".github/workflows/plugin-eval-gate.yml", "contains": command}]

@@ -36,6 +36,25 @@ cannot reuse or save a cached PASS based only on Git's link text. Tracked files
 with Git filter attributes block local validation before selection or cache reuse;
 filtered working files require a raw-input adapter to validate their actual bytes.
 
+Declared dependency readiness binds regular file bytes rather than relying on
+timestamps. Tool-cache exclusions stay excluded. Unsafe/external links, special
+files and bounded-scan limits disable setup/PASS reuse; fresh provisioning and
+checks still run. The cache walker never reads file bytes or directory entries
+outside the owning repository. Dependency identities use the private cache key
+and remain in local evidence.
+
+The portable `READY_IDENTITY_CONTRACT` is `agent-ready-content/v3`; its hash
+domain separates earlier readiness evidence without changing receipt schemas,
+the CLI or the optional private-key call interface.
+
+Directory membership and physical identity are checked again after each subtree.
+Directory timestamps detect drift during a walk but never enter the persisted
+directory digest. Cached and freshly executed PASS results both recheck source,
+declared dependencies, dotenv and tool identities before publication. These are
+bounded repeated observations, not an atomic filesystem snapshot: concurrent
+writes that occur after an observation or fully reverse between observations
+cannot be ruled out. Observable changes fail closed.
+
 Install only on an isolated task branch. The installer preserves the owner's
 integration `base` and optional `protected_branches`, including the current
 recipe when a replacement is supplied. Policy sync keeps every previously
@@ -158,9 +177,11 @@ protection and fix actionable findings before merging.
 
 ## CI cost (GitHub Actions minutes)
 
-See `docs/ci-cost-conventions.md`. Skip drafts on PR Assessment; Autofix is
-not draft-gated. Require `needs.classify.result == 'success'` so SAST cannot
-start when classify is skipped. Do not add `paths` / `paths-ignore` on PR
+See `docs/ci-cost-conventions.md`. Deterministic source classification and SAST
+run on drafts without model credentials. Optional review routing, specialists,
+broad agents and Judge remain explicitly non-draft. Require classification
+success before SAST or optional work; model reviews also require routing success.
+Autofix is not draft-gated. Do not add `paths` / `paths-ignore` on PR
 Assessment (`converted_to_draft` is filtered too and cannot cancel in-flight
 LLM/SAST). Do not add unfiltered browser/`supabase start` PR workflows;
 extract `gh run list` wait loops to `scripts/ci/` with a fake-`gh` test.

@@ -1,5 +1,5 @@
 {% set canonical %}{% include "config/agent-checks.json" %}{% endset %}
 {% set owner = canonical | from_json %}
-{% set checks = owner.checks | rejectattr('id', 'in', ['release-manifest-contract', 'feature-controls', 'feature-controls-distribution', 'assessment-sast-failure-contract', 'subscription-automation-text-contract']) | list %}
+{% set checks = owner.checks | rejectattr('id', 'in', ['release-manifest-contract', 'feature-controls', 'feature-controls-distribution', 'assessment-sast-failure-contract', 'subscription-automation-text-contract', 'registry-bootstrap-contract', 'installer-layout-contract', 'watch-continuity-contract']) | list %}
 {% set environments = owner.environments | rejectattr('id', 'in', ['release-contract-python', 'feature-controls-python']) | list %}
 {{ dict(owner, base=agent_validation_base, checks=checks, environments=environments) | tojson(indent=2) }}

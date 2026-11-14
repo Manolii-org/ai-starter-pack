@@ -640,7 +640,7 @@ def test_unqualified_broad_role_stays_incomplete_and_client_policy_stays_direct(
                     "commit", "-qm", "External policy fixture"], check=True)
     monkeypatch.setenv("CLIENT_AI_POLICY", "us_weights_ok")
     result = module.invoke_agent(agent, "offline", DIFF)
-    assert result["skipped"] == "no_direct_key"
+    assert result["skipped"] == "route_policy_denied"
 
 
 @pytest.mark.parametrize("error", [TimeoutError(), ConnectionResetError()])
@@ -835,7 +835,7 @@ def test_canonical_estate_specialist_fails_closed_without_direct_fallback(monkey
     _, error = specialist._invoke_skill(role, DIFF, tmp_path)
     result = json.loads((tmp_path / (role + ".json")).read_text())
     assert result == {"source": role, "findings": [], "first_party": True,
-                      "skipped": "protected_review_incomplete"}
+                      "skipped": "route_policy_denied" if failure == "unknown_mode" else "protected_review_incomplete"}
     assert "PRIVATE_PROVIDER_PAYLOAD" not in error
     assert len(calls) == (1 if failure == "timeout" else 0)
 

@@ -1,0 +1,12 @@
+{"type": "RateLimitError", "message": "Too many requests", "in_app": true, "sha": "abcdef1", "expect": "quota"}
+{"type": "APIError", "message": "OpenRouter 402 insufficient credits", "in_app": true, "sha": "abcdef1", "expect": "quota"}
+{"type": "ServiceUnavailableError", "message": "upstream overloaded", "in_app": true, "sha": "abcdef1", "expect": "provider"}
+{"type": "Exception", "message": "litellm.router.py::async_function_with_fallbacks() - Error", "in_app": true, "sha": "abcdef1", "expect": "provider"}
+{"type": "ProxyModelNotFoundError", "message": "model=retired-alias", "in_app": true, "sha": "abcdef1", "expect": "configuration"}
+{"type": "AuthenticationError", "message": "invalid key", "in_app": true, "sha": "abcdef1", "expect": "configuration"}
+{"type": "ProgrammingError", "message": "column \"x\" does not exist", "in_app": true, "sha": "abcdef1", "expect": "migration"}
+{"type": "OperationalError", "message": "relation \"cpd_users\" does not exist", "in_app": true, "sha": "abcdef1", "expect": "migration"}
+{"type": "TypeError", "message": "Cannot read properties of undefined", "in_app": true, "sha": "abcdef1", "expect": "code_defect"}
+{"type": "TypeError", "message": "x", "in_app": false, "sha": "abcdef1", "expect": "unknown"}
+{"type": "TypeError", "message": "x", "in_app": null, "sha": "abcdef1", "expect": "unknown"}
+{"type": "TypeError", "message": "x", "in_app": true, "sha": null, "expect": "unknown"}

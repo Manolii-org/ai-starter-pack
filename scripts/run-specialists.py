@@ -94,6 +94,15 @@ def _urlopen_https(req: urllib.request.Request, *, timeout: int, host: str):
 
 
 
+def _review_mode():
+    resolver = getattr(globals().get("_policy_module"), "review_mode", None)
+    if callable(resolver):
+        return resolver()
+    if os.environ.get("SECURITY_REVIEW_MODE", "governed") == "direct":
+        return "direct"
+    raise RouteAdmissionError("compatible governed review policy runtime missing")
+
+
 def _proxy_transport_key() -> str:
     """Credential for a non-Anthropic endpoint.
 
@@ -122,17 +131,14 @@ def _proxy_transport_key() -> str:
 
 
 def _endpoint(direct: bool = False, role: Optional[str] = None) -> tuple[str, str, bool]:
-    """Resolve (api_key, url, proxied).
+    """Resolve the configured review lane without a vendor default.
 
-    Transport token: ANTHROPIC_API_KEY when calling Anthropic directly. When
-    LITELLM_PROXY_URL or ANTHROPIC_BASE_URL points at a non-Anthropic host the
-    request goes through that proxy with _proxy_transport_key().
-
-    direct=True forces the Anthropic endpoint regardless of proxy config — used
-    by `first_party` skills, where the eligibility matrix keeps the task class
-    (security review) on first-party models. A proxy credential must never be
-    sent there, so only a real Anthropic key authenticates.
+    The default governed lane ignores the legacy direct hint. An explicitly
+    selected external compatibility lane still requires committed admission
+    before selecting a direct credential. Estate qualification is separate.
     """
+    if _review_mode() == "governed":
+        return _policy_module.governed_review_endpoint()
     proxy_base = (os.environ.get("LITELLM_PROXY_URL") or os.environ.get("ANTHROPIC_BASE_URL") or "").rstrip("/")
     proxy_configured = bool(proxy_base) and (urllib.parse.urlparse(proxy_base).hostname or "").lower().rstrip(".") != _ANTHROPIC_HOST
     if direct:
@@ -215,12 +221,14 @@ def _call_api(system_prompt: str, user_message: str, model: str, max_tokens: int
     """Call the Messages API via urllib (Anthropic direct or LiteLLM proxy)."""
     api_key, api_url, proxied = _endpoint(direct=first_party, role=role)
     if not api_key:
-        if first_party:
+        if first_party and not proxied:
             raise RuntimeError(
                 "first_party skill needs ANTHROPIC_DIRECT_API_KEY (or "
                 "ANTHROPIC_API_KEY with no proxy) — the proxy credential "
                 "cannot authenticate Anthropic-direct"
             )
+        if proxied:
+            raise RuntimeError("governed review route or router credential unavailable")
         raise RuntimeError("no API credential set")
     if proxied:
         model = _PROXY_MODEL_MAP.get(model, model)
@@ -265,6 +273,7 @@ def _call_api(system_prompt: str, user_message: str, model: str, max_tokens: int
         # size too. Never replace an unsupported whole request with an excerpt.
         if len(payload) > _MAX_REQUEST_BYTES:
             raise ValueError("complete review request exceeds Messages request size limit")
+        _policy_module.admit_review_wire(payload)
         req = urllib.request.Request(
             api_url,
             data=payload,
@@ -404,14 +413,25 @@ def _invoke_skill(skill_name: str, diff: str, output_dir: pathlib.Path) -> tuple
             _write_skipped_marker(skill_name, output_dir, "load_error")
         return skill_name, f"Failed to load skill: {exc}"
 
+    if frontmatter.get("data_sensitivity") == "restricted":
+        _write_skipped_marker(skill_name, output_dir, "restricted_no_ai")
+        return skill_name, "skipped: restricted is a no-AI governance tier"
+
     model_alias = frontmatter.get("model", "haiku")
     model = _MODEL_MAP.get(model_alias, model_alias)
     max_tokens = frontmatter.get("max_tokens", 800)
-    # first_party: the eligibility matrix keeps security review on Anthropic
-    # even when OSS routing is enabled — the proxy route is bypassed entirely.
-    # CLIENT_AI_POLICY engagements extend that to EVERY specialist: no PR
-    # content may cross the OSS/proxy plane at all.
-    first_party = bool(frontmatter.get("first_party")) or bool(os.environ.get("CLIENT_AI_POLICY"))
+    # Required security roles retain estate qualification when explicitly
+    # selected. The default governed lane never infers a vendor from this tag.
+    security_role = bool(frontmatter.get("first_party") or frontmatter.get("required_security_review")) or skill_name in {
+        "security-boundary-test", "shell-security", "sast-scan", "security-deep-dive"
+    }
+    try:
+        mode = _review_mode()
+    except RouteAdmissionError as exc:
+        writer = _write_skip_marker if security_role else _write_skipped_marker
+        writer(skill_name, output_dir, "route_policy_denied")
+        return skill_name, str(exc)
+    first_party = (security_role or bool(os.environ.get("CLIENT_AI_POLICY"))) and mode != "governed"
 
     try:
         subscription_required = _subscription_required()
@@ -419,6 +439,11 @@ def _invoke_skill(skill_name: str, diff: str, output_dir: pathlib.Path) -> tuple
         writer = _write_skip_marker if first_party else _write_skipped_marker
         writer(skill_name, output_dir, "subscription_guest_unavailable")
         return skill_name, "required subscription guest unavailable"
+    if subscription_required and security_role:
+        # Governed mode clears first_party, but the fixed subscription route
+        # cannot satisfy a required security/independent-family contract.
+        _write_skip_marker(skill_name, output_dir, "subscription_explicit_provider_policy_held")
+        return skill_name, "required security role held on subscription transport"
     if subscription_required and skill_name not in _policy_module.selected_review_roles():
         writer = _write_skip_marker if first_party else _write_skipped_marker
         writer(skill_name, output_dir, "subscription_role_not_selected")
@@ -433,7 +458,18 @@ def _invoke_skill(skill_name: str, diff: str, output_dir: pathlib.Path) -> tuple
         writer(skill_name, output_dir, "route_policy_denied")
         return skill_name, str(exc)
 
+    if proxied_preview:
+        reason = _policy_module.route_reason(
+            _PROXY_MODEL_MAP.get(model, model), frontmatter.get("data_sensitivity", "internal"))
+        if reason:
+            _write_skipped_marker(skill_name, output_dir, reason)
+            return skill_name, reason
+
     if not subscription_required and not estate_requested and first_party and not api_key:
+        if proxied_preview:
+            _write_skip_marker(skill_name, output_dir, "no_proxy_credential")
+            print(f"[{skill_name}] governed review route or router credential unavailable — marker written")
+            return skill_name, "skipped: no governed review route or router credential"
         # Write a marker, not nothing: a first-party skill that cannot run
         # must surface as a first-party candidate so the judge fails closed
         # into the advisory path instead of silently adjudicating the rest
@@ -537,10 +573,11 @@ def _invoke_skill(skill_name: str, diff: str, output_dir: pathlib.Path) -> tuple
                 _write_skipped_marker(skill_name, output_dir, "api_error")
             return skill_name, f"'findings' is not a list of objects: {type(data['findings'])}"
 
+        if mode != "estate-ci-v1" or not estate_requested:
+            data["first_party"] = not proxied_preview
         if first_party and not proxied_preview and data.get("findings"):
-            # Marks the candidate set for run-judge: first-party findings must
-            # be adjudicated on a first-party model, not the OSS proxy. Empty
-            # results stay unmarked so they never force a direct key.
+            # Preserve actual direct provenance for the optional compatibility
+            # lane. Governed/proxy output is normalized above.
             data["first_party"] = True
 
         # Write findings to file
@@ -550,6 +587,9 @@ def _invoke_skill(skill_name: str, diff: str, output_dir: pathlib.Path) -> tuple
         print(f"[{skill_name}] {finding_count} findings written to {output_file}")
         return skill_name, None
 
+    except _policy_module.ReviewInputError as exc:
+        _write_skipped_marker(skill_name, output_dir, str(exc))
+        return skill_name, str(exc)
     except json.JSONDecodeError as exc:
         if estate_requested:
             _write_skip_marker(skill_name, output_dir, "protected_review_incomplete")

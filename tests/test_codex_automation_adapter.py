@@ -481,3 +481,35 @@ def test_guest_judge_never_replays_or_converts_missing_evidence_to_clean(failure
     result = judge.invoke_judge_agent([finding])
     assert result is None or not result["complete"]
     assert len(calls) <= 1
+
+
+@pytest.mark.parametrize(("skill", "frontmatter"), [
+    ("scope-adherence", {"required_security_review": True}),
+    ("scope-adherence", {"first_party": True}),
+    ("security-boundary-test", {}),
+])
+def test_governed_default_security_specialist_is_held_not_run_on_subscription(skill, frontmatter, mounted, monkeypatch, tmp_path):
+    """Governed mode clears first_party; the fixed route must still hold security roles."""
+    module = guest_module("run-specialists.py", mounted, monkeypatch)
+    monkeypatch.delenv("SECURITY_REVIEW_MODE", raising=False)
+    value, _, write = mounted
+    value["selected_roles"] = [skill]
+    write(value)
+    monkeypatch.setattr(module, "_load_skill", lambda _: ({"model": "haiku", "data_sensitivity": "internal", **frontmatter}, "Trusted fixture"))
+    monkeypatch.setattr(adapter.transport, "invoke", lambda *a, **k: pytest.fail("security role reached subscription transport"))
+    _, error = module._invoke_skill(skill, "+fixture", tmp_path)
+    result = json.loads((tmp_path / f"{skill}.json").read_text())
+    assert error and result["skipped"] == "subscription_explicit_provider_policy_held"
+    assert result["first_party"] is True and result["findings"] == []
+
+
+@pytest.mark.parametrize("flag", ["first_party", "required_security_review"])
+def test_governed_default_security_broad_agent_is_held_as_missing_coverage(flag, mounted, monkeypatch):
+    module = guest_module("run-broad-agents.py", mounted, monkeypatch)
+    monkeypatch.delenv("SECURITY_REVIEW_MODE", raising=False)
+    monkeypatch.setattr(module, "_proxy_base", lambda: pytest.fail("legacy route must not be read"))
+    monkeypatch.setattr(adapter.transport, "invoke", lambda *a, **k: pytest.fail("security role reached subscription transport"))
+    config = module.AgentConfig("security-deep-dive", "sonnet", "internal", "system", "checks", **{flag: True})
+    result = module.invoke_agent(config, "", "diff")
+    assert result == {"source": "security-deep-dive", "findings": [], "first_party": True,
+                      "skipped": "subscription_explicit_provider_policy_held"}

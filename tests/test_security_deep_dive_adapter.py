@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 _spec = importlib.util.spec_from_file_location('deep_adapter_fixtures', ROOT / 'tests/test_broad_agents_complete_input.py')
 common = importlib.util.module_from_spec(_spec)
 sys.modules[_spec.name] = common
-_spec.loader.exec_module(common)
+exec(compile(Path(_spec.origin).read_bytes(), _spec.origin, 'exec'), common.__dict__)
 runner, deep_repo, deep_output = common.runner, common.deep_repo, common.deep_output
 
 
@@ -24,11 +24,10 @@ def interface(request, runner, monkeypatch):
     if directory:
         if not (ROOT / directory).is_dir():
             pytest.skip('generated Pack artifacts are not installed in consumers')
-        spec = importlib.util.spec_from_file_location('adapter_' + directory.replace('/', '_'),
-                                                    ROOT / directory / 'scripts/run-broad-agents.py')
-        module = importlib.util.module_from_spec(spec)
-        sys.modules[spec.name] = module
-        spec.loader.exec_module(module)
+        path = ROOT / directory / 'scripts/run-broad-agents.py'
+        before = set(path.parent.rglob('*.pyc'))
+        module = common.load_source('adapter_' + directory.replace('/', '_'), path)
+        assert set(path.parent.rglob('*.pyc')) == before
     def denied(*args, **kwargs):
         pytest.fail('provider/network/credential access attempted')
     for name in ('get_api_key', '_proxy_base', '_urlopen_https'):
@@ -228,6 +227,7 @@ def test_unavailable_contract_refuses_preparation(interface, deep_repo, mutation
         role.name = 'systems-consistency'
     elif mutation == 'no_first_party':
         role.first_party = False
+        role.required_security_review = False
     else:
         role.data_sensitivity = 'restricted'
     with pytest.raises(ValueError):

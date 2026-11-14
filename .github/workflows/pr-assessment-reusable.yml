@@ -1,15 +1,15 @@
 name: PR Assessment (Reusable)
 # Reusable workflow_call form of pr-assessment.yml.
 # Caller owns the `on:` triggers; this file only defines the jobs.
-# Skip drafts on pull_request only. classify requires event_name == pull_request
-# and draft != true, so workflow_dispatch / other caller events never reach
+# Deterministic source qualification runs on pull_request, including drafts.
+# Model review stays explicitly non-draft; unsupported caller events never reach
 # git diff against github.base_ref or a judge comment on an empty PR number.
 # Callers must list ready_for_review and converted_to_draft, set concurrency
 # cancel-in-progress, and must not add paths / paths-ignore on the caller
 # (GitHub filters converted_to_draft the same way, which blocks cancel).
 # Downstream jobs require needs.classify.result == 'success' so SAST cannot
 # start when classify is skipped (empty depth is not the string 'none').
-# Dual provider_mode: anthropic (direct ANTHROPIC_API_KEY) | proxy (LiteLLM via ANTHROPIC_BASE_URL + LITELLM_MASTER_KEY).
+# Default provider_mode is proxy; external anthropic compatibility requires explicit direct admission.
 # See REUSABLE-WORKFLOWS.md for caller examples and secret passing conventions.
 # config-completeness-ignore: uses
 # config-completeness-ignore: with
@@ -20,7 +20,7 @@ name: PR Assessment (Reusable)
 on:
   workflow_call:
     inputs:
-      provider_mode: { type: string, default: anthropic, description: 'anthropic (direct ANTHROPIC_API_KEY) | proxy (LiteLLM via ANTHROPIC_BASE_URL + LITELLM_MASTER_KEY).' }
+      provider_mode: { type: string, default: proxy, description: 'proxy uses the configured governed router; explicit anthropic selects direct compatibility and still requires committed external admission.' }
       litellm_proxy_url: { type: string, default: '', description: 'Proxy base URL for proxy mode; pass vars.LITELLM_PROXY_URL.' }
       model: { type: string, default: '', description: 'Optional model id override; empty = script/action default.' }
       runs_on: { type: string, default: ubuntu-latest }
@@ -76,6 +76,195 @@ jobs:
     name: Classify PR
     runs-on: ${{ inputs.runs_on }}
     timeout-minutes: 10
+    if: github.event_name == 'pull_request'
+    outputs:
+      invoke_skills: ${{ steps.classify.outputs.invoke_skills }}
+      invoke_agents: ${{ steps.classify.outputs.invoke_agents }}
+      depth: ${{ steps.classify.outputs.depth }}
+      merge_danger: ${{ steps.classify.outputs.merge_danger }}
+      diff_files: ${{ steps.diff.outputs.files }}
+      sast_required: ${{ steps.classify.outputs.sast_required }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      # ── Assessment runtime hydration ────────────────────────────────────
+      # The probe runs first and fetches NOTHING when the caller already ships
+      # every runtime file. That keeps an unreachable or mistyped `pack_ref`
+      # from being able to break a repo that does not need hydration at all.
+      - name: Probe assessment runtime
+        id: hydrate_probe
+        shell: bash
+        env:
+          ASSESSMENT_EVENT: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          missing=""
+          for f in $ASSESSMENT_RUNTIME_FILES; do
+            [[ -e "$f" ]] || missing="$missing $f"
+          done
+          if [[ "${ASSESSMENT_EVENT}" == "pull_request" ]]; then
+            # A PR-triggered run executes inside the caller's merge commit —
+            # every file under the runtime list is attacker-controlled there.
+            # Always hydrate (and overwrite below); never trust caller copies.
+            echo "needed=true" >> "$GITHUB_OUTPUT"
+            echo "pull_request trigger: forcing hydration — caller-shipped runtime files are untrusted"
+          elif [[ -n "$missing" ]]; then
+            echo "needed=true" >> "$GITHUB_OUTPUT"
+            echo "Hydration required for:$missing"
+          else
+            echo "needed=false" >> "$GITHUB_OUTPUT"
+            echo "Caller ships the full assessment runtime — no hydration."
+          fi
+          # Source classification needs only Python's isolated standard library.
+
+      - name: Check out pack for hydration
+        if: steps.hydrate_probe.outputs.needed == 'true'
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          repository: Manolii-org/ai-starter-pack
+          ref: ${{ inputs.pack_ref }}
+          path: .pack-hydrate
+          persist-credentials: false
+          # Only the runtime trees ASSESSMENT_RUNTIME_FILES can name — the rest of
+          # the pack (kernel, docs, prompts, telemetry) is dead weight here.
+          sparse-checkout: |
+            scripts
+            .claude
+            .ai/security
+
+      - name: Hydrate assessment runtime
+        if: steps.hydrate_probe.outputs.needed == 'true'
+        shell: bash
+        env:
+          ASSESSMENT_EVENT: ${{ github.event_name }}
+          PACK_REF: ${{ inputs.pack_ref }}
+        run: |
+          set -euo pipefail
+          FORCE=false
+          if [[ "${ASSESSMENT_EVENT}" == "pull_request" ]]; then
+            FORCE=true
+          fi
+          # Refuse redirected destinations for the new helper/catalog; this
+          # is defensive path validation, not complete executor isolation.
+          for d in .ai .ai/security scripts scripts/lib; do
+            if [[ -L "$d" || ( -e "$d" && ! -d "$d" ) ]]; then
+              echo "::error::Assessment dependency parent must be a real directory" >&2
+              exit 1
+            fi
+          done
+          for f in .ai/security/token-shapes.json scripts/lib/protected_review.py; do
+            if [[ -L "$f" || ( -e "$f" && ! -f "$f" ) ]]; then
+              echo "::error::Assessment dependency must be a regular file" >&2
+              exit 1
+            fi
+          done
+          for f in $ASSESSMENT_RUNTIME_FILES; do
+            if [[ "$FORCE" != "true" && -e "$f" ]]; then continue; fi
+            if [[ ! -e ".pack-hydrate/$f" ]]; then
+              # A listed path the pack no longer ships means this list and the
+              # runners have drifted. Continuing would resurface later as an
+              # opaque FileNotFoundError inside a runner.
+              echo "::error::$f is not present in the pack at '${PACK_REF}'"
+              exit 1
+            fi
+            mkdir -p "$(dirname "$f")"
+            cp -f ".pack-hydrate/$f" "$f"
+            echo "hydrated $f"
+          done
+          if [[ "$FORCE" == "true" && -d ".pack-hydrate/.claude" ]]; then
+            # .claude agent/skill definitions are prompt input to the runners
+            # — on PR triggers they must come from the trusted pack too.
+            mkdir -p .claude
+            cp -fa .pack-hydrate/.claude/. .claude/
+            echo "hydrated .claude (forced)"
+          fi
+          chmod +x scripts/run-*.py 2>/dev/null || true
+          # Scratch tree: leaving a second full copy of the pack in the
+          # workspace would be walked by later steps (skill discovery,
+          # artifact globs) and by the caller's own tooling.
+          rm -rf .pack-hydrate
+
+      - name: Get PR diff
+        id: diff
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+          git diff "origin/${BASE_REF}...HEAD" > /tmp/pr.diff
+          DIFF_LINE_COUNT=$(wc -l < /tmp/pr.diff)
+          DIFF_FILE_COUNT=$(git diff --name-only "origin/${BASE_REF}...HEAD" | wc -l)
+          {
+            echo "lines=$DIFF_LINE_COUNT"
+            echo "files=$DIFF_FILE_COUNT"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Classify source inputs without a model
+        id: classify
+        env:
+          DIFF_FILES: ${{ steps.diff.outputs.files }}
+        run: |
+          python3 -I <<'PY'
+          import ast, json, os, re
+          from pathlib import Path
+
+          # Read the trusted existing manifest literals; never import/execute model code.
+          source = ast.parse(Path('scripts/run-pr-classifier.py').read_text(encoding='utf-8'))
+          required = {'_FALLBACK_MANIFEST', '_EMPTY_DIFF_MANIFEST'}
+          definitions = {}
+          for node in source.body:
+              if not isinstance(node, ast.Assign):
+                  continue
+              names = [target.id for target in node.targets if isinstance(target, ast.Name)]
+              selected = required.intersection(names)
+              if not selected:
+                  continue
+              if len(node.targets) != 1 or len(selected) != 1:
+                  raise ValueError('ambiguous trusted classification definition')
+              name = selected.pop()
+              if name in definitions:
+                  raise ValueError('duplicate trusted classification definition')
+              definitions[name] = ast.literal_eval(node.value)
+          if set(definitions) != required:
+              raise ValueError('trusted classification manifests unavailable')
+          diff = Path('/tmp/pr.diff').read_bytes()
+          count_text = os.environ['DIFF_FILES'].strip()
+          if not re.fullmatch(r'[0-9]+', count_text):
+              raise ValueError('missing or invalid changed-file inventory')
+          changed = bool(diff.strip())
+          if bool(int(count_text)) != changed:
+              raise ValueError('inconsistent changed-file inventory')
+          manifest = dict(definitions['_FALLBACK_MANIFEST' if changed else '_EMPTY_DIFF_MANIFEST'])
+          if manifest.get('depth') != ('broad' if changed else 'narrow'):
+              raise ValueError('unsupported conservative classification')
+          for key in ('invoke_skills', 'invoke_agents'):
+              values = manifest.get(key)
+              if (not isinstance(values, list)
+                      or any(not isinstance(value, str) or not re.fullmatch(r'[a-z0-9][a-z0-9-]*', value)
+                             for value in values)):
+                  raise ValueError('invalid conservative review inventory')
+          danger = {'door': 'unknown', 'blast_radius': 'unknown', 'danger_reason': ''}
+          values = {
+              'invoke_skills': ','.join(manifest['invoke_skills']),
+              'invoke_agents': ','.join(manifest['invoke_agents']),
+              'depth': manifest['depth'],
+              'merge_danger': json.dumps(danger),
+              'sast_required': 'true' if changed else 'false',
+          }
+          with Path(os.environ['GITHUB_OUTPUT']).open('a', encoding='utf-8') as output:
+              for name, value in values.items():
+                  output.write(f'{name}={value}\n')
+          print('Deterministic source classification; optional model review is separate.')
+          PY
+
+  review-routing:
+    name: Review routing
+    runs-on: ${{ inputs.runs_on }}
+    timeout-minutes: 10
     # Skip mechanical sync PRs by HEAD BRANCH, not just title — the sync
     # tooling titles PRs "chore: sync …" (no parenthesis), so the title-only
     # guard never matched and the full pipeline ran on every sync PR.
@@ -84,6 +273,7 @@ jobs:
     # assessment; merge authorization additionally stays with the auto-merge
     # gate's structural verifier.
     if: |
+      needs.classify.result == 'success' &&
       github.event_name == 'pull_request' &&
       github.event.pull_request.draft != true &&
       !contains(github.event.pull_request.labels.*.name, 'skip-ai-review') &&
@@ -100,10 +290,12 @@ jobs:
       ANTHROPIC_API_KEY: ${{ inputs.provider_mode == 'proxy' && secrets.LITELLM_MASTER_KEY || secrets.ANTHROPIC_API_KEY }}
       ANTHROPIC_BASE_URL: ${{ inputs.provider_mode == 'proxy' && inputs.litellm_proxy_url || '' }}
       ANTHROPIC_MODEL: ${{ inputs.model }}
-      # CLIENT_AI_POLICY engagements route the classifier Anthropic-direct as
-      # well; the proxy credential cannot authenticate api.anthropic.com.
+      # Optional explicitly admitted external/direct mode only. Legacy client
+      # policy flags do not infer egress permission or require this key.
       ANTHROPIC_DIRECT_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       CLIENT_AI_POLICY: ${{ vars.CLIENT_AI_POLICY }}
+    needs: [classify]
+
     steps:
       - name: Validate provider secrets
         env:
@@ -115,8 +307,13 @@ jobs:
           if [[ "$PM" == "proxy" ]]; then
             if [[ -z "$LK" ]]; then echo "::error::provider_mode=proxy requires LITELLM_MASTER_KEY"; exit 1; fi
             if [[ -z "$PURL" ]]; then echo "::error::provider_mode=proxy requires litellm_proxy_url"; exit 1; fi
-          else
+          elif [[ "$PM" == "anthropic" ]]; then
             if [[ -z "$AK" ]]; then echo "::error::provider_mode=anthropic requires ANTHROPIC_API_KEY"; exit 1; fi
+            # Explicit opt-in only. Both old trusted runtime and current runtime
+            # support this enum; proxy leaves the version-owned default unset.
+            printf 'SECURITY_REVIEW_MODE=direct\n' >> "$GITHUB_ENV"
+          else
+            echo "::error::unsupported provider_mode"; exit 1
           fi
 
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -231,9 +428,14 @@ jobs:
         env:
           BASE_REF: ${{ github.base_ref }}
         run: |
+          set -euo pipefail
           git diff "origin/${BASE_REF}...HEAD" > /tmp/pr.diff
-          echo "lines=$(wc -l < /tmp/pr.diff)" >> $GITHUB_OUTPUT
-          echo "files=$(git diff --name-only "origin/${BASE_REF}...HEAD" | wc -l)" >> $GITHUB_OUTPUT
+          DIFF_LINE_COUNT=$(wc -l < /tmp/pr.diff)
+          DIFF_FILE_COUNT=$(git diff --name-only "origin/${BASE_REF}...HEAD" | wc -l)
+          {
+            echo "lines=$DIFF_LINE_COUNT"
+            echo "files=$DIFF_FILE_COUNT"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Run pr-classifier
         id: classify
@@ -256,10 +458,12 @@ jobs:
 
           MERGE_DANGER=$(python3 -c "import json; d=json.load(open('/tmp/classifier-output.json')); print(json.dumps({'door': d.get('door','unknown'), 'blast_radius': d.get('blast_radius','unknown'), 'danger_reason': d.get('danger_reason','')}))")
 
-          echo "invoke_skills=$SKILLS" >> $GITHUB_OUTPUT
-          echo "invoke_agents=$AGENTS" >> $GITHUB_OUTPUT
-          echo "depth=$DEPTH" >> $GITHUB_OUTPUT
-          echo "merge_danger=$MERGE_DANGER" >> $GITHUB_OUTPUT
+          {
+            echo "invoke_skills=$SKILLS"
+            echo "invoke_agents=$AGENTS"
+            echo "depth=$DEPTH"
+            echo "merge_danger=$MERGE_DANGER"
+          } >> "$GITHUB_OUTPUT"
           echo "Classification: depth=$DEPTH skills=$SKILLS agents=$AGENTS danger=$MERGE_DANGER"
 
       # depth=none skips judge entirely — post the merge-danger verdict
@@ -434,12 +638,14 @@ jobs:
 
   sast:
     name: SAST (Semgrep + Bandit)
+    permissions:
+      contents: read
     runs-on: ${{ inputs.runs_on }}
     timeout-minutes: 15
     needs: [classify]
-    # diff_files == '0' = empty-diff manifest route (scope-adherence only) —
-    # a whole-repo Semgrep+Bandit pass on zero changed lines is pure spend.
-    if: needs.classify.result == 'success' && needs.classify.outputs.depth != 'none' && needs.classify.outputs.diff_files != '0'
+    # Every observed nonempty diff selects the existing full repository scan.
+    # Optional model routing and draft state cannot suppress source qualification.
+    if: needs.classify.result == 'success' && needs.classify.outputs.sast_required == 'true'
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
@@ -454,7 +660,7 @@ jobs:
         run: |
           rm -f /tmp/semgrep-results.json /tmp/bandit-results.json
           set +e
-          semgrep scan --config auto --json --error --output /tmp/semgrep-results.json --timeout 30 --timeout-threshold 0 .
+          semgrep scan --config auto --json --error --output /tmp/semgrep-results.json --timeout 30 --timeout-threshold 0 --time .
           status=$?
           set -e
           case "$status" in
@@ -506,6 +712,13 @@ jobs:
                           or not all(isinstance(p, str) and p.strip() for p in scanned)
                           or data.get('skipped_rules', []) != []):
                       raise ValueError('semgrep: incomplete rules, version or scanned-file evidence')
+                  # Experimental profiling limits are audit data, not native scan errors.
+                  profile = data.get('time')
+                  limits = profile.get('fixpoint_timeouts') if isinstance(profile, dict) else None
+                  print(json.dumps({'semgrep_profile_audit': {
+                      'status': 'available' if isinstance(limits, list) else 'unknown',
+                      'reported_fixpoint_entries': len(limits) if isinstance(limits, list) else None,
+                  }}, sort_keys=True))
               else:
                   metrics = data.get('metrics')
                   if (not isinstance(metrics, dict) or '_totals' not in metrics
@@ -537,6 +750,17 @@ jobs:
           print(f'Merged {len(findings)} SAST findings from completed scanners')
           PY
 
+      - name: Retain raw scanner diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: sast-scanner-diagnostics
+          path: |
+            /tmp/semgrep-results.json
+            /tmp/bandit-results.json
+          if-no-files-found: warn
+          retention-days: 7
+
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: sast-findings
@@ -546,24 +770,14 @@ jobs:
     name: Specialist Skills
     runs-on: ${{ inputs.runs_on }}
     timeout-minutes: 15
-    needs: [classify, sast]
-    # !cancelled(): sast is skipped on empty-diff, but the manifest's metadata
-    # lane (scope-adherence) must still run. Gate on sast success OR the
-    # designed empty-diff case — a failed sast makes the judge refuse anyway,
-    # so running model calls on it is pure waste.
-    if: >-
-      !cancelled()
-      && needs.classify.result == 'success'
-      && needs.classify.outputs.invoke_skills != ''
-      && (needs.sast.result == 'success' || needs.classify.outputs.diff_files == '0')
-    # Provider env — all steps inherit; empty ANTHROPIC_BASE_URL is a no-op for anthropic mode.
+    needs: [classify, review-routing, sast]
+    if: github.event.pull_request.draft != true && needs.review-routing.result == 'success' && !cancelled() && needs.classify.result == 'success' && needs.review-routing.outputs.invoke_skills != '' && (needs.sast.result == 'success' || (needs.classify.outputs.sast_required == 'false' && needs.classify.outputs.diff_files == '0' && needs.review-routing.outputs.diff_files == '0' && needs.sast.result == 'skipped'))
     env:
       ANTHROPIC_API_KEY: ${{ inputs.provider_mode == 'proxy' && secrets.LITELLM_MASTER_KEY || secrets.ANTHROPIC_API_KEY }}
       ANTHROPIC_BASE_URL: ${{ inputs.provider_mode == 'proxy' && inputs.litellm_proxy_url || '' }}
       ANTHROPIC_MODEL: ${{ inputs.model }}
-      # first_party specialist skills (shell-security, sast-scan,
-      # security-boundary-test) run Anthropic-direct on this key; without it
-      # they skip-with-warning in proxy mode. CLIENT_AI_POLICY routes all direct.
+      # Optional explicitly admitted external/direct mode only. Security
+      # specialists use the configured governed router by default.
       ANTHROPIC_DIRECT_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       CLIENT_AI_POLICY: ${{ vars.CLIENT_AI_POLICY }}
     steps:
@@ -577,8 +791,13 @@ jobs:
           if [[ "$PM" == "proxy" ]]; then
             if [[ -z "$LK" ]]; then echo "::error::provider_mode=proxy requires LITELLM_MASTER_KEY"; exit 1; fi
             if [[ -z "$PURL" ]]; then echo "::error::provider_mode=proxy requires litellm_proxy_url"; exit 1; fi
-          else
+          elif [[ "$PM" == "anthropic" ]]; then
             if [[ -z "$AK" ]]; then echo "::error::provider_mode=anthropic requires ANTHROPIC_API_KEY"; exit 1; fi
+            # Explicit opt-in only. Both old trusted runtime and current runtime
+            # support this enum; proxy leaves the version-owned default unset.
+            printf 'SECURITY_REVIEW_MODE=direct\n' >> "$GITHUB_ENV"
+          else
+            echo "::error::unsupported provider_mode"; exit 1
           fi
 
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -695,7 +914,7 @@ jobs:
 
       - name: Run specialist skills
         env:
-          SKILLS: ${{ needs.classify.outputs.invoke_skills }}
+          SKILLS: ${{ needs.review-routing.outputs.invoke_skills }}
           BASE_REF: ${{ github.base_ref }}
           PR_TITLE: ${{ github.event.pull_request.title }}
           PR_BODY: ${{ github.event.pull_request.body }}
@@ -716,12 +935,8 @@ jobs:
     name: Broad Agents
     runs-on: ${{ inputs.runs_on }}
     timeout-minutes: 20
-    needs: [classify, sast]
-    # No always()/!cancelled() here: empty-diff manifests are always narrow,
-    # so broad agents never outrun a skipped/failed sast — the judge rejects
-    # the verdict anyway after up to 3 discarded model calls.
-    if: needs.classify.result == 'success' && needs.classify.outputs.depth == 'broad'
-    # Provider env — all steps inherit; empty ANTHROPIC_BASE_URL is a no-op for anthropic mode.
+    needs: [classify, review-routing, sast]
+    if: github.event.pull_request.draft != true && needs.review-routing.result == 'success' && needs.classify.result == 'success' && needs.review-routing.outputs.depth == 'broad'
     env:
       ANTHROPIC_API_KEY: ${{ inputs.provider_mode == 'proxy' && secrets.LITELLM_MASTER_KEY || secrets.ANTHROPIC_API_KEY }}
       ANTHROPIC_BASE_URL: ${{ inputs.provider_mode == 'proxy' && inputs.litellm_proxy_url || '' }}
@@ -737,8 +952,13 @@ jobs:
           if [[ "$PM" == "proxy" ]]; then
             if [[ -z "$LK" ]]; then echo "::error::provider_mode=proxy requires LITELLM_MASTER_KEY"; exit 1; fi
             if [[ -z "$PURL" ]]; then echo "::error::provider_mode=proxy requires litellm_proxy_url"; exit 1; fi
-          else
+          elif [[ "$PM" == "anthropic" ]]; then
             if [[ -z "$AK" ]]; then echo "::error::provider_mode=anthropic requires ANTHROPIC_API_KEY"; exit 1; fi
+            # Explicit opt-in only. Both old trusted runtime and current runtime
+            # support this enum; proxy leaves the version-owned default unset.
+            printf 'SECURITY_REVIEW_MODE=direct\n' >> "$GITHUB_ENV"
+          else
+            echo "::error::unsupported provider_mode"; exit 1
           fi
 
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -856,7 +1076,7 @@ jobs:
 
       - name: Run broad agents
         env:
-          AGENTS: ${{ needs.classify.outputs.invoke_agents }}
+          AGENTS: ${{ needs.review-routing.outputs.invoke_agents }}
           BASE_REF: ${{ github.base_ref }}
           # Engagement policy gate: agents declaring client_policy_model
           # escalate Anthropic-direct; the direct plane key is never the
@@ -880,15 +1100,14 @@ jobs:
     name: Judge
     runs-on: ${{ inputs.runs_on }}
     timeout-minutes: 30
-    needs: [classify, sast, specialists, broad-agents]
-    if: always() && needs.classify.result == 'success' && needs.classify.outputs.depth != 'none'
-    # Provider env — all steps inherit; empty ANTHROPIC_BASE_URL is a no-op for anthropic mode.
+    needs: [classify, review-routing, sast, specialists, broad-agents]
+    if: github.event.pull_request.draft != true && needs.review-routing.result == 'success' && always() && needs.classify.result == 'success' && needs.review-routing.outputs.depth != 'none'
     env:
       ANTHROPIC_API_KEY: ${{ inputs.provider_mode == 'proxy' && secrets.LITELLM_MASTER_KEY || secrets.ANTHROPIC_API_KEY }}
       ANTHROPIC_BASE_URL: ${{ inputs.provider_mode == 'proxy' && inputs.litellm_proxy_url || '' }}
       ANTHROPIC_MODEL: ${{ inputs.model }}
-      # Judge adjudicates first_party candidates Anthropic-direct (run-judge.py
-      # _endpoint(direct=True)); without this key those findings go unjudged.
+      # Optional explicitly admitted external/direct mode only. Legacy
+      # candidate provenance cannot override the governed default.
       ANTHROPIC_DIRECT_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       CLIENT_AI_POLICY: ${{ vars.CLIENT_AI_POLICY }}
     steps:
@@ -902,8 +1121,13 @@ jobs:
           if [[ "$PM" == "proxy" ]]; then
             if [[ -z "$LK" ]]; then echo "::error::provider_mode=proxy requires LITELLM_MASTER_KEY"; exit 1; fi
             if [[ -z "$PURL" ]]; then echo "::error::provider_mode=proxy requires litellm_proxy_url"; exit 1; fi
-          else
+          elif [[ "$PM" == "anthropic" ]]; then
             if [[ -z "$AK" ]]; then echo "::error::provider_mode=anthropic requires ANTHROPIC_API_KEY"; exit 1; fi
+            # Explicit opt-in only. Both old trusted runtime and current runtime
+            # support this enum; proxy leaves the version-owned default unset.
+            printf 'SECURITY_REVIEW_MODE=direct\n' >> "$GITHUB_ENV"
+          else
+            echo "::error::unsupported provider_mode"; exit 1
           fi
 
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -1018,11 +1242,12 @@ jobs:
         # A specialists/broad-agents job that fails before uploading its
         # candidates artifact must not let the judge post a clean verdict.
         if: |
+          !(needs.sast.result == 'success' || (needs.classify.outputs.sast_required == 'false' && needs.classify.outputs.diff_files == '0' && needs.review-routing.outputs.diff_files == '0' && needs.sast.result == 'skipped')) ||
           needs.sast.result == 'failure' || needs.sast.result == 'cancelled' ||
           needs.specialists.result == 'failure' || needs.specialists.result == 'cancelled' ||
-          (needs.specialists.result == 'skipped' && needs.classify.outputs.invoke_skills != '') ||
+          (needs.specialists.result == 'skipped' && needs.review-routing.outputs.invoke_skills != '') ||
           needs['broad-agents'].result == 'failure' || needs['broad-agents'].result == 'cancelled' ||
-          (needs['broad-agents'].result == 'skipped' && needs.classify.outputs.depth == 'broad')
+          (needs['broad-agents'].result == 'skipped' && needs.review-routing.outputs.depth == 'broad')
         run: |
           echo "::error::upstream review stage failed — refusing to judge missing candidates"
           exit 1
@@ -1043,12 +1268,12 @@ jobs:
 
       - name: Run judge
         env:
-          REVIEW_SKILLS: ${{ needs.classify.outputs.invoke_skills }}
-          REVIEW_AGENTS: ${{ needs.classify.outputs.invoke_agents }}
+          REVIEW_SKILLS: ${{ needs.review-routing.outputs.invoke_skills }}
+          REVIEW_AGENTS: ${{ needs.review-routing.outputs.invoke_agents }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           REPO: ${{ github.repository }}
-          MERGE_DANGER: ${{ needs.classify.outputs.merge_danger }}
+          MERGE_DANGER: ${{ needs.review-routing.outputs.merge_danger }}
           PR_TITLE: ${{ github.event.pull_request.title }}
           PR_BODY: ${{ github.event.pull_request.body }}
           # Base SHA feeds the dedup digest — a base update changes the diff

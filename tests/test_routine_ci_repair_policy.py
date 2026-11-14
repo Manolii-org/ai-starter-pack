@@ -9,7 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def test_routine_ci_policy_preserves_release_contract_and_fails_closed():
     source = (ROOT / ".claude/skills/autonomy-follow-through/SKILL.md").read_text()
-    assert "version: 1.1.5" in source
+    assert "version: 1.1.8" in source
     assert "already-authorized repair" in source
     assert "Unknown/missing provenance, manual label" in source
     assert "within-limit receipt never renews" in source

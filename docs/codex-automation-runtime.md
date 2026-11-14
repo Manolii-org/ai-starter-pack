@@ -105,6 +105,11 @@ outcomes, invalid manifests and unsupported policies do not become the legacy
 fallback manifest. Ordinary default consumers retain their existing transport
 and limits. Explicit direct/client-model policies and no-AI sensitivity remain
 holds until a separately accepted eligible contract exists.
+Required security roles (`first_party`, `required_security_review`, and the
+named security specialists) are held before transport even though the governed
+default lane clears their legacy `first_party` flag: the fixed subscription
+route is not an independent-family security review. They surface as first-party
+missing coverage, so the Judge fails closed.
 
 Specialist and broad-agent candidates retain their existing findings parsers
 and required-role coverage. Judge retains immutable Git evidence, the existing

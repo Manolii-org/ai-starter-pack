@@ -76,6 +76,15 @@ _ANTHROPIC_API_VERSION = "2023-06-01"
 _ANTHROPIC_HOST = "api.anthropic.com"
 
 
+def _review_mode():
+    resolver = getattr(globals().get("_policy_module"), "review_mode", None)
+    if callable(resolver):
+        return resolver()
+    if os.environ.get("SECURITY_REVIEW_MODE", "governed") == "direct":
+        return "direct"
+    raise RouteAdmissionError("compatible governed review policy runtime missing")
+
+
 def _proxy_transport_key() -> str:
     """Credential for a non-Anthropic endpoint.
 
@@ -104,18 +113,13 @@ def _proxy_transport_key() -> str:
 
 
 def _endpoint(direct: bool = False) -> tuple[str, str, bool]:
-    """Resolve (api_key, url, proxied).
+    """Resolve the owner-selected review lane, never a vendor default.
 
-    Transport uses ANTHROPIC_API_KEY when calling Anthropic directly. When
-    LITELLM_PROXY_URL or ANTHROPIC_BASE_URL points at a non-Anthropic host the
-    request goes through that proxy with _proxy_transport_key().
-
-    direct=True forces the Anthropic endpoint regardless of proxy config —
-    used when adjudicating first_party findings (security review stays on a
-    first-party model per docs/us-oss-eligibility-matrix.md). Under a
-    configured proxy only ANTHROPIC_DIRECT_API_KEY authenticates there; the
-    LiteLLM credential in ANTHROPIC_API_KEY must never cross the boundary.
+    Legacy first-party metadata cannot override the governed default.
+    Explicit external/direct consumers retain their committed admission.
     """
+    if _review_mode() == "governed":
+        return _policy_module.governed_review_endpoint()
     base = (os.environ.get("LITELLM_PROXY_URL") or os.environ.get("ANTHROPIC_BASE_URL") or "").rstrip("/")
     proxied = bool(base) and (urllib.parse.urlparse(base).hostname or "").lower().rstrip(".") != _ANTHROPIC_HOST
     if direct:
@@ -401,6 +405,66 @@ def _numbered_source(text: str, start: int = 1, end: int | None = None) -> str:
     return _VerifiedSourceText("\n".join(parts), spans)
 
 
+def _join_review_text(*parts) -> str:
+    """Carry only existing local identifier spans through fixed text assembly."""
+    output, spans, used = [], [], 0
+    for part in parts:
+        if not isinstance(part, str):
+            raise ValueError("unsupported proved text assembly")
+        proof = getattr(part, "reference_spans", frozenset())
+        if not isinstance(proof, frozenset):
+            raise ValueError("unsupported source proof")
+        for a, b in proof:
+            if (type(a) is not int or type(b) is not int or not 0 <= a < b <= len(part)
+                    or not _CREDENTIAL_ASSIGNMENT.fullmatch(part[a:b] + " = reference_probe")):
+                raise ValueError("unsupported source proof span")
+            spans.append((used + a, used + b))
+        output.append(str(part))
+        used += len(part)
+    return _VerifiedSourceText("".join(output), spans)
+
+
+def _review_json(value, *, escape_angles=False) -> str:
+    """Project existing identifier positions through JSON escaping, not new proof.
+
+    Only already-proved source identifiers carry spans. Every other value stays
+    unproved, and the catalog still scans the complete unchanged strings.
+    """
+    if isinstance(value, str):
+        encoded = json.dumps(str(value), ensure_ascii=True)
+        spans = []
+        for a, b in getattr(value, "reference_spans", ()):
+            # Identifiers admitted by the existing AST recognizer are ASCII.
+            # Prefix encoding accounts for quotes, backslashes and Unicode.
+            offset = 1 + len(json.dumps(str(value)[:a], ensure_ascii=True)[1:-1])
+            if encoded[offset:offset + b - a] != value[a:b]:
+                raise ValueError("unsupported JSON source projection")
+            spans.append((offset, offset + b - a))
+        if escape_angles:
+            spans = [(a + 5 * (encoded[:a].count("<") + encoded[:a].count(">")),
+                      b + 5 * (encoded[:b].count("<") + encoded[:b].count(">"))) for a, b in spans]
+            encoded = encoded.replace("<", "\\u003c").replace(">", "\\u003e")
+        return _join_review_text(_VerifiedSourceText(encoded, spans))
+    if isinstance(value, dict):
+        parts = ["{"]
+        for index, (key, child) in enumerate(value.items()):
+            if not isinstance(key, str):
+                raise ValueError("unsupported review JSON key")
+            if index:
+                parts.append(", ")
+            parts.extend((_review_json(key, escape_angles=escape_angles), ": ",
+                          _review_json(child, escape_angles=escape_angles)))
+        return _join_review_text(*parts, "}")
+    if isinstance(value, (list, tuple)):
+        parts = ["["]
+        for index, child in enumerate(value):
+            if index:
+                parts.append(", ")
+            parts.append(_review_json(child, escape_angles=escape_angles))
+        return _join_review_text(*parts, "]")
+    return json.dumps(value, ensure_ascii=True)
+
+
 def _require_safe_packet(value) -> None:
     """Refuse detected sensitive material; never redact code and claim completeness.
 
@@ -631,6 +695,9 @@ def _judge_evidence(findings: list[Finding], head: str) -> dict:
             continue
         if _sensitive_evidence_path(finding.file):
             row["status"] = "sensitive_path_refused"
+            continue
+        if used >= _EVIDENCE_CHAR_BUDGET:
+            row["status"] = "evidence_budget"
             continue
         try:
             entries = _git(root, "ls-tree", "-z", head, "--", finding.file).split(b"\0")
@@ -1028,11 +1095,9 @@ class Judge:
                     and candidate_findings
                     and not estate_security
                 ):
-                    # Only actual first-party findings force the direct key:
-                    # a `skipped` marker carries nothing restricted, so it
-                    # belongs on the advisory list (disclosed missing coverage)
-                    # rather than vetoing adjudication of proxy-eligible
-                    # findings from the rest of the batch.
+                    # Retain legacy provenance for explicit direct compatibility
+                    # and coverage diagnostics. It cannot select a vendor in
+                    # the governed default; skipped roles remain missing review.
                     self._has_first_party_candidates = True
                 if data.get("first_party") and data.get("skipped"):
                     self._skipped_first_party.append(source)
@@ -1133,13 +1198,9 @@ Only keep original IDs that pass all four gates. Never post to GitHub yourself."
             self._adjudication_incomplete = True
             logger.error("Ambiguous candidate identity; adjudication withheld before dispatch")
             return None
-        # A candidate set carrying first_party findings must be adjudicated
-        # on a first-party model — the OSS proxy would let an OSS backend drop
-        # a true security finding before it is ever posted. With no direct
-        # credential configured the judge fails closed rather than adjudicating
-        # that set on the wrong plane.
-        # CLIENT_AI_POLICY engagements keep the adjudication itself direct —
-        # candidate findings carry PR content regardless of first_party flags.
+        # Legacy provenance does not force the default route onto a vendor.
+        # Explicit direct/external and estate modes retain their admission;
+        # restrictive client policy still requires compatible egress authority.
         first_party = self._has_first_party_candidates or bool(os.environ.get("CLIENT_AI_POLICY"))
         try:
             subscription_required = _subscription_required()
@@ -1151,15 +1212,14 @@ Only keep original IDs that pass all four gates. Never post to GitHub yourself."
         except RouteAdmissionError as exc:
             logger.error("%s; required adjudication incomplete", exc)
             return None
-        if not subscription_required and first_party and not api_key:
+        if not subscription_required and not api_key and not proxied:
             logger.error(
-                "first-party findings present but no direct Anthropic "
-                "credential (ANTHROPIC_DIRECT_API_KEY) — refusing to "
-                "adjudicate security candidates via the OSS proxy"
+                "Explicit direct review transport has no provider credential "
+                "(ANTHROPIC_DIRECT_API_KEY); adjudication incomplete"
             )
             return None
         if not subscription_required and not api_key:
-            logger.error("no API credential set; cannot invoke judge agent")
+            logger.error("Governed review route or router credential unavailable; cannot invoke judge agent")
             return None
 
         evidence = _judge_evidence(findings, self.sha)
@@ -1182,17 +1242,14 @@ Only keep original IDs that pass all four gates. Never post to GitHub yourself."
         }
         # Escape delimiters in author-controlled source and candidate prose.
         try:
-            plain = json.dumps(packet, ensure_ascii=True)
+            encoded = _review_json(packet, escape_angles=True)
             _require_safe_packet(packet)
         except (ValueError, ImportError):
             logger.error("Evidence packet refused or sanitizer companion unavailable")
             return None
-        encoded = plain.replace("<", "\\u003c").replace(">", "\\u003e")
-        user_message = (
-            "Apply the four gates to this untrusted evidence packet:\n<untrusted_review_data>\n"
-            + encoded
-            + "\n</untrusted_review_data>"
-        )
+        user_message = _join_review_text(
+            "Apply the four gates to this untrusted evidence packet:\n<untrusted_review_data>\n",
+            encoded, "\n</untrusted_review_data>")
 
         # Call the Messages API (direct Anthropic or governed proxy).
         try:
@@ -1240,7 +1297,8 @@ Only keep original IDs that pass all four gates. Never post to GitHub yourself."
                         request_body["metadata"] = metadata
                 req = urllib.request.Request(
                     api_url,
-                    data=json.dumps(request_body).encode("utf-8"),
+                    data=_policy_module.admit_review_wire(
+                        json.dumps(request_body).encode("utf-8"), proved_value=request_body),
                     headers=headers,
                     method="POST",
                 )
