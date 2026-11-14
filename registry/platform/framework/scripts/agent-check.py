@@ -769,6 +769,22 @@ def empty_gitlink_identity(root: Path, name: str) -> str | None:
         os.close(descriptor)
 
 
+def require_evidence_route(root: Path, path: Path) -> None:
+    """agent-check's own evidence is read only from this owner.
+
+    A leaf link leaving the owner or into a declared owner, or a hard link
+    carrying another owner's bytes under this name, holds before the read.
+    """
+    real_root = root.resolve()
+    resolved = path.resolve()
+    if not resolved.is_relative_to(real_root):
+        raise SourceScopeError("source-scope evidence route leaves this owner; content reads held")
+    if resolved != real_root / path.relative_to(root):
+        require_content_path_scope(path)
+    if resolved.is_file() and resolved.stat().st_nlink != 1:
+        raise SourceScopeError("source-scope evidence is hard-linked; content reads held")
+
+
 def require_routed_read(root: Path, path: Path) -> None:
     """A read routed through a directory link checks the target's owners first."""
     if path.resolve(strict=True) != root.resolve() / path.relative_to(root):
@@ -1520,6 +1536,7 @@ def main(argv=None) -> int:
             env_receipt = state / "environments" / f"environment-{sha(encoded(environment['id']))}.json"
             ready = not missing_ready_paths(root, environment)
             previous_environment = {}
+            require_evidence_route(root, env_receipt)
             if env_receipt.is_file():
                 try:
                     previous_environment = json.loads(env_receipt.read_text(encoding="utf-8"))
@@ -1701,6 +1718,7 @@ def main(argv=None) -> int:
 
         require_stable_inputs()
         if cache_reusable and all(r["status"] == "passed" for r in results) and cache.is_file() and not args.no_cache:
+            require_evidence_route(root, cache)
             previous = json.loads(cache.read_text(encoding="utf-8"))
             if previous.get("digest") == candidate_digest and previous.get("outcome") == "passed":
                 require_stable_inputs()

@@ -2388,6 +2388,54 @@ class NestedScopeAndCommonDirectory(unittest.TestCase):
                      patch.object(self.finalise, "source_scope_declared", return_value=False):
                     self.assertEqual(self.finalise.run_checks(self.root, "codex", 10)["outcome"], "source-scope-held")
 
+    def test_agent_check_evidence_leaf_links_hold_before_reads(self):
+        scoped = self.other_root()
+        self.init_source(scoped)
+        (scoped / ".ai").mkdir()
+        (scoped / self.runner.SOURCE_SCOPE_POLICY).write_bytes(self.raw)
+        (scoped / "receipt.json").write_text(json.dumps({"digest": "external", "result": {}}))
+        outside = self.other_root() / "receipt.json"
+        outside.write_text("{}")
+        environments = self.root / ".ai/agent-checks/environments"
+        environments.mkdir(parents=True)
+        receipt = environments / f"environment-{self.runner.sha(self.runner.encoded('deps'))}.json"
+        for form, target in (("symlink-scoped", scoped / "receipt.json"), ("symlink-outside", outside),
+                             ("hardlink", outside)):
+            with self.subTest(form=form):
+                if receipt.exists() or receipt.is_symlink():
+                    receipt.unlink()
+                if form == "hardlink":
+                    os.link(target, receipt)
+                else:
+                    receipt.symlink_to(target)
+                with self.assertRaises(self.runner.SourceScopeError):
+                    self.runner.require_evidence_route(self.root, receipt)
+        receipt.unlink()
+        receipt.write_text("{}")
+        self.runner.require_evidence_route(self.root, receipt)  # ordinary local evidence stays usable
+        self.runner.require_evidence_route(self.root, environments / "absent.json")
+
+    def test_actual_cli_holds_a_linked_environment_receipt_before_reading_it(self):
+        scoped = self.other_root()
+        self.init_source(scoped)
+        (scoped / ".ai").mkdir()
+        (scoped / self.runner.SOURCE_SCOPE_POLICY).write_bytes(self.raw)
+        (scoped / "receipt.json").write_text(json.dumps({"digest": "external", "result": {}}))
+        config = {"schema_version": 1, "base": "origin/main",
+                  "environments": [{"id": "deps", "ready_paths": ["src"], "commands": [[sys.executable, "-c", "pass"]]}],
+                  "checks": [{"id": "uses-deps", "paths": ["src/*"], "environment": "deps",
+                              "commands": [[sys.executable, "-c", "pass"]]}]}
+        (self.root / "config/agent-checks.json").write_text(json.dumps(config))
+        environments = self.root / ".ai/agent-checks/environments"
+        environments.mkdir(parents=True)
+        (environments / f"environment-{self.runner.sha(self.runner.encoded('deps'))}.json").symlink_to(scoped / "receipt.json")
+        (self.root / "src/value.py").write_text("value = 2\n")  # selects the environment
+        result = subprocess.run([sys.executable, "-B", str(SCRIPTS / "agent-check.py"), "--repo-root", str(self.root),
+                                 "--provision", "--no-cache"], capture_output=True, text=True, timeout=60,
+                                env=self.runner.git_environment())
+        self.assertEqual(result.returncode, 4, result.stdout + result.stderr)
+        self.assertIn("SOURCE-SCOPE-HELD", result.stderr)
+
     def test_link_heavy_trees_check_each_directory_once_without_per_link_git(self):
         subprocess.run(["git", "pack-refs", "--all"], cwd=self.root, check=True, capture_output=True,
                        env=self.runner.git_environment())
