@@ -2125,6 +2125,18 @@ class NestedScopeAndCommonDirectory(unittest.TestCase):
             with self.subTest(ready=ready), self.guarded_open("opaque.bin"):
                 self.assertIsNone(self.runner.ready_identity(self.root, {"ready_paths": [ready]}))
 
+    def test_declared_file_paths_through_intermediate_links_hold_before_read(self):
+        owner = self.root / "vendor"
+        self.scoped_owner(owner)
+        (owner / "deep").mkdir()
+        (owner / "deep/f.bin").write_bytes(b"synthetic deep payload\n")
+        (self.root / "l").symlink_to(Path("vendor/deep"), target_is_directory=True)
+        for ready, name in (("l/../opaque.bin", "opaque.bin"), ("l/f.bin", "f.bin"),
+                            ("vendor/opaque.bin", "opaque.bin")):
+            with self.subTest(ready=ready), self.guarded_open(name):
+                with self.assertRaises(self.runner.SourceScopeError):
+                    self.runner.ready_identity(self.root, {"ready_paths": [ready]})
+
     def test_link_heavy_trees_check_each_directory_once_without_per_link_git(self):
         subprocess.run(["git", "pack-refs", "--all"], cwd=self.root, check=True, capture_output=True,
                        env=self.runner.git_environment())

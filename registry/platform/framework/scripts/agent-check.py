@@ -1158,7 +1158,11 @@ def ready_identity(root: Path, item: dict, *, key: bytes | None = None) -> str |
             path = ready_path(root, name)
             # Owners between the repository root and this declared tree hold
             # before any of its bytes are read.
+            # Clear the lexical route and the physical one: an intermediate
+            # link or ".." after a link can place the file under another owner.
             require_clear(Path(os.path.abspath(path)).parent)
+            physical = path.resolve()
+            require_clear(physical if physical.is_dir() else physical.parent)
             try:
                 details = path.lstat()
             except FileNotFoundError:
