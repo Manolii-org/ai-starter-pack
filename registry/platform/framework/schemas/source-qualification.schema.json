@@ -1,0 +1,217 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://manolii.dev/schemas/source-qualification.schema.json",
+  "title": "Parallel source qualification policy",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "model_assessment",
+    "required_checks",
+    "optional_model_checks",
+    "review_publishers",
+    "security_scope"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 1
+    },
+    "model_assessment": {
+      "const": "optional"
+    },
+    "required_checks": {
+      "type": "array",
+      "minItems": 3,
+      "items": {
+        "allOf": [
+          {
+            "$ref": "#/$defs/check"
+          },
+          {
+            "properties": {
+              "role": {
+                "enum": [
+                  "classify",
+                  "deterministic",
+                  "security"
+                ]
+              }
+            }
+          }
+        ]
+      }
+    },
+    "optional_model_checks": {
+      "type": "array",
+      "items": {
+        "allOf": [
+          {
+            "$ref": "#/$defs/check"
+          },
+          {
+            "properties": {
+              "role": {
+                "const": "model"
+              }
+            }
+          }
+        ]
+      }
+    },
+    "review_publishers": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 2,
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "login",
+          "user_id"
+        ],
+        "properties": {
+          "login": {
+            "enum": [
+              "coderabbitai[bot]",
+              "chatgpt-codex-connector[bot]"
+            ]
+          },
+          "user_id": {
+            "type": "integer",
+            "minimum": 1
+          }
+        }
+      }
+    },
+    "security_scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "semgrep",
+        "bandit"
+      ],
+      "properties": {
+        "semgrep": {
+          "$ref": "#/$defs/securityScope"
+        },
+        "bandit": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/securityScope"
+            },
+            {
+              "properties": {
+                "include": {
+                  "const": [
+                    "*.py"
+                  ]
+                }
+              }
+            }
+          ]
+        }
+      }
+    }
+  },
+  "$defs": {
+    "check": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "app_id",
+        "workflow_path",
+        "workflow_sha256",
+        "job_key",
+        "role",
+        "steps",
+        "artifact_key"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "app_id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "workflow_path": {
+          "type": "string",
+          "pattern": "^\\.github/workflows/[A-Za-z0-9_.-]+\\.ya?ml$"
+        },
+        "workflow_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "job_key": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]+$"
+        },
+        "role": {
+          "enum": [
+            "classify",
+            "deterministic",
+            "security",
+            "model"
+          ]
+        },
+        "steps": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "artifact_key": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{1,64}$"
+        }
+      }
+    },
+    "securityScope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "include",
+        "exclude"
+      ],
+      "properties": {
+        "include": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "exclude": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "path",
+              "reason"
+            ],
+            "properties": {
+              "path": {
+                "type": "string",
+                "minLength": 1
+              },
+              "reason": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

@@ -115,3 +115,5 @@ platform/om/skills/om-handover/SKILL.md#a8013ab5
 platform/om/skills/om-handover/SKILL.md#e4b0243c
 platform/om/skills/om-readiness/SKILL.md#75824fd1
 platform/om/skills/om-staff-answer/SKILL.md#75824fd1
+platform/framework/schemas/source-qualification.schema.json#45f69f75
+platform/framework/scripts/ci/source_qualification_transport.py#7c803580

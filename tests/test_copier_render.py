@@ -275,22 +275,22 @@ def test_cost_profile_lean_omits_measured_waste_callers(default_render):
     ("flags", "expected"),
     [
         ({}, {"Hooks": 5, "Commands": 51, "Skills": 41, "Agents": 27,
-              "Scripts": 63, "Husky": 3, "CI": 40, "Docs": 41}),
+              "Scripts": 63, "Husky": 3, "CI": 42, "Docs": 41}),
         ({flag: "true" for flag in FEATURE_FLAGS},
          {"Hooks": 5, "Commands": 54, "Skills": 45, "Agents": 28,
-              "Scripts": 63, "Husky": 3, "CI": 40, "Docs": 43}),
+              "Scripts": 63, "Husky": 3, "CI": 42, "Docs": 43}),
         ({"cost_profile": "lean"},
          {"Hooks": 5, "Commands": 51, "Skills": 41, "Agents": 27,
-              "Scripts": 63, "Husky": 3, "CI": 39, "Docs": 41}),
+              "Scripts": 63, "Husky": 3, "CI": 41, "Docs": 41}),
         ({"codex_review": "false"},
          {"Hooks": 5, "Commands": 51, "Skills": 41, "Agents": 27,
-              "Scripts": 63, "Husky": 3, "CI": 36, "Docs": 41}),
+              "Scripts": 63, "Husky": 3, "CI": 38, "Docs": 41}),
         ({"isolation_profile": "strict"},
          {"Hooks": 5, "Commands": 51, "Skills": 41, "Agents": 27,
-              "Scripts": 60, "Husky": 3, "CI": 32, "Docs": 41}),
+              "Scripts": 60, "Husky": 3, "CI": 34, "Docs": 41}),
         ({"isolation_profile": "strict", "cost_profile": "lean"},
          {"Hooks": 5, "Commands": 51, "Skills": 41, "Agents": 27,
-              "Scripts": 60, "Husky": 3, "CI": 32, "Docs": 41}),
+              "Scripts": 60, "Husky": 3, "CI": 34, "Docs": 41}),
     ],
 )
 def test_rendered_readme_counts_match_rendered_tree(flags, expected):
@@ -354,11 +354,14 @@ def test_release_capability_distribution_boundary(default_render, branded_render
         registry_cases = list((ROOT / "tests").glob("_registry_cases_*.py"))
         assert registry_cases, "the registry case inventory must not become vacuous"
         maintenance_paths += registry_cases
+        maintenance_paths += [ROOT / path for path in ("scripts/ci/native_owner_recipe.py",
+                              ".github/workflows/native-owner-recipe.yml", "docs/native-owner-recipe.md",
+                              "tests/test_native_owner_recipe.py")]
         assert maintenance_paths, "the pack maintenance inventory must not become vacuous"
         for path in maintenance_paths:
             assert not (rendered / path.relative_to(ROOT)).exists()
         config = json.loads((rendered / "config/agent-checks.json").read_text())
-        assert all(c["id"] not in {"release-manifest-contract", "feature-controls", "feature-controls-distribution", "assessment-sast-failure-contract", "registry-bootstrap-contract", "installer-layout-contract", "watch-continuity-contract"} for c in config["checks"])
+        assert all(c["id"] not in {"release-manifest-contract", "feature-controls", "feature-controls-distribution", "assessment-sast-failure-contract", "registry-bootstrap-contract", "source-qualification-contract", "native-owner-recipe-contract", "installer-layout-contract", "watch-continuity-contract"} for c in config["checks"])
         assert all(e["id"] not in {"release-contract-python", "feature-controls-python"} for e in config["environments"])
         fixture = ROOT / "scripts/tests/fixtures/release-manifest.v1.json"
         release_id = json.loads(fixture.read_text())["release_id"]
@@ -485,7 +488,7 @@ def test_branded_attribution(branded_render, default_render):
 def test_agent_validation_base_uses_owner_ref(tmp_path, default_render, base_ref):
     """A real rendered CLI plans correctly with remote or local owner refs."""
     canonical = json.loads((ROOT / "config/agent-checks.json").read_text())
-    canonical["checks"] = [c for c in canonical["checks"] if c["id"] not in {"release-manifest-contract", "feature-controls", "feature-controls-distribution", "assessment-sast-failure-contract", "registry-bootstrap-contract", "installer-layout-contract", "watch-continuity-contract"}]
+    canonical["checks"] = [c for c in canonical["checks"] if c["id"] not in {"release-manifest-contract", "feature-controls", "feature-controls-distribution", "assessment-sast-failure-contract", "registry-bootstrap-contract", "source-qualification-contract", "native-owner-recipe-contract", "installer-layout-contract", "watch-continuity-contract"}]
     canonical["environments"] = [e for e in canonical["environments"] if e["id"] not in {"release-contract-python", "feature-controls-python"}]
     assert json.loads((default_render / "config/agent-checks.json").read_text()) == canonical
     dst = tmp_path / "custom-integration"

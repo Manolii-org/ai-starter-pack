@@ -73,6 +73,7 @@ import base64
 import fnmatch
 import hashlib
 import hmac
+import importlib.util
 import json
 import os
 import re
@@ -167,6 +168,11 @@ jobs:
             python3 scripts/sync-agent-validation.py --check
             python3 -m unittest discover -s scripts/tests -p test_agent_check.py -q
           fi
+      - name: Verify pinned delivery component inputs
+        run: >-
+          python3 registry/platform/framework/scripts/lib/delivery_component.py
+          --root registry/platform/framework
+          --expected-input-digest __DELIVERY_COMPONENT_INPUT_DIGEST__
       # Mirror mode in the lint verifies visibility itself via `gh api`
       # on every run — a mirror flipped public after seeding drops back
       # to the full pattern set and the boundary re-engages. The lookup
@@ -1245,36 +1251,56 @@ def check_visibility(slug: str) -> str | None:
     return None
 
 
-def merge_index(src_reg: Path, reg: Path, refresh_platform: bool) -> bool:
-    """registry/plugins.json — canonical platform entries merged with the
-    mirror's own non-platform entries (so --refresh-platform never drops
-    plugins the org added to its universe scope). A malformed existing
-    index aborts the run: falling back to {} would silently discard every
-    mirror-owned entry.
+def merge_index(src_reg: Path, reg: Path, refresh_platform: bool, *, write: bool = True) -> bool:
+    """Merge only platform index entries; preserve opaque owner metadata.
 
-    refresh_platform=False keeps the EXISTING platform entries: the
-    platform tree on disk is unchanged, so importing a newer canonical's
-    platform index would desync index↔tree (indexed-but-missing dirs)."""
-    canonical = json.loads((src_reg / "plugins.json").read_text())
+    Malformed/ambiguous metadata holds before platform replacement. A normal
+    no-refresh rerun keeps the existing mixed-ownership index byte-for-byte.
+    The bounded component refresh never invokes or reads this mixed surface.
+    """
+    def unique(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("ambiguous index key")
+            result[key] = value
+        return result
+
+    def read(path):
+        value = json.loads(path.read_text(), object_pairs_hook=unique,
+                           parse_constant=lambda _: (_ for _ in ()).throw(ValueError("invalid index constant")))
+        if (not isinstance(value, dict) or not isinstance(value.get("plugins", []), list)
+                or not isinstance(value.get("scopes", {}), dict)):
+            raise ValueError("invalid index shape")
+        return value
+
     dst = reg / "plugins.json"
-    if dst.is_file():
-        try:
-            existing = json.loads(dst.read_text())
-        except json.JSONDecodeError as exc:
-            sys.stderr.write(
-                f"FAIL: {dst} is malformed JSON ({exc}) — aborting; fix or "
-                "restore the file and retry, or the refresh would discard "
-                "the mirror's own plugin entries\n")
-            return False
-        if refresh_platform:
-            mine = [p for p in existing.get("plugins", [])
-                    if isinstance(p, dict) and p.get("scope") != "platform"]
-            canonical["plugins"] = (
-                [p for p in canonical.get("plugins", [])
-                 if p.get("scope") == "platform"] + mine)
+    try:
+        canonical = read(src_reg / "plugins.json")
+        if any(not isinstance(row, dict) for row in canonical.get("plugins", [])):
+            raise ValueError("invalid canonical plugin row")
+        if dst.exists():
+            existing = read(dst)
+            if not refresh_platform:
+                return True
+            if existing.get("schema_version", 1) != canonical.get("schema_version", 1):
+                raise ValueError("incompatible index version")
+            mine = [row for row in existing.get("plugins", [])
+                    if not isinstance(row, dict) or row.get("scope") != "platform"]
+            merged = {**canonical, **existing}
+            scopes = {**canonical.get("scopes", {}), **existing.get("scopes", {})}
+            if "platform" in canonical.get("scopes", {}):
+                scopes["platform"] = canonical["scopes"]["platform"]
+            merged["scopes"] = scopes
+            merged["plugins"] = [row for row in canonical.get("plugins", [])
+                                 if row.get("scope") == "platform"] + mine
         else:
-            canonical["plugins"] = existing.get("plugins", [])
-    dst.write_text(json.dumps(canonical, indent=2) + "\n")
+            merged = canonical
+    except (OSError, ValueError, UnicodeError):
+        sys.stderr.write("FAIL: malformed or incompatible registry index; retain owner entries and platform\n")
+        return False
+    if write:
+        dst.write_text(json.dumps(merged, indent=2, allow_nan=False) + "\n")
     return True
 
 
@@ -1404,6 +1430,220 @@ def regen_allowlists(root: Path, established: bool) -> bool:
     return True
 
 
+def _public_module(name: str, relative: str):
+    spec = importlib.util.spec_from_file_location(name, PACK / relative)
+    if spec is None or spec.loader is None:
+        raise ValueError("public component helper unavailable")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _component_source(component_only: bool):
+    component = _public_module("bootstrap_delivery_component", "scripts/lib/delivery_component.py")
+    git = _trusted_prog("git")
+    if not git:
+        raise ValueError("trusted Git source identity unavailable")
+    source = component.pack_source(PACK, component_only=component_only, git_program=git)
+    return component, source, git
+
+
+def _source_record(component, root: Path):
+    snapshot = component.snapshot(root, component.MIRROR_SOURCE)
+    if snapshot is None:
+        return None
+    def unique(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("ambiguous installed component provenance")
+            result[key] = value
+        return result
+    value = json.loads(snapshot[0], object_pairs_hook=unique,
+                       parse_constant=lambda _: (_ for _ in ()).throw(ValueError("invalid provenance")))
+    if (not isinstance(value, dict) or value.get("schema") != "registry-platform-source/v1"
+            or value.get("selection") not in ("platform", "delivery-component")
+            or value.get("git_object_format") not in ("sha1", "sha256")
+            or not isinstance(value.get("pack_sha"), str)
+            or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", value["pack_sha"])
+            or len(value["pack_sha"]) != (40 if value["git_object_format"] == "sha1" else 64)
+            or not isinstance(value.get("pack_tree"), str)
+            or not re.fullmatch(r"[0-9a-f]{" + str(len(value["pack_sha"])) + r"}", value["pack_tree"])
+            or not re.fullmatch(r"[0-9a-f]{64}", str(value.get("component_input_digest")))
+            or snapshot[1] != "100644"
+            or not isinstance(value.get("inputs"), list)
+            or value.get("input_digest") != component.digest(value["inputs"])
+            or value.get("admission_authorized") is not False
+            or value.get("production_authorized") is not False):
+        raise ValueError("installed component provenance unavailable or invalid")
+    rows = value["inputs"]
+    if (any(not isinstance(row, dict) or set(row) != {"path", "mode", "sha256", "git_blob"}
+            or row["mode"] not in ("100644", "100755")
+            or not isinstance(row["path"], str)
+            or row["path"].startswith("/")
+            or any(part in ("", ".", "..") for part in row["path"].split("/"))
+            or not re.fullmatch(r"[0-9a-f]{" + str(len(value["pack_sha"])) + r"}", str(row["git_blob"]))
+            or not re.fullmatch(r"[0-9a-f]{64}", str(row["sha256"])) for row in rows)
+            or len({row["path"] for row in rows}) != len(rows)):
+        raise ValueError("installed component provenance is ambiguous")
+    return value
+
+
+_MAX_SOURCE_COMMITS = 10_000
+_MAX_SOURCE_COMMIT_BYTES = 1_000_000
+
+
+def _raw_source_commit(component, identity, algorithm, git):
+    """Read/hash an actual immutable commit, never a graph overlay's parents."""
+    width = 40 if algorithm == "sha1" else 64
+    if not re.fullmatch(r"[0-9a-f]{" + str(width) + r"}", identity):
+        raise ValueError("invalid immutable source commit identity")
+    if component._git(PACK, "cat-file", "-t", identity, git_program=git).strip() != b"commit":
+        raise ValueError("source identity is not an immutable commit")
+    size = component._git(PACK, "cat-file", "-s", identity, git_program=git).strip()
+    if not size.isdigit() or not 0 < int(size) <= _MAX_SOURCE_COMMIT_BYTES:
+        raise ValueError("immutable source commit exceeds bound")
+    raw = component._git(PACK, "cat-file", "commit", identity, git_program=git)
+    hashed = hashlib.new(algorithm, usedforsecurity=False)
+    hashed.update(b"commit " + str(len(raw)).encode() + b"\0" + raw)
+    if len(raw) != int(size) or hashed.hexdigest() != identity or b"\n\n" not in raw:
+        raise ValueError("immutable source commit bytes differ")
+    tree, parents = None, []
+    for line in raw.split(b"\n\n", 1)[0].splitlines():
+        if line.startswith((b"tree ", b"parent ")):
+            kind, value = line.split(b" ", 1)
+            value = value.decode("ascii")
+            if not re.fullmatch(r"[0-9a-f]{" + str(width) + r"}", value):
+                raise ValueError("invalid immutable source commit header")
+            if kind == b"tree":
+                if tree is not None:
+                    raise ValueError("ambiguous immutable source commit tree")
+                tree = value
+            else:
+                parents.append(value)
+    if tree is None:
+        raise ValueError("immutable source commit tree unavailable")
+    return tree, parents
+
+
+def _prove_raw_source_ancestry(component, previous, source, git):
+    algorithm = source["git_object_format"]
+    if previous["git_object_format"] != algorithm:
+        raise ValueError("source object formats differ")
+    captured = {}
+    for selected in (previous, source):
+        identity = selected["pack_sha"]
+        if identity not in captured:
+            captured[identity] = _raw_source_commit(component, identity, algorithm, git)
+        if captured[identity][0] != selected["pack_tree"]:
+            raise ValueError("source commit/tree differs from immutable bytes")
+    pending, visited = [source["pack_sha"]], set()
+    while pending:
+        identity = pending.pop()
+        if identity == previous["pack_sha"]:
+            return
+        if identity in visited:
+            continue
+        if len(visited) >= _MAX_SOURCE_COMMITS:
+            raise ValueError("source ancestry exceeds bound")
+        visited.add(identity)
+        if identity not in captured:
+            captured[identity] = _raw_source_commit(component, identity, algorithm, git)
+        pending.extend(reversed(captured[identity][1]))
+    raise ValueError("source ancestry unproved from immutable commit parents")
+
+
+def _require_source_advance(component, previous, source, git):
+    if previous is None:
+        return {}
+    try:
+        _prove_raw_source_ancestry(component, previous, source, git)
+        # A self-consistent JSON record is not ownership authority. Re-prove
+        # only fixed PUBLIC component paths from locally available Git objects
+        # before using a previous row to permit replacement. Never fetch,
+        # inspect an owner payload or trust a candidate row's hash alone.
+        selected = {"registry/platform/framework/" + name
+                    for name in (*component.FILES, component.INPUTS, component.VERIFIER)}
+        recorded = {row["path"]: row for row in previous["inputs"]}
+        actual = {}
+        for row in component._git(PACK, "ls-tree", "-rz", previous["pack_sha"], "--",
+                                  *sorted(selected), git_program=git).split(b"\0"):
+            if row:
+                metadata, name = row.split(b"\t", 1)
+                mode, kind, identity = metadata.decode("ascii").split()
+                if kind != "blob" or mode not in ("100644", "100755"):
+                    raise ValueError("previous component source input is not regular")
+                actual[name.decode("ascii")] = (mode, identity)
+        if set(actual) != selected:
+            raise ValueError("previous immutable component inputs unavailable")
+        verified = {}
+        for name, (mode, identity) in actual.items():
+            size = component._git(PACK, "cat-file", "-s", identity, git_program=git).strip()
+            if not size.isdigit() or not 0 <= int(size) <= component.MAX_FILE:
+                raise ValueError("previous immutable component input exceeds bound")
+            raw = component._git(PACK, "cat-file", "blob", identity, git_program=git)
+            expected = {**component._row(name, raw, mode), "git_blob": identity}
+            if recorded.get(name) != expected:
+                raise ValueError("previous component row differs from immutable source")
+            verified[name] = expected
+        return verified
+    except component.ComponentError as error:
+        raise ValueError("component source identity/ancestry unproved; retain installed inputs") from error
+
+
+def refresh_delivery_component(root: Path, component, source, git, slug: str) -> int:
+    """Narrow public-code refresh; never read a universe, plugin index or payload.
+
+    Use the existing repository mutex. Retain partial selected code on failure,
+    keep provenance last, and reconcile/restart the exact same input set. No
+    automatic rollback, deletion, push or installation/production claim.
+    """
+    marker, _ = component.read_file(root, "registry/.private-mirror")
+    trust, _ = component.read_file(root, "registry/private-mirrors.txt")
+    trusted = {line.strip() for line in trust.decode().splitlines()
+               if line.strip() and not line.lstrip().startswith("#")}
+    if marker or hashlib.sha256(slug.encode()).hexdigest() not in trusted:
+        raise ValueError("component refresh requires an existing origin-bound private marker")
+    # The ordinary live visibility/origin checks ran before this routine. A
+    # local marker does not establish private provider enforcement on its own.
+    resolver = _public_module("bootstrap_component_resolver", "scripts/ai-resolve.py")
+    if not resolver._HAS_DIRFD:
+        raise ValueError("component refresh requires descriptor-relative file support")
+    try:
+        import fcntl  # the existing mutex must actually lock on this host
+    except ImportError as error:
+        raise ValueError("component refresh requires an actual repository mutex") from error
+    framework = root / "registry/platform/framework"
+    with resolver._repo_apply_mutex(root):
+        previous = _source_record(component, root)
+        old = _require_source_advance(component, previous, source, git)
+        names = (*component.FILES, component.VERIFIER, component.INPUTS)
+        outputs, snapshots = {}, {}
+        for name in names:
+            relative = "registry/platform/framework/" + name
+            raw, mode = component.read_file(PACK, relative)
+            wanted = (raw, mode)
+            current = component.snapshot(framework, name)
+            if current is not None and current != wanted:
+                prior = old.get(relative)
+                if prior is None or component._row(relative, *current) != {
+                        key: prior[key] for key in ("path", "mode", "sha256")}:
+                    raise ValueError("unowned or changed component path; retain existing inputs")
+            outputs[name] = wanted
+            snapshots[name] = current
+        pin_before = component.snapshot(root, component.MIRROR_SOURCE)
+        for name in names:
+            component.write_public_file(framework, name, *outputs[name], snapshots[name])
+        component.verify(framework, expected_digest=source["component_input_digest"])
+        if component.pack_source(PACK, component_only=True, git_program=git) != source:
+            raise ValueError("public component source changed during refresh")
+        component.write_public_file(root, component.MIRROR_SOURCE, component.encoded(source),
+                                    "100644", pin_before)
+    print("component inputs refreshed; owning registry gate and native bindings remain unqualified")
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--root", required=True, type=Path,
@@ -1413,7 +1653,11 @@ def main() -> int:
                     help="owner/repo slug of the mirror repo, lowercase")
     ap.add_argument("--refresh-platform", action="store_true",
                     help="overwrite the vendored platform tree as well")
+    ap.add_argument("--refresh-delivery-component", action="store_true",
+                    help="update only pinned public release-record component inputs; preserve opaque owner content")
     args = ap.parse_args()
+    if args.refresh_delivery_component and args.refresh_platform:
+        ap.error("choose one bounded refresh scope")
 
     root: Path = args.root
     slug = args.slug.strip().lower()
@@ -1464,6 +1708,14 @@ def main() -> int:
     if check_visibility(slug) is None:
         return 2
 
+    try:
+        component, source, source_git = _component_source(args.refresh_delivery_component)
+        if args.refresh_delivery_component:
+            return refresh_delivery_component(root, component, source, source_git, slug)
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        sys.stderr.write("FAIL: immutable public component inputs unavailable or changed; no refresh authority\n")
+        return 2
+
     reg = root / "registry"
     # An existing registry/ means this is a rerun/refresh — allowlist regen
     # must merge (preserve live mirror-owned entries, never ratchet new
@@ -1493,14 +1745,35 @@ def main() -> int:
                 f"(registry/{u}/scope.yaml exists) — --universe "
                 f"{args.universe} does not match; refusing\n")
             return 2
+    # Validate the mixed index and installed source before replacing platform
+    # bytes or writing owner scaffold. Narrow refresh never reaches this code.
+    src_reg = PACK / "registry"
+    dst_plat = reg / "platform"
+    refreshing = args.refresh_platform or not dst_plat.exists()
+    try:
+        # The outside-platform record may survive an interrupted/old refresh.
+        # Validate it even when platform is absent, before ANY scaffold writes.
+        pin_before = component.snapshot(root, component.MIRROR_SOURCE)
+        previous_source = _source_record(component, root)
+        if component.snapshot(root, component.MIRROR_SOURCE) != pin_before:
+            raise ValueError("installed platform provenance changed during preflight")
+        if dst_plat.exists() and previous_source is None:
+            raise ValueError("legacy platform provenance unknown; use bounded component refresh")
+        _require_source_advance(component, previous_source, source, source_git)
+        workflow_digest = source["component_input_digest"]
+        if not refreshing:
+            retained = component.verify(dst_plat / "framework",
+                                        expected_digest=previous_source["component_input_digest"])
+            workflow_digest = retained["input_digest"]
+    except (OSError, ValueError):
+        sys.stderr.write("FAIL: installed platform provenance does not authorize this replacement\n")
+        return 2
+    if not merge_index(src_reg, reg, refreshing, write=False):
+        return 2
     reg.mkdir(parents=True, exist_ok=True)
     (reg / ".private-mirror").write_text("")
     seed_scope(root, args.universe)
 
-    # Vendored canonical content: the whole platform tree + merged index.
-    src_reg = PACK / "registry"
-    dst_plat = reg / "platform"
-    refreshing = args.refresh_platform or not dst_plat.exists()
     if refreshing:
         if dst_plat.exists():
             shutil.rmtree(dst_plat)
@@ -1524,11 +1797,22 @@ def main() -> int:
 
     wf = root / ".github" / "workflows" / "registry-lint.yml"
     wf.parent.mkdir(parents=True, exist_ok=True)
-    wf.write_text(MIRROR_WORKFLOW)
+    wf.write_text(MIRROR_WORKFLOW.replace("__DELIVERY_COMPONENT_INPUT_DIGEST__",
+                                        workflow_digest))
 
     (root / "README.md").write_text(README)
     if not regen_allowlists(root, established):
         return 2
+    if refreshing:
+        try:
+            if component.pack_source(PACK, git_program=source_git) != source:
+                raise ValueError("public platform source changed during refresh")
+            component.verify_copied_platform(root, source)
+            component.write_public_file(root, component.MIRROR_SOURCE, component.encoded(source),
+                                        "100644", pin_before)
+        except (OSError, ValueError):
+            sys.stderr.write("FAIL: copied platform differs from pinned public inputs; qualification held\n")
+            return 2
     print(f"seeded mirror for {args.universe} at {root} (slug {slug})")
     # 'git commit -m --no-gpg-sign': never the bare command — a
     # configured editor (core.editor/GIT_EDITOR) launches on it and a
