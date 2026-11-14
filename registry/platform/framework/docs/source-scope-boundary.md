@@ -68,6 +68,12 @@ or cannot be qualified (including initialized submodules). Detection reads
 names and Git metadata only, once per process; validation commands could
 otherwise read that subfolder. Reads routed through directory links also check
 the target's owners first.
+Limit: unsandboxed validation cannot protect another owner's files that an
+unscoped repository reaches through file links or hard links, because the
+validation commands themselves can open any path. agent-check and the gate
+refuse such routes for the files they read or execute themselves (the runner,
+recipe configuration and evidence); only the sandboxed source projection
+protects other owners' content from commands.
 Ordinary unscoped linked and absent inputs keep their existing observations;
 cycles and inaccessible ownership metadata hold without exposing private paths.
 The Cursor hook classifies commands before repository/scope probes: ordinary

@@ -2365,6 +2365,29 @@ class NestedScopeAndCommonDirectory(unittest.TestCase):
                 self.assertNotIn("external-digest", json.dumps(result))
                 (state / leaf).unlink()
 
+    def test_linked_or_hard_linked_runner_is_never_executed(self):
+        scoped = self.other_root()
+        self.init_source(scoped)
+        (scoped / ".ai").mkdir()
+        (scoped / self.runner.SOURCE_SCOPE_POLICY).write_bytes(self.raw)
+        (scoped / "agent-check.py").write_text("raise SystemExit(0)\n")
+        outside = self.other_root() / "agent-check.py"
+        outside.write_text("raise SystemExit(0)\n")
+        runner = self.root / "scripts/agent-check.py"
+        runner.parent.mkdir(exist_ok=True)
+        for form, target in (("symlink-scoped", scoped / "agent-check.py"), ("symlink-outside", outside),
+                             ("hardlink", outside)):
+            with self.subTest(form=form):
+                if runner.exists() or runner.is_symlink():
+                    runner.unlink()
+                if form == "hardlink":
+                    os.link(target, runner)
+                else:
+                    runner.symlink_to(target)
+                with patch.object(self.finalise.subprocess, "Popen", side_effect=AssertionError("runner executed")), \
+                     patch.object(self.finalise, "source_scope_declared", return_value=False):
+                    self.assertEqual(self.finalise.run_checks(self.root, "codex", 10)["outcome"], "source-scope-held")
+
     def test_link_heavy_trees_check_each_directory_once_without_per_link_git(self):
         subprocess.run(["git", "pack-refs", "--all"], cwd=self.root, check=True, capture_output=True,
                        env=self.runner.git_environment())

@@ -735,6 +735,13 @@ def run_checks(root: Path, provider: str, timeout: int) -> dict:
     runner = agent_check_path(root)
     if runner is None:
         return {"outcome": "incomplete", "summary": "scripts/agent-check.py is not installed"}
+    if runner == root / "scripts" / "agent-check.py":
+        # The repository's runner is executed: a link or hard link must not
+        # route Python to another owner's bytes.
+        try:
+            require_evidence_route(root, runner)
+        except SourceScopeHeld:
+            return {"outcome": "source-scope-held", "summary": "runner route leaves this owner; held"}
     state.mkdir(parents=True, exist_ok=True)
     log_path = state / LOG_NAME
     start = time.monotonic()
