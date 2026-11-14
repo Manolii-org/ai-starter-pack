@@ -1011,10 +1011,6 @@ READY_IDENTITY_MAX_BYTES = 2_000_000_000
 READY_IDENTITY_CONTRACT = "agent-ready-content/v3"
 
 
-class _NestedScopeUnknown(RuntimeError):
-    """A nested owner's metadata is unmodelled: read nothing beneath it."""
-
-
 def ready_identity(root: Path, item: dict, *, key: bytes | None = None) -> str | None:
     """Bind owned dependency bytes, or return None to require fresh execution.
 
@@ -1096,16 +1092,13 @@ def ready_identity(root: Path, item: dict, *, key: bytes | None = None) -> str |
             try:
                 declared = _source_scope_exists(folder / SOURCE_SCOPE_POLICY)
                 nested = not declared and _source_scope_exists(folder / ".git")
-            except ValueError:
-                raise _NestedScopeUnknown() from None
+            except ValueError as error:
+                raise _source_scope_failure(error) from None
             if nested:
-                # Only a positive declaration holds. Unmodelled nested metadata
-                # (submodule pointers, alternates) stops this walk unread: the
-                # identity is unknown, so no cache is used and checks run fresh.
-                try:
-                    declared = source_scope_declared(folder)
-                except SourceScopeError:
-                    raise _NestedScopeUnknown() from None
+                # A nested owner is qualified exactly like the repository root:
+                # a declaration holds, and so does metadata (submodule pointers,
+                # alternates) that cannot be qualified. Nothing beneath is read.
+                declared = source_scope_declared(folder)
             if declared:
                 raise SourceScopeError("source-scope requires a reviewed isolated projection; full validation held")
             clear_directories.add(folder)
@@ -1224,7 +1217,7 @@ def ready_identity(root: Path, item: dict, *, key: bytes | None = None) -> str |
             return None
         return digest.hexdigest()
     except SourceScopeError:
-        raise  # A declared scope hold is not an unknown identity.
+        raise  # A scope hold is not an unknown identity that permits execution.
     except (OSError, RuntimeError, ValueError):
         # Unknown identity is not missing readiness and is never a cache key.
         return None

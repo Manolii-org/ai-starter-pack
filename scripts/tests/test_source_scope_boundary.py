@@ -2104,7 +2104,7 @@ class NestedScopeAndCommonDirectory(unittest.TestCase):
             with self.assertRaises(self.runner.SourceScopeError):
                 self.runner.ready_identity(self.root, {"ready_paths": ["deps"]})
 
-    def test_unmodelled_nested_git_metadata_is_unknown_not_held_and_unread(self):
+    def test_unmodelled_nested_git_metadata_holds_like_the_root_and_is_unread(self):
         # Submodule-style gitfile pointer and a shared clone's alternates.
         modules = self.root / ".git/modules/vendor/dep"
         modules.mkdir(parents=True)
@@ -2123,7 +2123,32 @@ class NestedScopeAndCommonDirectory(unittest.TestCase):
         self.nested_payload(shared)
         for ready in ("vendor", "deps"):
             with self.subTest(ready=ready), self.guarded_open("opaque.bin"):
-                self.assertIsNone(self.runner.ready_identity(self.root, {"ready_paths": [ready]}))
+                with self.assertRaises(self.runner.SourceScopeError):
+                    self.runner.ready_identity(self.root, {"ready_paths": [ready]})
+
+    def test_actual_cli_holds_before_setup_or_checks_for_unqualified_nested_metadata(self):
+        pointer = self.root / "vendor/dep"
+        pointer.mkdir(parents=True)
+        (self.root / ".git/modules/vendor/dep").mkdir(parents=True)
+        (pointer / ".git").write_text("gitdir: ../../.git/modules/vendor/dep\n")
+        self.nested_payload(pointer)
+        marker = self.other_root()
+        write = lambda name: [sys.executable, "-c", f"open({str(marker / name)!r}, 'w').close()"]
+        config = {"schema_version": 1, "base": "origin/main",
+                  "environments": [{"id": "deps", "ready_paths": ["vendor"], "commands": [write("setup")]}],
+                  "checks": [{"id": "uses-deps", "paths": ["src/*"], "environment": "deps",
+                              "commands": [write("check")]}]}
+        (self.root / "config/agent-checks.json").write_text(json.dumps(config))
+        (self.root / "src/value.py").write_text("value = 2\n")
+        for arguments in (["--provision"], ["--provision", "--no-cache"]):
+            with self.subTest(arguments=arguments):
+                result = subprocess.run([sys.executable, "-B", str(SCRIPTS / "agent-check.py"),
+                                         "--repo-root", str(self.root), *arguments],
+                                        capture_output=True, text=True, timeout=60,
+                                        env=self.runner.git_environment())
+                self.assertEqual(result.returncode, 4, result.stdout + result.stderr)
+                self.assertIn("SOURCE-SCOPE-HELD", result.stderr)
+                self.assertEqual(sorted(path.name for path in marker.iterdir()), [])
 
     def test_declared_file_paths_through_intermediate_links_hold_before_read(self):
         owner = self.root / "vendor"
