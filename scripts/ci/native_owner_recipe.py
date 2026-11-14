@@ -12,6 +12,7 @@ import json
 import os
 from pathlib import Path
 import re
+import stat
 import subprocess
 import sys
 
@@ -107,6 +108,67 @@ def require_unfiltered_source(root):
         seen.add(key)
 
 
+def checkout_matches_head(root):
+    """Compare physical tracked bytes and modes with HEAD's expected checkout.
+
+    Normalized diff applies clean conversion (eol/ident) before comparing, so
+    converted-away bytes look unchanged. The reference is the HEAD blob after
+    Git's built-in checkout conversion (``cat-file --filters``), never the raw
+    blob, so a supported eol/ident checkout still matches. Callers have already
+    refused external filter drivers. Unreadable, special, missing or
+    symlink-mismatched entries return False (fail closed).
+    """
+    listing = git(root, "ls-tree", "-r", "--full-tree", "-z", "HEAD")
+    if listing and not listing.endswith(b"\0"):
+        return False
+    file_mode = git(root, "config", "--type=bool", "--default=true", "--get", "core.filemode").strip()
+    symlinks = git(root, "config", "--type=bool", "--default=true", "--get", "core.symlinks").strip()
+    directories = {}
+    for entry in listing.split(b"\0")[:-1] if listing else []:
+        metadata, separator, name = entry.partition(b"\t")
+        fields = metadata.split(b" ")
+        if not separator or not name or len(fields) != 3 or fields[1] != b"blob":
+            return False  # gitlinks/submodules have no checkout bytes to bind
+        mode, identity = fields[0], fields[2].decode()
+        relative = os.fsdecode(name)
+        # A symlinked parent directory would redirect the read elsewhere.
+        parent = os.path.dirname(relative)
+        while parent:
+            if parent not in directories:
+                try:
+                    directories[parent] = stat.S_ISDIR(os.lstat(root / parent).st_mode)
+                except OSError:
+                    directories[parent] = False
+            if not directories[parent]:
+                return False
+            parent = os.path.dirname(parent)
+        path = root / relative
+        try:
+            if mode == b"120000" and symlinks == b"true":
+                if not stat.S_ISLNK(os.lstat(path).st_mode):
+                    return False
+                if os.fsencode(os.readlink(path)) != git(root, "cat-file", "blob", identity):
+                    return False
+                continue
+            if mode not in (b"100644", b"100755", b"120000"):
+                return False
+            expected = (git(root, "cat-file", "blob", identity) if mode == b"120000" else
+                        git(root, "cat-file", "--filters", b"--path=" + name, identity))
+            descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+            with os.fdopen(descriptor, "rb") as stream:
+                info = os.fstat(stream.fileno())
+                if not stat.S_ISREG(info.st_mode) or info.st_size != len(expected):
+                    return False
+                if (mode != b"120000" and file_mode == b"true"
+                        and bool(info.st_mode & 0o100) != (mode == b"100755")):
+                    return False
+                if stream.read(len(expected) + 1) != expected:
+                    return False
+        except OSError:
+            return False
+    return True
+
+
 def identifiers(items):
     if not isinstance(items, list):
         raise ValueError("recipe inventory must be an array")
@@ -153,7 +215,8 @@ def execute(root, event, env, *, plan_only=False):
             raise
         raise ValueError("the selected current base must be integrated before qualification") from error
     require_unfiltered_source(root)
-    if git(root, "diff", "--no-ext-diff", "--no-textconv", "--name-only", "HEAD"):
+    if (git(root, "diff", "--no-ext-diff", "--no-textconv", "--name-only", "HEAD")
+            or not checkout_matches_head(root)):
         raise ValueError("tracked source is modified before qualification")
     if git(root, "ls-files", "--others", "--exclude-standard", "-z"):
         raise ValueError("untracked source is present before qualification")
@@ -180,7 +243,8 @@ def execute(root, event, env, *, plan_only=False):
     require_unfiltered_source(root)
     if (git(root, "rev-parse", "HEAD").decode().strip() != current["head_sha"]
             or git(root, "diff", "--no-ext-diff", "--no-textconv", "--name-only", "HEAD")
-            or git(root, "ls-files", "--others", "--exclude-standard", "-z")):
+            or git(root, "ls-files", "--others", "--exclude-standard", "-z")
+            or not checkout_matches_head(root)):
         raise ValueError("source changed during qualification")
     if len(planned.stdout) > 2_000_000:
         raise ValueError("recipe plan exceeds bounded metadata")
@@ -205,7 +269,8 @@ def execute(root, event, env, *, plan_only=False):
     require_unfiltered_source(root)
     if (git(root, "rev-parse", "HEAD").decode().strip() != current["head_sha"]
             or git(root, "diff", "--no-ext-diff", "--no-textconv", "--name-only", "HEAD")
-            or git(root, "ls-files", "--others", "--exclude-standard", "-z")):
+            or git(root, "ls-files", "--others", "--exclude-standard", "-z")
+            or not checkout_matches_head(root)):
         raise ValueError("source changed during qualification")
     summary.update(status="passed", recipe_passed=True,
                    whole_configured_recipe_passed=set(selected) == set(configured),

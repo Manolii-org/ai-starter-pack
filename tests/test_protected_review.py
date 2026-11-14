@@ -464,11 +464,15 @@ def test_equal_identity_content_different_confidence_keeps_first_original_and_bo
 @pytest.mark.parametrize("identity", [None, "original-id"])
 def test_protected_identity_is_stable_in_all_shipped_judges(monkeypatch, tmp_path, layout, identity):
     path = ROOT / layout / "scripts/run-judge.py"
+    bytecode_before = set(path.parent.rglob("*.pyc"))
     spec = importlib.util.spec_from_file_location("identity_judge_" + layout.replace("/", "_"), path)
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    # These are trusted source-fixture bytes. Do not consume or create bytecode
+    # in the immutable public registry that later transport checks must qualify.
+    exec(compile(path.read_bytes(), str(path), "exec"), module.__dict__)
     raw = finding() if identity is None else dict(finding(), finding_id=identity)
     _, judge, loaded, _ = load_identity_receipt(monkeypatch, tmp_path, [raw], [], module=module)
+    assert set(path.parent.rglob("*.pyc")) == bytecode_before
     assert loaded[0].to_dict() == dict(finding(), source="security-boundary-test",
                                      finding_id=identity or "bd16f754c699", confidence=0.5)
     assert len(module._investigations(loaded, judge._review_observations)) == 1

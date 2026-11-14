@@ -281,7 +281,29 @@
         "plugin/manolii-framework/schemas/release-source-policy.v1.schema.json",
         "registry/platform/framework/schemas/release-source-policy.v1.schema.json",
         "scripts/tests/test_release_source_policy.py",
-        "scripts/tests/fixtures/release-manifest.c435.py"
+        "scripts/tests/fixtures/release-manifest.c435.py",
+        "scripts/lib/delivery_component.py",
+        "scripts/build-plugin.py",
+        "scripts/build-registry.py",
+        "scripts/bootstrap-mirror.py",
+        "tests/test_delivery_component_distribution.py",
+        "plugin/manolii-framework/.github/actions/validate-release-manifest/**",
+        "registry/platform/framework/.github/actions/validate-release-manifest/**",
+        "plugin/manolii-framework/scripts/lib/delivery_component.py",
+        "registry/platform/framework/scripts/lib/delivery_component.py",
+        ".github/workflows/release-tag.yml",
+        "tests/test_release_tag_namespaces.py",
+        "tests/test_hydrate_assessment.py",
+        "tests/test_workflow_security.py",
+        "README.md",
+        "docs/renovate-preset.md",
+        "docs/node-runtime-support.md",
+        "docs/contracts/integration-admission.md",
+        "default.json",
+        "tests/test_renovate_config.py",
+        "config/workflow-outcomes.json",
+        ".github/workflows/integration-admission-reusable.yml",
+        "scripts/tests/test_lint_workflow_outcomes.py"
       ],
       "tools": [
         "uv"
@@ -315,10 +337,36 @@
           "tests/test_copier_render.py",
           "-k",
           "test_rendered_readme_counts_match_rendered_tree or test_release_capability_distribution_boundary or test_agent_validation_base_uses_owner_ref or test_executor_public_linux_setup_consumes_metadata_and_fails_closed or test_watch_continuity_maintainer_fixture_never_ships"
+        ],
+        [
+          ".ai/agent-checks/release-venv/bin/python",
+          "-B",
+          "-m",
+          "pytest",
+          "-q",
+          "tests/test_delivery_component_distribution.py"
+        ],
+        [
+          ".ai/agent-checks/release-venv/bin/python",
+          "-B",
+          "-m",
+          "pytest",
+          "-q",
+          "tests/test_release_tag_namespaces.py",
+          "tests/test_hydrate_assessment.py::test_pack_ref_input_exists_and_defaults_to_major_alias",
+          "tests/test_workflow_security.py::test_documented_callers_pin_pack_ref_to_the_uses_sha",
+          "tests/test_renovate_config.py",
+          "scripts/tests/test_lint_workflow_outcomes.py"
         ]
       ],
       "timeout_seconds": 180,
-      "environment": "release-contract-python"
+      "environment": "release-contract-python",
+      "ci_sources": [
+        {
+          "path": ".github/workflows/plugin-eval-gate.yml",
+          "contains": "python3 -m pytest tests/ -q"
+        }
+      ]
     },
     {
       "id": "feature-controls",
@@ -520,7 +568,12 @@
         "tests/test_native_guidance.py",
         ".claude/skills/autonomy-follow-through/**",
         "plugin/manolii-framework/scripts/lib/native_guidance.py",
-        "registry/platform/framework/scripts/lib/native_guidance.py"
+        "registry/platform/framework/scripts/lib/native_guidance.py",
+        "scripts/bootstrap-mirror.py",
+        "scripts/build-plugin.py",
+        "scripts/lib/delivery_component.py",
+        "tests/test_protected_review.py",
+        ".github/workflows/registry-lint.yml"
       ],
       "tools": [
         "uv"
@@ -530,6 +583,7 @@
           ".ai/agent-checks/release-venv/bin/python",
           "-m",
           "pytest",
+          "tests/test_protected_review.py",
           "tests/test_registry.py",
           "tests/test_native_guidance.py",
           "-q"
@@ -539,8 +593,99 @@
       "ci_sources": [
         {
           "path": ".github/workflows/registry-lint.yml",
-          "contains": "python3 -m pytest tests/test_registry.py tests/test_native_guidance.py -q"
+          "contains": "python3 -m pytest tests/test_protected_review.py tests/test_registry.py tests/test_native_guidance.py -q"
         }
+      ]
+    },
+    {
+      "id": "source-qualification-contract",
+      "paths": [
+        "scripts/ci/source_qualification.py",
+        "tests/test_source_qualification.py",
+        ".github/actions/source-qualification-receipt/**",
+        ".github/workflows/source-qualification-reusable.yml",
+        "schemas/source-qualification.schema.json",
+        "config/source-qualification.example.json",
+        "docs/contracts/source-qualification.md",
+        "scripts/ci/review_evidence.py",
+        "scripts/tests/test_review_evidence.py",
+        "config/agent-checks.json",
+        "scripts/ci/source_qualification_transport.py",
+        ".github/workflows/source-qualification-producer-proof.yml",
+        "config/source-qualification-producer.json",
+        "config/agent-checks.json.jinja",
+        "tests/test_copier_render.py",
+        "README-STARTER-PACK.md.jinja",
+        ".github/workflows/REUSABLE-WORKFLOWS.md",
+        ".github/workflows/*-reusable.yml",
+        "scripts/gen-reusable-matrix.py",
+        "tests/test_reusable_matrix.py"
+      ],
+      "tools": [
+        "uv"
+      ],
+      "environment": "release-contract-python",
+      "commands": [
+        [
+          ".ai/agent-checks/release-venv/bin/python",
+          "-B",
+          "-m",
+          "pytest",
+          "-q",
+          "tests/test_source_qualification.py",
+          "scripts/tests/test_review_evidence.py"
+        ],
+        [
+          ".ai/agent-checks/release-venv/bin/python",
+          "scripts/gen-reusable-matrix.py",
+          "--check"
+        ],
+        [
+          ".ai/agent-checks/release-venv/bin/python",
+          "-B",
+          "-m",
+          "pytest",
+          "-q",
+          "tests/test_reusable_matrix.py::test_matrix_is_generated_and_current",
+          "tests/test_reusable_matrix.py::test_every_reusable_has_a_row"
+        ]
+      ],
+      "timeout_seconds": 120,
+      "ci_sources": [
+        {
+          "path": ".github/workflows/plugin-eval-gate.yml",
+          "contains": "python3 -m pytest tests/ -q"
+        }
+      ]
+    },
+    {
+      "id": "native-owner-recipe-contract",
+      "paths": [
+        "scripts/ci/native_owner_recipe.py",
+        ".github/workflows/native-owner-recipe.yml",
+        "tests/test_native_owner_recipe.py",
+        "docs/native-owner-recipe.md",
+        "scripts/agent-check.py",
+        "config/agent-checks.json"
+      ],
+      "tools": [
+        "uv"
+      ],
+      "environment": "release-contract-python",
+      "timeout_seconds": 120,
+      "commands": [
+        [
+          ".ai/agent-checks/release-venv/bin/python",
+          "-B",
+          "-m",
+          "unittest",
+          "discover",
+          "-s",
+          "tests",
+          "-p",
+          "test_native_owner_recipe.py",
+          "-v"
+        ]
       ]
     },
     {
@@ -577,36 +722,6 @@
           "path": ".github/workflows/plugin-eval-gate.yml",
           "contains": "python3 -m pytest scripts/tests/test_agent_validation_layout.py -q"
         }
-      ]
-    },
-    {
-      "id": "native-owner-recipe-contract",
-      "paths": [
-        "scripts/ci/native_owner_recipe.py",
-        ".github/workflows/native-owner-recipe.yml",
-        "tests/test_native_owner_recipe.py",
-        "docs/native-owner-recipe.md",
-        "scripts/agent-check.py",
-        "config/agent-checks.json"
-      ],
-      "tools": [
-        "uv"
-      ],
-      "environment": "release-contract-python",
-      "timeout_seconds": 120,
-      "commands": [
-        [
-          ".ai/agent-checks/release-venv/bin/python",
-          "-B",
-          "-m",
-          "unittest",
-          "discover",
-          "-s",
-          "tests",
-          "-p",
-          "test_native_owner_recipe.py",
-          "-v"
-        ]
       ]
     },
     {

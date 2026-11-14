@@ -281,3 +281,124 @@ The v1 `activation_only` convenience builder deliberately refuses a v2 parent:
 a v2 continuation needs freshly bound combined-state qualification, empty pending
 sets, the predecessor/schema evidence and a new exact native decision. The v2
 reader validates that explicit record; it does not synthesize fresh evidence.
+
+
+## Portable component inputs and private mirrors
+
+The framework plugin and platform registry now carry the same small component
+as Copier consumers: `.github/actions/validate-release-manifest/` contains the
+existing validator, admission/CAS module, optional non-authorizing history
+observer and composite action. The four release schemas retain their `schemas/`
+paths, so existing module-relative imports and reader paths remain valid.
+Provider targets, credentials, queues, owner evidence and actual native human
+protection remain in the owning adapter; importing this library grants none of
+those authorities. History remains optional audit enrichment and never approval.
+
+The normal `scripts/build-plugin.py` generator writes an acyclic
+`source-inputs.json` from the eight canonical action/module/schema byte and Git
+executable-mode identities. The record excludes itself from its digest; it is
+compiled input provenance, not a nested release approval. Registry builds reuse
+this output. Fresh `--out`/drift builds refuse stale canonical inputs rather than
+repairing their source silently. Copier retains the same files and verifier.
+An owning adapter may import its verifier or run:
+
+```sh
+python3 scripts/lib/delivery_component.py --root <component> \
+  --expected-input-digest <independently-pinned-digest>
+```
+
+The observed digest alone is not trust, and the verifier never grants admission
+or production authority. Old v1/v2 readers and the existing action path remain.
+
+An established private mirror can prepare just this public library through the
+existing bootstrap's `--refresh-delivery-component` mode. It binds the consumed
+public Pack HEAD, index, raw bytes and executable modes before writing. This
+mode leaves the mixed-ownership plugin index, universe scopes/payloads,
+allowlists, README, workflows and unrelated platform assets unchanged; it does
+not run a scanner over owner payloads. Origin/private visibility and existing
+marker digest checks remain mandatory. Only cooperating updates share the
+existing repository mutex: snapshots plus rename are not an atomic content CAS
+against an unrelated writer. Failures retain partial selected code and publish
+no new provenance; restarting the exact same inputs reconciles only those known
+files. Unknown collisions or unproved/downgrade source ancestry hold the refresh.
+The installed JSON record cannot grant replacement authority by claiming new
+hashes. Before reusing its ownership observations, the bootstrap proves its
+commit/tree and the fixed previous public component paths, Git blobs, bytes and
+modes against locally available immutable Pack objects. Missing objects hold;
+the writer never fetches them or opens an owner payload. Owning source
+preparation must supply the reviewed public history before a bounded refresh.
+Public platform inventories open the raw owner root, every ancestor and each
+child through retained no-follow directory descriptors before enumeration.
+Opened children must match their observed physical identity; renamed parents
+cannot redirect a scan. Membership, leaf metadata and bindings are rechecked,
+with limits of 10,000 entries and 128 child levels. These are bounded repeated
+observations, not an atomic filesystem snapshot or a global quiet period.
+
+Previous-source ancestry is proved from SHA-checked raw commit objects and
+their actual tree/parent headers, bounded to 10,000 commits and 1 MiB per commit.
+Replace refs, graft/shallow overlays and commit-graph metadata do not establish
+that proof; source Git calls disable those overlays, inherited Git overrides,
+lazy fetching and credential prompts. Missing objects or unproved history hold
+before writes without an automatic network fallback.
+
+`registry/.delivery-component-source.json` records immutable consumed public
+inputs outside the replaceable platform tree. The regular full refresh from an
+updated Pack carries the component too. A pre-component full-refresh writer can
+still remove it; the retained provenance must then fail verification against
+missing/replaced files. Such a writer and its caller/source pins must be
+inventoried, upgraded and qualified through owning gates before durability can
+be claimed. A legacy unprovenanced full platform is not silently replaced: use
+the narrow preparation until its owner has qualified a full refresh.
+
+No mirror install is proven by this source record. The existing owning registry
+lint/check identity, private-provider enforcement, source transport, consumers
+and mutation writers still need actual qualification. The ordinary full mirror
+lint can read private universe contents; run it only under its owning authority,
+never as a generic public source scan. A source-only fixture or pin update is
+neither native human-gate proof nor live fleet adoption. Build/test jobs retain
+no deploy credentials, and the component introduces no model, database,
+approval/signing service or deployment controller.
+
+A newly generated full mirror scaffold keeps the existing `registry-lint` /
+`registry-gate` identity and verifies the component against a literal compiled
+input digest before lint. A component-only refresh deliberately preserves the
+owner's existing workflow. Its owning PR must bind the independently reviewed
+component pin to that gate and qualify the actual required check. An old full
+refresh can replace both platform and workflow; upgrade/fence its callers and
+pins before treating the installation as durable. The outside-platform source
+record is retained evidence, never a substitute for the native gate.
+Every existing outside-platform provenance record is checked before full
+scaffold writes, including when platform is missing after a partial operation.
+Unknown bytes remain untouched. Valid partial recovery still needs the actual
+immutable source proof. A no-refresh rerun verifies the retained component and
+compiles its retained digest into the gate, rather than the new source digest;
+an unprovenanced legacy component holds before replacing its scaffold.
+The final full-refresh provenance write compares the captured preflight record;
+an observable intervening record change is retained and holds completion.
+
+Distribution requires qualified no-follow, descriptor-relative POSIX file I/O
+and an actual repository mutex. Unsupported hosts hold this distribution step;
+there is no permissive path-based fallback. Reader/admission APIs and v1/v2
+receipt compatibility remain separate from host qualification for installation.
+
+Read-only source collection qualifies the raw worktree root and each ancestor
+with retained no-follow descriptors before invoking Git, including index
+metadata reads. Git runs in that retained root through the trusted parent
+process descriptor path; root and ancestor bindings are checked around every
+child invocation and throughout collection. Linked worktrees retain their
+normal owning Git storage. Observable replacement holds the observation;
+repeated checks do not prove an atomic snapshot or exclude changes that fully
+reverse between observations. Local filesystem monitors and Git hooks are
+disabled for these metadata commands, so read-only collection cannot invoke
+repository-configured monitor or hook executables. Missing descriptor-path
+support holds instead of falling back to a mutable pathname.
+
+The retained Git-cwd adapter is currently qualified only on the tested Linux
+host with a readable `/proc/<parent-pid>/fd/<root-fd>` path. This is a new
+requirement for both component-only and full refresh from this source; it does
+not establish macOS or Windows transport compatibility. An unavailable
+descriptor path refuses source collection before scaffold writes. Keep each
+unqualified owner's installed pin and protections until its actual transport
+and full-refresh route are qualified; Linux qualification does not qualify
+BCP mobile/macOS release tracks or authorize a fleet cutover. There is no
+mutable-path fallback or routine operator prerequisite.

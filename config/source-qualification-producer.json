@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "publication_status": "pending",
+  "component_repository": "Manolii-org/ai-starter-pack",
+  "component_sha": null,
+  "native_app_id": null,
+  "workflow_path": ".github/workflows/source-qualification-producer-proof.yml",
+  "workflow_sha256": "34b5e539a833d936bd6d26c9bf6266c2d86693160cedda2a6841241aa84281e7",
+  "job_key": "producer",
+  "job_name": "Source qualification transport producer",
+  "artifact_key": "transport_proof"
+}

@@ -19,7 +19,7 @@ Call `.github/workflows/integration-admission-reusable.yml` from an unfiltered
 Wave H (2026-09-14) does **not** turn this planner on for every PR. Pass trusted
 event-derived base/head SHAs. Supply a repository-local
 `config/integration-admission.json` derived from the schema and example.
-Pin the reusable and `pack_ref` to the same immutable tag. Do not bump
+Pin the reusable and `pack_ref` to the same full release commit SHA. Do not bump
 consumer pins solely to pick up this document.
 
 ```yaml
@@ -36,14 +36,14 @@ permissions:
 
 jobs:
   admission:
-    uses: Manolii-org/ai-starter-pack/.github/workflows/integration-admission-reusable.yml@v1.x.y
+    uses: Manolii-org/ai-starter-pack/.github/workflows/integration-admission-reusable.yml@321810f558463b2363d3372d669efcd3ea8283ec # v1.25.1
     with:
       config_path: config/integration-admission.json
       base_sha: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
       head_sha: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha }}
       installation_id: ${{ github.event.installation.id || 'github-actions' }}
-      accepted_producer: v1.x.y
-      pack_ref: v1.x.y
+      accepted_producer: v1.25.1
+      pack_ref: 321810f558463b2363d3372d669efcd3ea8283ec # v1.25.1
       shadow: true
 ```
 

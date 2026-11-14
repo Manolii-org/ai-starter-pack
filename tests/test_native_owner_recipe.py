@@ -97,6 +97,8 @@ def main(args):
     p=root/".ai/agent-checks/receipt.json";p.parent.mkdir(parents=True,exist_ok=True)
     p.write_text(json.dumps(receipt))
     if MODE=="drift": (root/"tracked").write_text("changed during qualification")
+    if MODE=="recipe-crlf": (root/"tracked").write_bytes(b"line one\\r\\nline two\\r\\n")
+    if MODE=="recipe-ident": (root/"tracked").write_bytes(b"$Id: forged $\\n")
     if MODE=="untracked-output": (root/"untracked-output.txt").write_text("synthetic unreviewed output")
     if MODE=="ignored-output":
         (root/"dist").mkdir(exist_ok=True)
@@ -458,6 +460,59 @@ if __name__ == "__main__":
                 summary, code = N.execute(root, native, environment())
                 self.assertEqual(code, 0)
                 self.assertTrue(summary["recipe_passed"])
+
+    CONVERSIONS = {"crlf": ("tracked text eol=lf\n", b"line one\nline two\n", b"line one\r\nline two\r\n"),
+                   "ident": ("tracked ident\n", b"$Id$\n", b"$Id: forged $\n")}
+
+    def commit_conversion(self, root, native, kind):
+        # Supported built-in checkout conversion; the committed blob is
+        # canonical and a fresh checkout yields the expected physical bytes.
+        attributes, canonical, _ = self.CONVERSIONS[kind]
+        (root / ".gitattributes").write_text(attributes)
+        (root / "tracked").write_bytes(canonical)
+        def git(*args):
+            return subprocess.check_output(["git", *args], cwd=root, text=True,
+                                           stderr=subprocess.DEVNULL).strip()
+        git("add", ".")
+        git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-qm", "conversion")
+        (root / "tracked").unlink()
+        git("checkout", "--", "tracked")
+        native["pull_request"]["head"]["sha"] = git("rev-parse", "HEAD")
+
+    def assert_hidden_from_diff(self, root):
+        self.assertEqual(subprocess.check_output(["git", "diff", "--name-only", "HEAD"], cwd=root,
+                                                 stderr=subprocess.DEVNULL), b"")
+
+    def test_supported_eol_and_ident_checkout_conversions_still_qualify(self):
+        for kind in self.CONVERSIONS:
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as directory:
+                root, native = self.fixture(directory)
+                self.commit_conversion(root, native, kind)
+                summary, code = N.execute(root, native, environment())
+                self.assertEqual(code, 0)
+                self.assertTrue(summary["recipe_passed"])
+
+    def test_converted_away_tracked_bytes_hold_before_qualification(self):
+        for kind in self.CONVERSIONS:
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as directory:
+                root, native = self.fixture(directory)
+                self.commit_conversion(root, native, kind)
+                (root / "tracked").write_bytes(self.CONVERSIONS[kind][2])
+                self.assert_hidden_from_diff(root)
+                with self.assertRaisesRegex(ValueError, "tracked source is modified before qualification"):
+                    N.execute(root, native, environment())
+                self.assertFalse((root / ".ai/agent-checks/receipt.json").exists())
+
+    def test_recipe_rewriting_tracked_bytes_hidden_from_diff_cannot_publish_pass(self):
+        for kind in self.CONVERSIONS:
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as directory:
+                root, native = self.fixture(directory, mode="recipe-" + kind)
+                self.commit_conversion(root, native, kind)
+                with self.assertRaisesRegex(ValueError, "source changed during qualification"):
+                    N.execute(root, native, environment())
+                self.assertTrue((root / ".ai/agent-checks/receipt.json").is_file())
+                self.assertEqual((root / "tracked").read_bytes(), self.CONVERSIONS[kind][2])
+                self.assert_hidden_from_diff(root)
 
     def test_special_index_flags_cannot_hide_tracked_drift_at_any_stage(self):
         for flag in ("assume-unchanged", "skip-worktree"):
