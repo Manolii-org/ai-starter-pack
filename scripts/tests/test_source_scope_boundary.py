@@ -62,7 +62,9 @@ class SourceScopeBoundary(unittest.TestCase):
                      ("config", "user.email", "fixture@example.invalid"), ("add", "."),
                      ("-c", "commit.gpgsign=false", "commit", "-qm", "Synthetic source"),
                      ("update-ref", "refs/remotes/origin/main", "HEAD")):
-            subprocess.run(["git", *args], cwd=self.root, check=True, capture_output=True)
+            # Inherited GIT_DIR/GIT_WORK_TREE must not route fixture writes elsewhere.
+            subprocess.run(["git", *args], cwd=self.root, check=True, capture_output=True,
+                           env=load("agent-check").git_environment())
         self.runner = load("agent-check")
         self.finalise = load("qa/finalise-gate")
         self.policy = {"schema_version": 1, "repository": "example/project", "scope": "source-only",
@@ -457,7 +459,8 @@ raise SystemExit(module.main(['--repo-root',str(root),*sys.argv[3:]]))
         subprocess.run(["git", "-c", "commit.gpgsign=false", "commit", "-qm", "Synthetic committed scope"],
                        cwd=self.root, check=True, capture_output=True)
         (self.root / self.runner.SOURCE_SCOPE_POLICY).unlink()
-        head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=self.root, text=True).strip()
+        head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=self.root, text=True,
+                                       env=self.runner.git_environment()).strip()
         ref = (self.root / ".git/HEAD").read_text().strip()[5:]
         targets = [self.root / ".git" / ref, self.root / ".git/objects" / head[:2] / head[2:]]
         for target in targets:
@@ -606,7 +609,8 @@ raise SystemExit(module.main(['--repo-root',str(root),*sys.argv[3:]]))
                 graft.unlink()
 
     def test_symbolic_head_route_stays_in_checked_refs_and_preserves_quote_hash_names(self):
-        head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=self.root, text=True).strip()
+        head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=self.root, text=True,
+                                       env=self.runner.git_environment()).strip()
         reference = "refs/heads/quoted'branch#1"
         subprocess.run(["git", "update-ref", reference, head], cwd=self.root, check=True)
         (self.root / ".git/HEAD").write_text("ref: " + reference + "\n")
@@ -1824,12 +1828,13 @@ class ScopeControlCompatibility(unittest.TestCase):
     def memo_fixture(self):
         """Cache an undeclared answer at U, with a declared commit D on branch 'declared'."""
         undeclared = self.memo_git("rev-parse", "HEAD")
+        initial = self.memo_git("symbolic-ref", "--short", "HEAD")
         self.memo_git("checkout", "-q", "-b", "declared")
         self.declare()
         self.memo_git("add", self.runner.SOURCE_SCOPE_POLICY)
         self.memo_git("commit", "-qm", "Synthetic declared")
         declared = self.memo_git("rev-parse", "HEAD")
-        self.memo_git("checkout", "-q", "main" if self.memo_git("branch", "--list", "main") else "master")
+        self.memo_git("checkout", "-q", initial)
         self.assertFalse((self.root / self.runner.SOURCE_SCOPE_POLICY).exists())
         self.assertFalse(self.runner.source_scope_declared(self.root))
         self.assertTrue(self.runner._SOURCE_SCOPE_UNDECLARED_TREES)

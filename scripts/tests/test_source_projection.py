@@ -260,6 +260,20 @@ class SourceProjectionTests(unittest.TestCase):
         self.assertEqual([oid for oid, kind, _ in calls if kind == "blob"], [policy_oid])
         self.assertFalse(list(self.destination.iterdir()))
 
+    def test_shared_blob_paths_are_bounded_by_materialized_output(self):
+        shared = b"s" * 100_000
+        for index in range(10):
+            self.write(f"src/copy{index}.txt", shared)
+        self.commit()
+        self.selection = self.selected()
+        with patch.object(projection, "MAX_TOTAL", 500_000):
+            with self.assertRaisesRegex(projection.ProjectionError, "materialized_budget_exceeded"):
+                self.project()
+        self.assertFalse(list(self.destination.iterdir()))
+        with patch.object(projection, "MAX_TOTAL", 2_000_000):
+            result = self.project()
+        self.assertEqual((result.source / "src/copy9.txt").read_bytes(), shared)
+
     def test_source_symlink_and_missing_object_hold(self):
         link = self.root / "source-link"
         link.symlink_to(self.repo, target_is_directory=True)

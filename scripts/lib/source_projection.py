@@ -433,6 +433,10 @@ def project_committed_source(repository: Path, *, selection: Selection, reposito
                 _admit_sources(MappingProxyType(sources))
             for _, oid in [*old_sources.values(), *sources.values()]:
                 store.read(oid, "blob")
+            # The object budget charges a shared blob once, but every admitted
+            # path is written separately; bound the materialized output too.
+            materialized = sum(len(store.captured[oid][1]) for _, oid in sources.values())
+            _require(materialized <= MAX_TOTAL, "materialized_budget_exceeded")
 
             name = "source-projection-" + secrets.token_hex(12)
             os.mkdir(name, 0o700, dir_fd=parent_fd)
