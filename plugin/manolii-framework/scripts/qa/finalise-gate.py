@@ -339,8 +339,9 @@ def _source_scope_nested_working(owner: Path, environment: dict, timeout: int) -
     A subfolder with its own policy, or a nested repository whose metadata is
     declared or cannot be qualified, holds validation of the enclosing owner:
     its commands could otherwise read that subfolder. No file is opened. The
-    undeclared answer is observed once per process; it is not an atomic
-    snapshot of later working-tree changes.
+    undeclared answer is reused within a process only until a recipe or
+    check command runs, which may add nested owners (installs). It is not
+    an atomic snapshot. Over-bound or unreadable trees hold (fail closed).
     """
     key = owner.resolve()
     if key in _SOURCE_SCOPE_UNDECLARED_WORKTREES:
@@ -350,7 +351,8 @@ def _source_scope_nested_working(owner: Path, environment: dict, timeout: int) -
     stack = [owner]
     while stack:
         directory = stack.pop()
-        # Descriptor listing never follows a directory swapped for a link.
+        # The final component is opened without following a link. Earlier
+        # components are re-resolved by name; only names are listed here.
         descriptor = _WALK_OPEN(directory, flags)
         try:
             with _WALK_SCANDIR(descriptor) as entries:
@@ -369,12 +371,11 @@ def _source_scope_nested_working(owner: Path, environment: dict, timeout: int) -
                 if _source_scope_tree_declared(directory, environment, timeout):
                     return True
                 continue
-            if name == ".ai" and directory != owner and is_directory:
-                try:
-                    (directory / name / "source-scope-policy.json").lstat()
+            if name == ".ai" and directory != owner:
+                # Any .ai entry (directory, link or file) is resolved like the
+                # ancestor check does; a linked policy outside the owner counts.
+                if _source_scope_exists(directory / SOURCE_SCOPE_POLICY):
                     return True
-                except FileNotFoundError:
-                    pass
             if is_directory:
                 stack.append(directory / name)
     if len(_SOURCE_SCOPE_UNDECLARED_WORKTREES) >= 256:
@@ -726,7 +727,10 @@ def run_checks(root: Path, provider: str, timeout: int) -> dict:
                 except subprocess.TimeoutExpired:
                     continue
     duration_ms = round((time.monotonic() - start) * 1000)
-    if code == 4:
+    # Recipes may have created nested owners: observe the tree afresh before
+    # reading the receipt or recipe configuration.
+    _SOURCE_SCOPE_UNDECLARED_WORKTREES.clear()
+    if code == 4 or source_scope_declared(root):
         # The runner may discover a boundary after this caller's first probe.
         # Do not inspect a stale receipt/config or convert this hold to a PASS.
         return {"duration_ms": duration_ms, "outcome": "source-scope-held",

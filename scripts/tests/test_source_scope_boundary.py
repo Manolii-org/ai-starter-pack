@@ -2236,6 +2236,31 @@ class NestedScopeAndCommonDirectory(unittest.TestCase):
                 self.assertIn("SOURCE-SCOPE-HELD", result.stderr)
                 self.assertEqual(sorted(path.name for path in marker.iterdir()), [])
 
+    def test_nested_ai_link_to_an_external_policy_holds_the_owner(self):
+        external = self.other_root() / "ext_ai"
+        external.mkdir()
+        (external / "source-scope-policy.json").write_bytes(self.raw)
+        sub = self.root / "src/sub"
+        sub.mkdir()
+        (sub / ".ai").symlink_to(external, target_is_directory=True)
+        self.nested_payload(sub)
+        with self.guarded_open("opaque.bin"):
+            self.assertTrue(self.runner.source_scope_declared(self.root))
+            with self.assertRaises(self.runner.SourceScopeError):
+                self.runner.raw_tracked_inputs(self.root)
+        self.assertTrue(self.finalise.source_scope_declared(self.root))
+
+    def test_owner_created_by_a_recipe_command_holds_later_reads_in_process(self):
+        self.assertFalse(self.runner.source_scope_declared(self.root))  # cached undeclared
+        package = self.root / "node_modules/pkg"
+        install = ("import pathlib,sys; p=pathlib.Path(sys.argv[1]); (p/'.ai').mkdir(parents=True); "
+                   "(p/'.ai/source-scope-policy.json').write_text('{}'); (p/'opaque.bin').write_text('x')")
+        result = self.runner.execute(self.root, {"id": "install", "commands": [[sys.executable, "-c", install, str(package)]]})
+        self.assertEqual(result["status"], "passed")
+        with self.guarded_open("opaque.bin"):
+            with self.assertRaises(self.runner.SourceScopeError):
+                self.runner.ready_identity(self.root, {"ready_paths": ["node_modules"]})
+
     def test_link_heavy_trees_check_each_directory_once_without_per_link_git(self):
         subprocess.run(["git", "pack-refs", "--all"], cwd=self.root, check=True, capture_output=True,
                        env=self.runner.git_environment())

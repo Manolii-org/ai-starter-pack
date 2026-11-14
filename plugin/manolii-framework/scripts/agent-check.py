@@ -419,8 +419,9 @@ def _source_scope_nested_working(owner: Path, environment: dict, timeout: int) -
     A subfolder with its own policy, or a nested repository whose metadata is
     declared or cannot be qualified, holds validation of the enclosing owner:
     its commands could otherwise read that subfolder. No file is opened. The
-    undeclared answer is observed once per process; it is not an atomic
-    snapshot of later working-tree changes.
+    undeclared answer is reused within a process only until a recipe or
+    check command runs, which may add nested owners (installs). It is not
+    an atomic snapshot. Over-bound or unreadable trees hold (fail closed).
     """
     key = owner.resolve()
     if key in _SOURCE_SCOPE_UNDECLARED_WORKTREES:
@@ -430,7 +431,8 @@ def _source_scope_nested_working(owner: Path, environment: dict, timeout: int) -
     stack = [owner]
     while stack:
         directory = stack.pop()
-        # Descriptor listing never follows a directory swapped for a link.
+        # The final component is opened without following a link. Earlier
+        # components are re-resolved by name; only names are listed here.
         descriptor = _WALK_OPEN(directory, flags)
         try:
             with _WALK_SCANDIR(descriptor) as entries:
@@ -449,12 +451,11 @@ def _source_scope_nested_working(owner: Path, environment: dict, timeout: int) -
                 if _source_scope_tree_declared(directory, environment, timeout):
                     return True
                 continue
-            if name == ".ai" and directory != owner and is_directory:
-                try:
-                    (directory / name / "source-scope-policy.json").lstat()
+            if name == ".ai" and directory != owner:
+                # Any .ai entry (directory, link or file) is resolved like the
+                # ancestor check does; a linked policy outside the owner counts.
+                if _source_scope_exists(directory / SOURCE_SCOPE_POLICY):
                     return True
-                except FileNotFoundError:
-                    pass
             if is_directory:
                 stack.append(directory / name)
     if len(_SOURCE_SCOPE_UNDECLARED_WORKTREES) >= 256:
@@ -996,10 +997,20 @@ def versions(root: Path, plan: dict, inherited: dict | None = None) -> dict:
 
 def execute(root: Path, item: dict, inherited: dict | None = None) -> dict:
     require_source_scope(root)
+    try:
+        return _execute(root, item, inherited)
+    finally:
+        _SOURCE_SCOPE_UNDECLARED_WORKTREES.clear()
+
+
+def _execute(root: Path, item: dict, inherited: dict | None) -> dict:
     start = time.monotonic()
     status, reason = "passed", "completed"
     env = execution_environment(item, inherited)
     for command in item["commands"]:
+        # Commands may create nested owners (dependency installs): later scope
+        # checks in this process observe the working tree afresh.
+        _SOURCE_SCOPE_UNDECLARED_WORKTREES.clear()
         print(f"AGENT-CHECK {item['id']}: {json.dumps(command)}", flush=True)
         try:
             proc = subprocess.run(command, cwd=inside(root, item.get("cwd", ".")), env=env,
