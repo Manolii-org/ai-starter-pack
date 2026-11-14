@@ -25,7 +25,7 @@ on:
       pack_ref:
         type: string
         default: v1
-        description: Immutable pack tag recommended; moving v1 is supported for controlled rollout.
+        description: Full release commit SHA matching the uses pin; v1 is retained only for legacy reader compatibility.
       evidence_bundle_json:
         type: string
         default: '[]'

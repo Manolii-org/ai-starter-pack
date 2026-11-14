@@ -200,6 +200,7 @@ table.
 | **pre-production-tier-reusable** | `gates` (req), `budget_minutes=45: number`, `job_timeout_minutes=60: number`, `runs_on=ubuntu-latest`, `max_parallel=4: number`, `environment=''`, `checkout_fetch_depth=0: number`, `open_issue_on_failure=false: boolean` | `GATE_SECRETS` | `verdict`, `breakdown` |
 | **restore-drill-reusable** | `resource_group` (req), `sql_server` (req), `source_database` (req), `sanity_queries=SELECT COUNT(*) AS table_count FROM INFORMATION_SCHEMA.TABLES`, `db_auth=sql-auth`, `sqlcmd_version=1.9.0`, `sqlcmd_sha256=b896bac71cf6ad8feca125bb42be61999116d8566a078ed475893372ccf8c0f2`, `timeout_minutes=45: number`, `runs_on=ubuntu-latest` | `DRILL_SQL_USER`, `DRILL_SQL_PASSWORD`, `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID` | none |
 | **secret-scan-reusable** | `runs_on=ubuntu-latest`, `node_version=24`, `python_version=3.12`, `require_gitleaks_license=false: boolean`, `npm_audit_omit_dev=false: boolean`, `gitleaks_version=8.30.0`, `fail_on_inert=false: boolean` | `GITLEAKS_LICENSE` | `npm_audit_activation`, `pip_audit_activation` |
+| **source-qualification-reusable** | `pr: number` (req), `head_sha` (req), `base_sha` (req), `pack_ref` (req), `policy_path=config/source-qualification.json` | none | `source_qualified` |
 | **static-review-reusable** | `runs_on=ubuntu-latest`, `node_version=24`, `python_version=3.14` | none | none |
 | **tier-gate-summary-reusable** | `gate_name` (req), `tier=fast`, `applies: boolean` (req), `skip_reason=no files in scope changed`, `command=''`, `runs_on=ubuntu-latest`, `working_directory=.`, `timeout_minutes=10: number`, `setup_command=''`, `checkout_fetch_depth=0: number` | none | `verdict`, `applied` |
 | **ui-smoke-reusable** | `base_url` (req), `routes=''`, `profile=default`, `config_path=config/qa.json`, `pack_ref=v1`, `playwright_version=1.63.0`, `axe_core_version=4.10.3`, `node_version=22`, `runs_on=ubuntu-latest`, `timeout_minutes=10: number`, `artifact_name=''` | `VERCEL_BYPASS_SECRET` | `status` |
@@ -318,15 +319,31 @@ So adopting the pipeline in a repo that has no `.claude/` tree at all is a
 conditional on the probe, an unreachable or mistyped `pack_ref` cannot break a
 repo that needs no hydration.
 
-`pack_ref` defaults to the moving `v1` alias, which loads the pack's prompts
-and scripts from wherever `v1` points today — with your secrets — even when the
-`uses:` line is SHA-pinned. **Pass the same commit SHA as your `uses:` pin** so
-prompts and workflow are immutable and move together:
+`pack_ref` retains its legacy `v1` default for old readers. Release publication
+leaves that existing alias unchanged; it no longer upgrades callers implicitly.
+**For ordinary callers, pass the same full commit SHA as your `uses:` pin**
+so prompts and workflow are immutable and advance together through the
+consumer's owning gates:
 
 ```yaml
     with:
       pack_ref: 321810f558463b2363d3372d669efcd3ea8283ec # v1.25.1 — keep identical to the uses: pin
 ```
+
+#### Opt-in Jev shadow exception
+
+`jev_judge_shadow` stays `off` by default.
+Its existing key-bearing checkout gate accepts release tags and rejects a raw
+SHA `pack_ref`, so the ordinary SHA example does not enable shadow receipts.
+For a separately authorised opt-in, the owning adoption agent must automatically
+prepare a full patch release tag such as `pack_ref: v1.25.1` paired with the
+executable workflow's full SHA. It must verify that the immutable `vX.Y.Z` tag
+resolves to the same commit as that `uses:` SHA before advancing the adoption PR
+through its owning gates. For the example above, `v1.25.1` resolves to
+`321810f558463b2363d3372d669efcd3ea8283ec`. Hold a mismatched pair. Retained
+major/minor aliases are unsuitable for this adoption contract even though the
+legacy gate accepts their shape. A provenance-verified raw-SHA path is not
+implemented in this gate; its key policy and opt-in controls remain unchanged.
 
 The hydration list lives in the workflow-level `ASSESSMENT_RUNTIME_FILES` env.
 `tests/test_hydrate_assessment.py` derives the required set from the runners
@@ -351,11 +368,14 @@ Auto-bump reusable-workflow pins via this custom manager:
 }
 ```
 
-Tag strategy: immutable vX.Y.Z plus a moving alias within the matching major.
-`release-tag.yml` derives that alias from the released tag: a v2 release moves
-only `v2`; it must leave `v1` and all immutable tags unchanged. Production
-consumers adopt an exact version or commit in their own PRs. A floating alias
-does not establish independent consumer qualification.
+Tag strategy: new immutable annotated `vX.Y.Z` tags and retained existing
+aliases. `release-tag.yml` never creates, patches or force-moves `v1`, `v2` or
+any other major alias, and never overwrites an existing release tag. An alias
+write could activate code in consumers that have not qualified that source.
+Consumer automation prepares a grouped PR using matching full commit SHA pins
+for executable `uses:` and `pack_ref` inputs. Existing aliases and version-tag
+readers remain supported without changing the release dispatch interface or
+adding a routine operator action. Publication is not consumer qualification.
 
 The v2 line changes the Playwright and secret-scan Node defaults from 22 to 24;
 `ci-reusable` already used 24. All three retain explicit `node_version` overrides.

@@ -1,0 +1,72 @@
+name: Source qualification transport producer
+# Owning publication/reconciliation dispatches this canary automatically after
+# compiled reader publication. No PR code, tests, builds or dispatch inputs.
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+  checks: read
+jobs:
+  producer:
+    name: Source qualification transport producer
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Read the pinned controller binding as data
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: .source-qualification-controller
+          sparse-checkout: config/source-qualification-producer.json
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: '3.12'
+      - name: Require compiled immutable reader publication before executing code
+        id: binding
+        run: |
+          python3 -I - <<'PY'
+          import json, os, re
+          with open('.source-qualification-controller/config/source-qualification-producer.json') as stream:
+              value = json.load(stream)
+          if (value.get('publication_status') != 'accepted_source_only'
+                  or value.get('component_repository') != 'Manolii-org/ai-starter-pack'
+                  or not isinstance(value.get('component_sha'), str)
+                  or re.fullmatch('[0-9a-f]{40}', value['component_sha']) is None
+                  or value['component_sha'] == '0' * 40
+                  or type(value.get('native_app_id')) is not int or value['native_app_id'] <= 0):
+              raise SystemExit('Compiled producer reader publication/identity is pending')
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write('component_sha=' + value['component_sha'] + '\n')
+          PY
+      - name: Read only the compiled trusted metadata producer
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          repository: Manolii-org/ai-starter-pack
+          ref: ${{ steps.binding.outputs.component_sha }}
+          path: .source-qualification-pack
+          sparse-checkout: |
+            scripts/ci/source_qualification.py
+            scripts/ci/source_qualification_transport.py
+            scripts/ci/review_evidence.py
+            scripts/ci/codex_clean_pass.py
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+      - name: Prepare only the immutable transport canary after read-only native checks
+        id: receipt
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          output="$RUNNER_TEMP/source-qualification-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$GITHUB_JOB-transport_proof/source-qualification.json"
+          python3 .source-qualification-pack/scripts/ci/source_qualification_transport.py --produce --binding .source-qualification-controller/config/source-qualification-producer.json --output "$output"
+          echo "file=$output" >> "$GITHUB_OUTPUT"
+      - name: Retain only the owner-local transport canary
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: source-qualification-transport_proof-${{ github.run_attempt }}
+          path: ${{ steps.receipt.outputs.file }}
+          if-no-files-found: error
+          retention-days: 7
