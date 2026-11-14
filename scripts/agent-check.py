@@ -435,13 +435,15 @@ def _source_scope_nested_working(owner: Path, environment: dict, timeout: int) -
         # components are re-resolved by name; only names are listed here.
         descriptor = _WALK_OPEN(directory, flags)
         try:
+            listed = []
             with _WALK_SCANDIR(descriptor) as entries:
-                listed = [(entry.name, entry.is_dir(follow_symlinks=False)) for entry in entries]
+                for entry in entries:
+                    remaining -= 1  # charged before an entry is retained
+                    if remaining < 0:
+                        raise ValueError("Git metadata entry bound exceeded")
+                    listed.append((entry.name, entry.is_dir(follow_symlinks=False)))
         finally:
             _WALK_CLOSE(descriptor)
-        remaining -= len(listed)
-        if remaining < 0:
-            raise ValueError("Git metadata entry bound exceeded")
         for name, is_directory in listed:
             if name == ".git":
                 if directory == owner:

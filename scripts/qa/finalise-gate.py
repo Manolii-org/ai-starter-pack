@@ -355,13 +355,15 @@ def _source_scope_nested_working(owner: Path, environment: dict, timeout: int) -
         # components are re-resolved by name; only names are listed here.
         descriptor = _WALK_OPEN(directory, flags)
         try:
+            listed = []
             with _WALK_SCANDIR(descriptor) as entries:
-                listed = [(entry.name, entry.is_dir(follow_symlinks=False)) for entry in entries]
+                for entry in entries:
+                    remaining -= 1  # charged before an entry is retained
+                    if remaining < 0:
+                        raise ValueError("Git metadata entry bound exceeded")
+                    listed.append((entry.name, entry.is_dir(follow_symlinks=False)))
         finally:
             _WALK_CLOSE(descriptor)
-        remaining -= len(listed)
-        if remaining < 0:
-            raise ValueError("Git metadata entry bound exceeded")
         for name, is_directory in listed:
             if name == ".git":
                 if directory == owner:
@@ -658,7 +660,11 @@ def load_qa_config(root: Path) -> tuple[dict, bool]:
     # A linked configuration (leaf or intermediate directory) is read only
     # after both its lexical and resolved owners are checked.
     require_source_scope(path.parent)
-    require_source_scope(_source_scope_resolved_path(path).parent)
+    selected = _source_scope_resolved_path(path)
+    require_source_scope(selected.parent)
+    # A hard link can carry another owner's bytes under this name: hold.
+    if selected.stat().st_nlink != 1:
+        raise SourceScopeHeld("FINALISE-GATE SOURCE-SCOPE-HELD: no qualified content projection; no hand-off authority.")
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:

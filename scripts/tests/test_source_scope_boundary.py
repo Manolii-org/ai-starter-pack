@@ -2272,6 +2272,24 @@ class NestedScopeAndCommonDirectory(unittest.TestCase):
                 [sys.executable, "-c", install, str(package)], second]})
         self.assertFalse(marker.exists())
 
+    def test_hard_linked_qa_config_holds_before_read(self):
+        other = self.other_root() / "qa.json"
+        other.write_text(json.dumps({"schema_version": 1, "finalise_gate": {"mode": "off"}}))
+        os.link(other, self.root / "config/qa.json")
+        with patch.object(Path, "read_text", side_effect=AssertionError("hard-linked QA config read")):
+            with self.assertRaises(self.finalise.SourceScopeHeld):
+                self.finalise.load_qa_config(self.root)
+
+    def test_walk_refuses_inside_an_over_bound_directory(self):
+        (self.root / "wide").mkdir()
+        for index in range(50):
+            (self.root / f"wide/f{index}").write_text("")
+        for module in (self.runner, self.finalise):
+            module._SOURCE_SCOPE_UNDECLARED_WORKTREES.clear()
+            with self.subTest(module=module.__name__), patch.object(module, "SOURCE_SCOPE_WALK_MAX_ENTRIES", 20):
+                with self.assertRaises(ValueError):
+                    module._source_scope_nested_working(self.root, {}, 30)
+
     def test_link_heavy_trees_check_each_directory_once_without_per_link_git(self):
         subprocess.run(["git", "pack-refs", "--all"], cwd=self.root, check=True, capture_output=True,
                        env=self.runner.git_environment())
