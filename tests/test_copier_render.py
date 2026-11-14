@@ -1216,7 +1216,7 @@ def test_executor_native_linux_gate_declares_tools_and_preserves_qualification()
     assert workflow["permissions"] == {"contents": "read"}
     job = workflow["jobs"]["eval-gate"]
     assert job["runs-on"] == "ubuntu-latest"
-    assert job["timeout-minutes"] == 15
+    assert job["timeout-minutes"] == 25  # measured 565-936 s; 15 cancelled healthy runs
     steps = {step.get("name"): step for step in job["steps"]}
     setup = steps["Install public Linux source-executor prerequisites"]
     assert 'apt-cache policy bubblewrap' in setup["run"]

@@ -33,7 +33,9 @@ jobs:
     # assertions — timing-sensitive enough that slim's 1-core flakes it
     # (2/4 runs failed on TimeoutError during this PR). Not a light leg.
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # Measured 2026-11-14 over 30 runs: 565-936 s on hosted runners, with main
+    # at 862 s before and 914 s after #334; 15 minutes cancelled healthy runs.
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
