@@ -25,6 +25,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -34,6 +35,8 @@ CANDIDATES_IN = Path("/input/candidates")
 STATE = Path("/state")
 MAX_CANDIDATE_BYTES = 512 * 1024
 STAGE_SECONDS = 900
+# Total guest budget; the host passes its own deadline minus a margin.
+DEADLINE = time.monotonic() + int(os.environ.get("CODEX_AUTOMATION_GUEST_SECONDS", "1400"))
 
 
 class GuestHold(RuntimeError):
@@ -90,10 +93,18 @@ def _diff(value, work):
     return path
 
 
+def _remaining():
+    """Stages share one total budget bounded by the host's guest deadline."""
+    remaining = DEADLINE - time.monotonic()
+    if remaining < 30:
+        raise GuestHold("guest_time_budget_exhausted")
+    return min(STAGE_SECONDS, remaining - 15)
+
+
 def _run(script, args, value, work):
     result = subprocess.run(
         [sys.executable, "-I", str(ROOT / "scripts" / script), *args],
-        cwd=work, env=_stage_env(value), capture_output=True, timeout=STAGE_SECONDS, check=False)
+        cwd=work, env=_stage_env(value), capture_output=True, timeout=_remaining(), check=False)
     if result.returncode:
         raise GuestHold(f"stage_failed:{script}")
 
@@ -166,6 +177,9 @@ def judge(value, module=None):
 
         def _dismiss_stale_judge_reviews(self, states=("CHANGES_REQUESTED",)):
             captured.append({"action": "dismiss", "states": list(states)})
+
+        def _post_no_findings_comment(self):
+            captured.append({"action": "no_findings"})
 
     instance = CapturingJudge(candidates_dir=str(candidates), pr_number=value["pull_request"],
                               sha=value["head_sha"])

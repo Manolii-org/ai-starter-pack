@@ -1,16 +1,16 @@
 """Trusted automation controller: ordering, holds, receipts and isolation."""
 
-from contextlib import contextmanager
 import json
-from pathlib import Path
 import sys
+from contextlib import contextmanager
+from pathlib import Path
 
 import pytest
 import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts/ci"))
-import codex_automation_worker as worker  # noqa: E402
+import codex_automation_worker as worker
 
 TARGET = {"repository": "example/automation", "pull_request": 7, "base_sha": "b" * 40,
           "head_sha": "a" * 40, "operation": "assessment", "request_run_id": 11,
@@ -131,7 +131,7 @@ def test_guest_candidate_names_cannot_escape_the_handoff_directory(harness, name
     run, _, outputs, _ = harness
     outputs["assessment"]["candidates"] = {name: {}}
     result, _ = run()
-    assert result == {"state": "failed", "reason": "candidate_name_invalid"}
+    assert (result["state"], result["reason"]) == ("failed", "candidate_name_invalid")
 
 
 def test_empty_diff_completes_without_model_work(harness):
@@ -180,7 +180,7 @@ def test_advisory_comment_is_marked_and_bounded():
     body = worker.comment_body(TARGET, {"state": "completed", "reason": "adjudicated", "publication": [
         {"action": "review", "event": "REQUEST_CHANGES",
          "surviving": [{"file": "p.py", "line": 1, "message": "x" * 1000}] * 30}]})
-    assert body.startswith(worker.MARKER) and body.count("\n- `p.py:1`") == 20 and "x" * 301 not in body
+    assert body.startswith(worker.MARKER) and body.count("\n- p.py:1 ") == 20 and "x" * 301 not in body
 
 
 def test_workflow_is_default_off_trusted_checkout_and_secret_free():
@@ -193,3 +193,72 @@ def test_workflow_is_default_off_trusted_checkout_and_secret_free():
     checkout = job["steps"][0]["with"]
     assert checkout["ref"] == "${{ github.workflow_sha }}" and checkout["persist-credentials"] is False
     assert "secrets." not in text and "id-token" not in flow["permissions"]
+
+
+def test_image_closure_includes_the_secret_shape_catalog_or_refuses(monkeypatch, tmp_path):
+    captured = {}
+    def docker(*args):
+        captured["context"] = Path(args[-1])
+        assert (captured["context"] / "opt/automation/.ai/security/token-shapes.json").is_file()
+        assert (captured["context"] / "opt/automation/scripts/run-judge.py").is_file()
+        (tmp_path / "image.id").write_text("sha256:" + "2" * 64)
+        return ["true"], {}
+    monkeypatch.setattr(worker, "docker", docker)
+    assert worker.build_image(tmp_path) == "sha256:" + "2" * 64
+    monkeypatch.setattr(worker, "CLOSURE_DATA", ("missing/catalog.json",))
+    other = tmp_path / "other"
+    other.mkdir()
+    with pytest.raises(worker.Incomplete, match="failed_install"):
+        worker.build_image(other)
+
+
+def test_failed_guest_still_measures_spent_completions(harness):
+    run, _, _, _ = harness
+    def explode(*a, **k):
+        raise worker.Incomplete("failed_scan")
+    result, rows = run(guest=explode)
+    assert result["state"] == "failed" and len(rows) == 1 and rows[0]["role"] == "assessment"
+
+
+def test_comment_neutralises_markdown_mentions_and_unknown_events():
+    body = worker.comment_body(TARGET, {"state": "completed", "reason": "x`y", "publication": [
+        {"action": "review", "event": "APPROVE\n@everyone",
+         "surviving": [{"file": "a`b.py", "line": 1,
+                        "message": "``` [click](https://evil.invalid) ![i](x) @org/team\nnext"}]}]})
+    assert "@\u200borg/team" in body and "@org" not in body
+    assert "](https" not in body and "\\[click\\]" in body and "```" not in body
+    assert "UNKNOWN" in body and "APPROVE\n" not in body
+    assert body.count("\n- ") == 1 and "\nnext" not in body
+
+
+class PublishGitHub(FakeGitHub):
+    def __init__(self, head, comments):
+        self.head, self.comments, self.posted = head, comments, []
+
+    def json(self, route, method="GET", data=None):
+        if method == "POST":
+            self.posted.append(data)
+            return {}
+        return {"state": "open", "head": {"sha": self.head}}
+
+    def pages(self, route):
+        return self.comments
+
+
+@pytest.mark.parametrize(("head", "comments", "posts"), [
+    ("a" * 40, [], 1),
+    ("f" * 40, [], 0),
+    ("a" * 40, [{"user": {"id": 41898282}, "body": worker.MARKER + "\n<!-- head=" + "a" * 40 + " -->"}], 0),
+    ("a" * 40, [{"user": {"id": 5}, "body": worker.MARKER + "\n<!-- head=" + "a" * 40 + " -->"}], 1),
+])
+def test_publish_rechecks_head_and_dedupes_only_on_trusted_author(monkeypatch, tmp_path, head, comments, posts):
+    monkeypatch.setenv("RUNNER_TEMP", str(tmp_path))
+    monkeypatch.setenv("GITHUB_REPOSITORY", TARGET["repository"])
+    state = tmp_path / "codex-automation"
+    (state / "result").mkdir(parents=True)
+    (state / "target.json").write_text(json.dumps(TARGET))
+    (state / "result/result.json").write_text(json.dumps({"state": "completed", "publication": []}))
+    fake = PublishGitHub(head, comments)
+    monkeypatch.setattr(worker, "GitHub", lambda repo, token: fake)
+    assert worker.main(["x", "publish"]) == 0
+    assert len(fake.posted) == posts

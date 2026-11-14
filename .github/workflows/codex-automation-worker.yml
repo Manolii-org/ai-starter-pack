@@ -37,10 +37,13 @@ jobs:
           ref: ${{ github.workflow_sha }}
           path: trusted
           persist-credentials: false
+          sparse-checkout-cone-mode: false
           sparse-checkout: |
-            scripts
-            .claude/agents
-            .claude/skills
+            /scripts/
+            /.claude/agents/
+            /.claude/skills/
+            /.ai/security/token-shapes.json
+            /data/token-shapes.json
       - name: Admit exact request
         id: prepare
         env:

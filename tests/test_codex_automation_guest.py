@@ -141,3 +141,11 @@ def test_judge_pass_runs_unchanged_decision_logic_and_captures_publication(sandb
     assert result["pass"] == "judge" and result["publication"], result
     assert all(item["action"] in {"review", "advisory", "dismiss"} for item in result["publication"])
     assert set(calls) <= {"judge"}
+
+
+def test_stages_share_one_bounded_time_budget(sandbox, monkeypatch):
+    monkeypatch.setattr(guest, "DEADLINE", guest.time.monotonic() + 10)
+    with pytest.raises(guest.GuestHold, match="guest_time_budget_exhausted"):
+        guest._remaining()
+    monkeypatch.setattr(guest, "DEADLINE", guest.time.monotonic() + 5000)
+    assert guest._remaining() == guest.STAGE_SECONDS

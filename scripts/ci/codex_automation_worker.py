@@ -22,27 +22,30 @@ from __future__ import annotations
 
 import json
 import os
-from pathlib import Path
 import re
 import shutil
 import subprocess
 import sys
 import tempfile
+from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
-import codex_automation_custody as custody  # noqa: E402
-import codex_automation_receipts as receipts  # noqa: E402
-import codex_automation_request as requests_  # noqa: E402
-import codex_review_profiles as profiles  # noqa: E402
-from codex_review_broker import BrokerError, Subscription, serve  # noqa: E402
-from codex_review_worker import GitHub, Incomplete, docker, git_input  # noqa: E402
+import codex_automation_custody as custody
+import codex_automation_receipts as receipts
+import codex_automation_request as requests_
+import codex_review_profiles as profiles
+from codex_review_broker import BrokerError, Subscription, serve
+from codex_review_worker import GitHub, Incomplete, docker, git_input
 
 CONFIG = HERE / "codex-automation-worker.json"
 ROOT = HERE.parents[1]
 MARKER = "<!-- codex-automation-assessment:v1 -->"
 MAX_GUEST_OUTPUT = 2 * 1024 * 1024
+CLOSURE_DATA = (".ai/security/token-shapes.json", "data/token-shapes.json")
+GUEST_MARGIN_SECONDS = 60
+MD_UNSAFE = re.compile(r"([\\`*_\[\]()<>#|~!])")
 STATES = frozenset({"completed", "held", "blocked_credentials", "blocked_quota", "failed"})
 
 
@@ -68,8 +71,7 @@ def enabled():
 
 def _output(**values):
     with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as stream:
-        for key, value in values.items():
-            stream.write(f"{key}={value}\n")
+        stream.writelines(f"{key}={value}\n" for key, value in values.items())
 
 
 def _state_dir():
@@ -113,6 +115,14 @@ def build_image(directory):
     for name in ("agents", "skills"):
         shutil.copytree(ROOT / ".claude" / name, context / f"opt/automation/.claude/{name}",
                         ignore=shutil.ignore_patterns("__pycache__"))
+    # Judge/deep-dive evidence redaction requires the shipped secret-shape catalog;
+    # without it every evidence read fails closed and no adjudication is possible.
+    catalogs = [path for path in CLOSURE_DATA if (ROOT / path).is_file()]
+    if not catalogs:
+        raise Incomplete("failed_install")
+    for path in catalogs:
+        (context / "opt/automation" / path).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(ROOT / path, context / "opt/automation" / path)
     shutil.copy(HERE / "codex-automation-runtime/Dockerfile", context / "Dockerfile")
     command, env = docker("build", "--quiet", "--iidfile", str(directory / "image.id"),
                           "--secret", "id=proxy_ca,src="
@@ -144,13 +154,15 @@ def guest_args(image, name, source, broker_directory, context_file, candidates, 
     for key, item in (("GITHUB_REPOSITORY", value["repository"]), ("PR_NUMBER", value["pull_request"]),
                       ("PR_BASE_SHA", value["base_sha"]), ("PR_HEAD_SHA", value["head_sha"]),
                       ("GITHUB_RUN_ID", value["controller_run_id"]),
-                      ("GITHUB_RUN_ATTEMPT", value["controller_run_attempt"])):
+                      ("GITHUB_RUN_ATTEMPT", value["controller_run_attempt"]),
+                      ("CODEX_AUTOMATION_GUEST_SECONDS", value.get("guest_seconds", 1400))):
         args += ["--env", f"{key}={item}"]
     return [*args, image]
 
 
 def run_guest(image, source, broker_directory, context_file, candidates, value, *, seconds):
     name = "codex-automation-" + os.urandom(8).hex()
+    value = {**value, "guest_seconds": max(60, int(seconds) - 30)}
     command, env = docker(*guest_args(image, name, source, broker_directory, context_file, candidates, value))
     try:
         result = subprocess.run(command, env=env, capture_output=True, timeout=seconds, check=False)
@@ -200,6 +212,7 @@ def execute(github, target, directory, *, run_id, run_attempt, workflow_sha, gue
     except custody.CustodyHold as exc:
         return {"state": "held", "reason": str(exc)}, rows
     passes = {}
+    unmeasured = {}
     try:
         source, paths = source_loader(directory, {**target, "lane": "code"}, github.token)
         if not paths:
@@ -211,18 +224,26 @@ def execute(github, target, directory, *, run_id, run_attempt, workflow_sha, gue
             context_file = write_context(directory, document)
             broker_dir = directory / f"broker-{role}"
             broker_dir.mkdir(mode=0o700)
-            with session(assignments[role], target["repository"], role) as (auth, _snapshot):
-                with serve(broker_dir / "model.sock", Subscription(auth), text_only=True,
-                           max_requests=config["max_requests"], max_seconds=config["max_seconds"],
-                           expected_effort=config["reasoning_effort"]) as broker:
-                    output = guest(image if image else "", source, broker_dir, context_file, candidates,
-                                   document, seconds=config["max_seconds"])
-                    audit = broker.audit()
-            rows += receipts.build(
-                audit.get("text_completions", []), repository=target["repository"], run_id=run_id,
-                run_attempt=run_attempt, base_sha=target["base_sha"], head_sha=target["head_sha"],
-                workflow_sha=workflow_sha, role=role, data_sensitivity=config["data_sensitivity"],
-                correlation_id=f"{target['repository']}#{target['pull_request']}@{target['head_sha']}/{role}")
+            audit = None
+            try:
+                with session(assignments[role], target["repository"], role) as (auth, _snapshot), \
+                        serve(broker_dir / "model.sock", Subscription(auth), text_only=True,
+                              max_requests=config["max_requests"], max_seconds=config["max_seconds"],
+                              expected_effort=config["reasoning_effort"]) as broker:
+                    try:
+                        output = guest(image if image else "", source, broker_dir, context_file, candidates,
+                                       document, seconds=config["max_seconds"] - GUEST_MARGIN_SECONDS)
+                    finally:
+                        # Spent completions are measured even when the guest fails.
+                        audit = broker.audit()
+            finally:
+                if audit is not None:
+                    unmeasured[role] = max(0, audit.get("requests", 0) - len(audit.get("text_completions", [])))
+                    rows += receipts.build(
+                        audit.get("text_completions", []), repository=target["repository"], run_id=run_id,
+                        run_attempt=run_attempt, base_sha=target["base_sha"], head_sha=target["head_sha"],
+                        workflow_sha=workflow_sha, role=role, data_sensitivity=config["data_sensitivity"],
+                        correlation_id=f"{target['repository']}#{target['pull_request']}@{target['head_sha']}/{role}")
             if broker.terminal_error:
                 return {"state": "blocked_quota" if broker.terminal_error == "subscription_quota_exhausted"
                         else "failed", "reason": broker.terminal_error, "passes": passes}, rows
@@ -234,9 +255,10 @@ def execute(github, target, directory, *, run_id, run_attempt, workflow_sha, gue
                 candidates.mkdir(mode=0o700)
                 for name, body in output["candidates"].items():
                     if not re.fullmatch(r"[A-Za-z0-9_.-]{1,96}\.json", name):
-                        return {"state": "failed", "reason": "candidate_name_invalid"}, rows
+                        return {"state": "failed", "reason": "candidate_name_invalid", "passes": passes}, rows
                     (candidates / name).write_text(json.dumps(body))
         return {"state": "completed", "reason": "adjudicated", "passes": passes,
+                "unmeasured_requests": unmeasured,
                 "publication": passes["judge"].get("publication", [])}, rows
     except profiles.ProfileError as exc:
         return {"state": "blocked_quota" if str(exc) in {"profile_capacity_exhausted", "profile_session_busy"}
@@ -246,17 +268,27 @@ def execute(github, target, directory, *, run_id, run_attempt, workflow_sha, gue
         return {"state": "failed", "reason": str(exc)[:200] or type(exc).__name__, "passes": passes}, rows
 
 
+def _safe(value, limit):
+    """Neutralise Markdown and @mentions in model/PR-derived text (as the Judge does)."""
+    text = " ".join(str(value).split())[:limit]
+    return MD_UNSAFE.sub(r"\\\1", text).replace("@", "@\u200b")
+
+
 def comment_body(target, result):
-    lines = [MARKER, "### Subscription automation assessment (advisory)", "",
-             f"Head `{target['head_sha']}` · state `{result['state']}` · reason `{result.get('reason', '')}`", ""]
+    event_names = {"APPROVE", "COMMENT", "REQUEST_CHANGES"}
+    lines = [f"{MARKER}\n<!-- head={target['head_sha']} -->", "### Subscription automation assessment (advisory)", "",
+             f"Head {target['head_sha']} · state {_safe(result['state'], 40)} · reason {_safe(result.get('reason', ''), 120)}", ""]
     for item in result.get("publication", []):
         if item.get("action") == "review":
-            lines.append(f"**Judge verdict:** `{item.get('event')}` — {len(item.get('surviving') or [])} finding(s)")
+            event = item.get("event") if item.get("event") in event_names else "UNKNOWN"
+            lines.append(f"**Judge verdict:** {event} ({len(item.get('surviving') or [])} finding(s))")
             for finding in (item.get("surviving") or [])[:20]:
-                where = f"{finding.get('file', '?')}:{finding.get('line', '?')}"
-                lines.append(f"- `{where}` {str(finding.get('message', ''))[:300]}")
+                where = _safe(f"{finding.get('file', '?')}:{finding.get('line', '?')}", 200)
+                lines.append(f"- {where} {_safe(finding.get('message', ''), 300)}")
         elif item.get("action") == "advisory":
-            lines.append(f"**Advisory:** {str(item.get('detail', ''))[:500]}")
+            lines.append(f"**Advisory:** {_safe(item.get('detail', ''), 500)}")
+        elif item.get("action") == "no_findings":
+            lines.append("**Judge verdict:** no surviving findings")
     lines += ["", "_Advisory only; never a required check. Held roles are missing coverage, not a pass._"]
     return "\n".join(lines)
 
@@ -293,8 +325,18 @@ def main(argv):
         return 0
     if command == "publish":
         result = json.loads((state / "result/result.json").read_text(encoding="utf-8"))
-        github.json(f"/issues/{int(target['pull_request'])}/comments", method="POST",
-                    data={"body": comment_body(target, result)})
+        number = int(target["pull_request"])
+        pr = github.json(f"/pulls/{number}")
+        if not isinstance(pr, dict) or pr.get("state") != "open" or (pr.get("head") or {}).get("sha") != target["head_sha"]:
+            print("superseded: PR head changed or closed; advisory not posted")
+            return 0
+        head_marker = f"<!-- head={target['head_sha']} -->"
+        existing = github.pages(f"/issues/{number}/comments")
+        if any(isinstance(c, dict) and (c.get("user") or {}).get("id") == custody.BOT_ID
+               and MARKER in (c.get("body") or "") and head_marker in (c.get("body") or "") for c in existing):
+            print("already published for this head")
+            return 0
+        github.json(f"/issues/{number}/comments", method="POST", data={"body": comment_body(target, result)})
         return 0
     raise SystemExit("usage: codex_automation_worker.py prepare|run|publish")
 

@@ -122,6 +122,29 @@ coordinates and a per-completion attempt ID. `cost_usd` stays unknown. The
 contract mirrors the orchestrating repository's reader; spent completions are
 measured even when a later stage holds.
 
+Hardening from independent review: the image includes the shipped secret-shape
+catalog (`.ai/security/token-shapes.json`) required by Judge evidence
+redaction, and refuses to build without it; the advisory comment neutralises
+Markdown and @mentions and accepts only known Judge events; spent completions
+are measured even when a guest pass fails, and requests without a verified
+completion are reported as `unmeasured_requests` (never as receipts); guest
+stages share one budget below the host deadline; publication re-checks the
+current PR head and posts once per head (trusted-author marker).
+
+### Next: guarded mutation and publication (not implemented)
+
+Implementation/autofix will reuse the accepted autofix primitives rather than a
+new publisher: an editor job (no publication credential) runs a guest
+`autofix` pass whose tool-free text output is a bounded unified diff, applied
+with `git apply --check` in a scratch clone of the exact head and committed
+without hooks; the commit becomes the `autofix-publish.py` packet (bundle plus
+receipt bound to repository/PR/head ref/expected head). A separate job holding
+the publication credential imports the packet, re-runs native state, head
+protection and instruction-surface checks, sends once, reads back and records
+the outcome marker. Prerequisites: an `autofix` role in the text transport and
+automation consent, a patch-output contract, and the orchestrating reader's
+`automation.inference/v2` role set (currently assessment/triage/critic/judge).
+
 Not covered by this controller: triage/critic/implementation/autofix roles,
 source mutation and publication, SAST execution inside the guest, and any live
 host, account or funding qualification. Security roles remain held.
