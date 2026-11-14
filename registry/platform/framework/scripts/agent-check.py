@@ -140,6 +140,12 @@ def _source_scope_control_metadata(path: Path, *, optional: bool = False):
 
 def _source_scope_control_bytes(path: Path, *, optional: bool = False) -> bytes | None:
     """Read bounded verified control metadata, never an alias/include target."""
+    read = _source_scope_control_read(path, optional=optional)
+    return None if read is None else read[0]
+
+
+def _source_scope_control_read(path: Path, *, optional: bool = False) -> tuple[bytes, tuple] | None:
+    """Return verified control bytes with the descriptor identity they were read from."""
     before = _source_scope_control_metadata(path, optional=optional)
     if before is None:
         return None
@@ -156,7 +162,7 @@ def _source_scope_control_bytes(path: Path, *, optional: bool = False) -> bytes 
         if (len(data) > 65536 or (before.st_size, before.st_mtime_ns, before.st_ctime_ns) != (
                 after.st_size, after.st_mtime_ns, after.st_ctime_ns)):
             raise ValueError("Git control metadata changed")
-        return data
+        return data, (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns)
     finally:
         os.close(descriptor)
 
@@ -200,15 +206,23 @@ def _source_scope_alias_metadata(path: Path) -> None:
         os.close(descriptor)
 
 
-def _source_scope_head_chain(gitdir: Path, common: Path) -> None:
-    """Bound symbolic HEAD to checked ref namespaces, never other worktrees."""
-    raw = _source_scope_control_bytes(gitdir / "HEAD")
+def _source_scope_head_chain(gitdir: Path, common: Path) -> tuple | None:
+    """Bound symbolic HEAD to checked ref namespaces, never other worktrees.
+
+    Returns the exact route observation (path, bytes, descriptor identity per
+    hop) only when it ends in a loose object id; otherwise None.
+    """
+    path = gitdir / "HEAD"
+    read = _source_scope_control_read(path)
+    route = []
     for _ in range(32):
-        if raw is None:
-            return  # A missing loose ref may resolve through checked packed refs.
+        if read is None:
+            return None  # A missing loose ref may resolve through checked packed refs.
+        raw, identity = read
+        route.append((str(path), raw, identity))
         text = raw.decode("utf-8").strip()
         if re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", text):
-            return
+            return tuple(route)
         if not text.startswith("ref: refs/"):
             raise ValueError("unqualified symbolic HEAD route")
         reference = text[5:]
@@ -219,8 +233,8 @@ def _source_scope_head_chain(gitdir: Path, common: Path) -> None:
             raise ValueError("unqualified symbolic HEAD route")
         # Git keeps these namespaces private to the current linked worktree.
         private = reference.startswith(("refs/bisect/", "refs/worktree/", "refs/rewritten/"))
-        target = (gitdir if private else common) / reference
-        raw = _source_scope_control_bytes(target, optional=True)
+        path = (gitdir if private else common) / reference
+        read = _source_scope_control_read(path, optional=True)
     raise ValueError("symbolic HEAD route bound exceeded")
 
 
@@ -233,11 +247,12 @@ def _source_scope_pointer_path(parent: Path, target: str) -> Path:
     return requested.resolve(strict=True)
 
 
-def _source_scope_git_controls(root: Path) -> None:
+def _source_scope_git_controls(root: Path) -> tuple | None:
     """Reject config indirections BEFORE native Git can interpret their targets.
 
     These repeated observations are not an atomic filesystem/host guarantee.
     Independently pinned owning scope inputs refuse before this metadata route.
+    Returns this call's control observation when HEAD ends in a loose object id.
     """
     marker = root / ".git"
     if stat.S_ISDIR(marker.lstat().st_mode):
@@ -264,10 +279,12 @@ def _source_scope_git_controls(root: Path) -> None:
         backpointer = _source_scope_control_bytes(gitdir / "gitdir")
         if backpointer is None or _source_scope_pointer_path(gitdir, backpointer.decode("utf-8").strip()) != marker:
             raise ValueError("linked-worktree ownership differs")
+    configs = []
     for path in (common / "config", gitdir / "config.worktree"):
         raw = _source_scope_control_bytes(path, optional=True)
         if raw is not None and re.search(rb"\[\s*include", raw, re.IGNORECASE):
             raise ValueError("Git config includes require a qualified metadata adapter")
+        configs.append(raw)
     # Native Git must not follow alternate-object routing from this probe.
     if _source_scope_exists(common / "objects/info/alternates"):
         raise ValueError("Git object alternates require a qualified metadata adapter")
@@ -277,7 +294,7 @@ def _source_scope_git_controls(root: Path) -> None:
         # The fixed metadata probe disables graft interpretation independently;
         # static graft aliases also hold without opening any graft contents.
         _source_scope_control_metadata(directory / "info/grafts", optional=True)
-    _source_scope_head_chain(gitdir, common)
+    route = _source_scope_head_chain(gitdir, common)
     # Native fixed-argv tree metadata probes may access refs, loose objects or
     # pack/index metadata. Reject static external aliases before any such Git
     # access. No file in these directories is opened for content by this walk.
@@ -286,10 +303,32 @@ def _source_scope_git_controls(root: Path) -> None:
     private_refs = gitdir / "refs"
     if gitdir != common and _source_scope_exists(private_refs):
         _source_scope_alias_metadata(private_refs)
+    return None if route is None else (str(root), str(gitdir), str(common), tuple(configs), route)
 
 
-def _source_scope_tree_declared(owner: Path, environment: dict, timeout: int) -> bool:
+# Undeclared fixed-probe answers, keyed by the complete control observation made
+# for that call: owner/control paths, config bytes and every HEAD route hop
+# (bytes plus descriptor identity) ending in a commit id. A commit id names an
+# immutable tree, so the answer is reused only while a fresh observation is
+# identical. Every call still re-runs pins, enclosing declarations, control
+# checks and the alias walk; any route change (commit, checkout, rewritten ref)
+# is a miss. Declared, unborn and packed-only routes are never memoized.
+_SOURCE_SCOPE_UNDECLARED_TREES: set = set()
+
+
+def _source_scope_route_unchanged(observation: tuple) -> bool:
+    try:
+        return _source_scope_head_chain(Path(observation[1]), Path(observation[2])) == observation[-1]
+    except (OSError, ValueError, TypeError, RuntimeError):
+        return False
+
+
+def _source_scope_tree_declared(owner: Path, environment: dict, timeout: int,
+                                observation: tuple | None = None) -> bool:
     """Use fixed metadata probes; distinguish a verified unborn branch from failure."""
+    key = None if observation is None else (observation, tuple(sorted(environment.items())))
+    if key is not None and key in _SOURCE_SCOPE_UNDECLARED_TREES:
+        return False
     def metadata(*arguments):
         return subprocess.run(["git", "--no-replace-objects", "-c", "protocol.allow=never", *arguments],
                               cwd=owner, env=environment, capture_output=True, timeout=timeout, check=False)
@@ -297,6 +336,11 @@ def _source_scope_tree_declared(owner: Path, environment: dict, timeout: int) ->
     if result.stdout:
         return True
     if result.returncode == 0:
+        # Record only if HEAD did not move while the probe ran.
+        if key is not None and _source_scope_route_unchanged(observation):
+            if len(_SOURCE_SCOPE_UNDECLARED_TREES) >= 256:
+                _SOURCE_SCOPE_UNDECLARED_TREES.clear()
+            _SOURCE_SCOPE_UNDECLARED_TREES.add(key)
         return False
     head = metadata("rev-parse", "--verify", "--quiet", "HEAD")
     symbolic = metadata("symbolic-ref", "--quiet", "HEAD")
@@ -314,7 +358,7 @@ def _source_scope_git_environment() -> dict:
     """Forward only runtime context to non-authorizing local Git metadata probes."""
     names = {"PATH", "HOME", "USER", "LOGNAME", "LANG", "LANGUAGE", "LC_ALL", "LC_CTYPE", "TZ",
              "TMPDIR", "TMP", "TEMP", "SystemRoot", "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT"}
-    environment = {key: value for key, value in os.environ.items() if key in names}
+    environment = {key: os.environ[key] for key in names if key in os.environ}
     environment.update({"GIT_NO_LAZY_FETCH": "1", "GIT_ALLOW_PROTOCOL": "", "GIT_TERMINAL_PROMPT": "0",
                         "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
                         "GIT_GRAFT_FILE": os.devnull})
@@ -337,8 +381,8 @@ def source_scope_declared(root: Path) -> bool:
     environment = _source_scope_git_environment()
     for owner in roots:
         try:
-            _source_scope_git_controls(owner)
-            if _source_scope_tree_declared(owner, environment, GIT_TIMEOUT):
+            observation = _source_scope_git_controls(owner)
+            if _source_scope_tree_declared(owner, environment, GIT_TIMEOUT, observation):
                 return True
         except (OSError, ValueError, TypeError, RuntimeError, subprocess.SubprocessError) as error:
             raise _source_scope_failure(error) from None

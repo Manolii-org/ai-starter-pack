@@ -425,11 +425,16 @@ class AgentCheckTests(unittest.TestCase):
             self.assertGreater(kwargs["timeout"], 0)
             self.assertLessEqual(kwargs["timeout"], 30)
             return subprocess.CompletedProcess(command, 0, b"", b"")
-        with mock.patch.object(runner.subprocess, "run", side_effect=bounded):
+        checks = mock.Mock(wraps=runner.source_scope_declared)
+        with mock.patch.object(runner.subprocess, "run", side_effect=bounded), \
+             mock.patch.object(runner, "source_scope_declared", checks):
             runner.git(self.root, "ls-files")
             runner.require_unfiltered_tracked_inputs(self.root)
+        # Every entry re-observes scope; an identical observation reuses the
+        # undeclared fixed-probe answer instead of forking Git again.
+        self.assertEqual(checks.call_count, 2)
         scope_reads = [command for command in calls if command[-1:] == [runner.SOURCE_SCOPE_POLICY]]
-        self.assertEqual(len(scope_reads), 2)
+        self.assertEqual(len(scope_reads), 1)
         self.assertEqual(len(calls) - len(scope_reads), 4)
         self.run_check()
         with mock.patch.object(runner, "plan_for", side_effect=subprocess.TimeoutExpired(["git"], 30)):

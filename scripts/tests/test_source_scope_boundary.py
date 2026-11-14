@@ -1747,6 +1747,75 @@ class ScopeControlCompatibility(unittest.TestCase):
         self.assertNotIn("installed", output)
         self.assertTrue(target.read_bytes().startswith(b"X"))
 
+    def test_memoized_undeclared_tree_never_survives_a_changed_observation(self):
+        real = subprocess.run
+        probes = []
+        def counting(command, **kwargs):
+            if command[:4] == ["git", "--no-replace-objects", "-c", "protocol.allow=never"]:
+                probes.append(command)
+            return real(command, **kwargs)
+        def git(*args):
+            real(["git", "-c", "commit.gpgsign=false", *args], cwd=self.root, check=True, capture_output=True)
+        with patch.object(self.runner.subprocess, "run", side_effect=counting):
+            self.assertFalse(self.runner.source_scope_declared(self.root))
+            self.assertFalse(self.runner.source_scope_declared(self.root))
+            self.assertEqual(len(probes), 1)  # identical observation: one fixed probe
+            # Every other hold is still observed fresh on a memoized route.
+            with patch.dict(os.environ, {self.runner.SOURCE_SCOPE_PIN: ""}):
+                self.assertTrue(self.runner.source_scope_declared(self.root))
+            self.declare()
+            self.assertTrue(self.runner.source_scope_declared(self.root))
+            git("add", self.runner.SOURCE_SCOPE_POLICY)
+            git("commit", "-qm", "Synthetic mid-run committed scope")
+            (self.root / self.runner.SOURCE_SCOPE_POLICY).unlink()
+            # A declaration committed mid-run changes the route and is held.
+            self.assertTrue(self.runner.source_scope_declared(self.root))
+            with self.assertRaises(self.runner.SourceScopeError):
+                self.runner.require_source_scope(self.root)
+            git("update-ref", "refs/heads/declared", "HEAD")
+            git("reset", "-q", "--hard", "HEAD~1")
+            self.assertFalse(self.runner.source_scope_declared(self.root))
+            # Moving back to the declared commit through a rewritten ref holds again.
+            git("reset", "-q", "--hard", "declared")
+            self.assertTrue(self.runner.source_scope_declared(self.root))
+            git("reset", "-q", "--hard", "HEAD~1")
+            self.assertFalse(self.runner.source_scope_declared(self.root))
+            # Alias/control checks still run on a memoized route.
+            outside = self.other_root() / "outside-ref"
+            outside.write_bytes(b"0" * 40 + b"\n")
+            (self.root / ".git/refs/heads/planted").symlink_to(outside)
+            with self.assertRaises(self.runner.SourceScopeError):
+                self.runner.require_source_scope(self.root)
+            (self.root / ".git/refs/heads/planted").unlink()
+            config = self.root / ".git/config"
+            config.write_bytes(config.read_bytes() + b"[include]\n\tpath = elsewhere\n")
+            with self.assertRaises(self.runner.SourceScopeError):
+                self.runner.require_source_scope(self.root)
+
+    def test_head_moved_during_probe_is_not_memoized(self):
+        real = subprocess.run
+        subprocess.run(["git", "branch", "other"], cwd=self.root, check=True)
+        self.declare()
+        subprocess.run(["git", "add", self.runner.SOURCE_SCOPE_POLICY], cwd=self.root, check=True)
+        subprocess.run(["git", "-c", "commit.gpgsign=false", "commit", "-qm", "Synthetic declared"],
+                       cwd=self.root, check=True, capture_output=True)
+        (self.root / self.runner.SOURCE_SCOPE_POLICY).unlink()
+        head = self.root / ".git/HEAD"
+        original = head.read_bytes()
+        def racing(command, **kwargs):
+            # The declared observation is made; HEAD flips to an undeclared
+            # branch for the probe and back afterwards (an ABA route change).
+            head.write_bytes(b"ref: refs/heads/other\n")
+            try:
+                return real(command, **kwargs)
+            finally:
+                head.unlink()
+                head.write_bytes(original)
+        with patch.object(self.runner.subprocess, "run", side_effect=racing):
+            self.assertFalse(self.runner.source_scope_declared(self.root))
+        self.assertEqual(self.runner._SOURCE_SCOPE_UNDECLARED_TREES, set())
+        self.assertTrue(self.runner.source_scope_declared(self.root))
+
 
 if __name__ == "__main__":
     unittest.main()
