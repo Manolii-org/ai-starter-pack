@@ -348,7 +348,8 @@ def _source_scope_tree_declared(owner: Path, environment: dict, timeout: int,
         raise ValueError("source-scope metadata unavailable")
     if result.returncode == 0:
         # Defence in depth: record only if config and route were also unchanged.
-        if key is not None and _source_scope_observation_unchanged(observation):
+        if (observation is not None and key is not None
+                and _source_scope_observation_unchanged(observation)):
             if len(_SOURCE_SCOPE_UNDECLARED_TREES) >= 256:
                 _SOURCE_SCOPE_UNDECLARED_TREES.clear()
             _SOURCE_SCOPE_UNDECLARED_TREES.add(key)
