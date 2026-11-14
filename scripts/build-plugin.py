@@ -32,7 +32,13 @@ import sys
 import tempfile
 from pathlib import Path
 
-from lib import delivery_component
+# Resolve this script's own lib package whether run as a CLI (script directory
+# already first on sys.path) or loaded by path through importlib (tests, the
+# installed-pack surface check), never a same-named package elsewhere.
+_SCRIPTS = str(Path(__file__).resolve().parent)
+if sys.path[:1] != [_SCRIPTS]:
+    sys.path.insert(0, _SCRIPTS)
+from lib import delivery_component  # noqa: E402
 
 REPO = Path(__file__).resolve().parent.parent
 PLUGIN_NAME = "manolii-framework"  # kebab-case (plugin name constraint)
