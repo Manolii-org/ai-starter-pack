@@ -372,6 +372,8 @@ def _source_scope_tree_declared(owner: Path, environment: dict, timeout: int,
     if result.stdout:
         return True
     if result.returncode == 0:
+        if _source_scope_nested_tree_declared(owner, environment, timeout, commit or "HEAD"):
+            return True
         if (observation is not None and key is not None
                 and commit == observation[-1][-1][1].rstrip(b"\n").decode("ascii")
                 and resolved_commit() == commit
@@ -391,6 +393,73 @@ def _source_scope_tree_declared(owner: Path, environment: dict, timeout: int,
               and metadata("show-ref", "--verify", "--quiet", ref).returncode == 1)
     if not unborn:
         raise ValueError("source-scope metadata unavailable")
+    return False
+
+
+SOURCE_SCOPE_WALK_MAX_ENTRIES = 2_000_000
+_SOURCE_SCOPE_UNDECLARED_WORKTREES: set = set()
+# Bound at import: this names-only walk opens directories, never files.
+_WALK_OPEN, _WALK_SCANDIR, _WALK_CLOSE = os.open, os.scandir, os.close
+
+
+def _source_scope_nested_tree_declared(owner: Path, environment: dict, timeout: int, revision: str) -> bool:
+    """List committed names only; any nested policy path declares the owner."""
+    result = subprocess.run(["git", "--no-replace-objects", "-c", "protocol.allow=never",
+                             "ls-tree", "-r", "-z", "--name-only", revision],
+                            cwd=owner, env=environment, capture_output=True, timeout=timeout, check=False)
+    if result.returncode != 0:
+        raise ValueError("source-scope metadata unavailable")
+    suffix = b"/" + SOURCE_SCOPE_POLICY.encode()
+    return any(name.endswith(suffix) for name in result.stdout.split(b"\0"))
+
+
+def _source_scope_nested_working(owner: Path, environment: dict, timeout: int) -> bool:
+    """Walk names and link metadata only; nested declarations hold the whole owner.
+
+    A subfolder with its own policy, or a nested repository whose metadata is
+    declared or cannot be qualified, holds validation of the enclosing owner:
+    its commands could otherwise read that subfolder. No file is opened. The
+    undeclared answer is observed once per process; it is not an atomic
+    snapshot of later working-tree changes.
+    """
+    key = owner.resolve()
+    if key in _SOURCE_SCOPE_UNDECLARED_WORKTREES:
+        return False
+    remaining = SOURCE_SCOPE_WALK_MAX_ENTRIES
+    flags = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0)
+    stack = [owner]
+    while stack:
+        directory = stack.pop()
+        # Descriptor listing never follows a directory swapped for a link.
+        descriptor = _WALK_OPEN(directory, flags)
+        try:
+            with _WALK_SCANDIR(descriptor) as entries:
+                listed = [(entry.name, entry.is_dir(follow_symlinks=False)) for entry in entries]
+        finally:
+            _WALK_CLOSE(descriptor)
+        remaining -= len(listed)
+        if remaining < 0:
+            raise ValueError("Git metadata entry bound exceeded")
+        for name, is_directory in listed:
+            if name == ".git":
+                if directory == owner:
+                    continue
+                # A nested repository is qualified exactly like the owner.
+                _source_scope_git_controls(directory)
+                if _source_scope_tree_declared(directory, environment, timeout):
+                    return True
+                continue
+            if name == ".ai" and directory != owner and is_directory:
+                try:
+                    (directory / name / "source-scope-policy.json").lstat()
+                    return True
+                except FileNotFoundError:
+                    pass
+            if is_directory:
+                stack.append(directory / name)
+    if len(_SOURCE_SCOPE_UNDECLARED_WORKTREES) >= 256:
+        _SOURCE_SCOPE_UNDECLARED_WORKTREES.clear()
+    _SOURCE_SCOPE_UNDECLARED_WORKTREES.add(key)
     return False
 
 
@@ -423,6 +492,8 @@ def source_scope_declared(root: Path) -> bool:
         try:
             observation = _source_scope_git_controls(owner)
             if _source_scope_tree_declared(owner, environment, GIT_TIMEOUT, observation):
+                return True
+            if _source_scope_nested_working(owner, environment, GIT_TIMEOUT):
                 return True
         except (OSError, ValueError, TypeError, RuntimeError, subprocess.SubprocessError) as error:
             raise _source_scope_failure(error) from None
@@ -691,6 +762,12 @@ def empty_gitlink_identity(root: Path, name: str) -> str | None:
         os.close(descriptor)
 
 
+def require_routed_read(root: Path, path: Path) -> None:
+    """A read routed through a directory link checks the target's owners first."""
+    if path.resolve(strict=True) != root.resolve() / path.relative_to(root):
+        require_content_path_scope(path)
+
+
 def raw_tracked_inputs(root: Path) -> dict:
     """Hash physical working bytes independently of Git's stat/index hints."""
     require_source_scope(root)
@@ -713,6 +790,7 @@ def raw_tracked_inputs(root: Path) -> dict:
             mode, content = "120000", os.fsencode(os.readlink(path))
         elif path.is_file():
             mode = "100755" if path.stat().st_mode & 0o100 else "100644"
+            require_routed_read(root, path)
             content = path.read_bytes()
         else:
             # Git creates empty directories for uninitialized submodules. They
@@ -748,6 +826,7 @@ def snapshot(root: Path) -> dict:
             # Git records only the executable bit; bind it like tracked inputs so
             # a helper that loses +x cannot reuse a PASS it can no longer earn.
             kind = b"executable\0" if path.stat().st_mode & 0o111 else b"regular\0"
+            require_routed_read(root, path)
             untracked[name] = sha(kind + path.read_bytes())
     # Git records link text, not mutable target contents. Keep normal check
     # execution for linked candidates, but never reuse or save a cached PASS.
@@ -1075,44 +1154,12 @@ def ready_identity(root: Path, item: dict, *, key: bytes | None = None) -> str |
         finally:
             os.close(descriptor)
 
-    # The repository root and its ancestors were checked above. Each directory
-    # below it is checked once per walk, outermost first, so a nested owner is
-    # seen before any entry or byte beneath it is read.
-    clear_directories: set[Path] = {root, root.resolve()}
-
-    def require_clear(directory: Path) -> None:
-        if not Path(os.path.abspath(directory)).is_relative_to(root) and not directory.is_relative_to(root.resolve()):
-            return  # open_owned refuses targets outside the owner root.
-        chain = []
-        current = directory
-        while current not in clear_directories and current != current.parent:
-            chain.append(current)
-            current = current.parent
-        for folder in reversed(chain):
-            try:
-                declared = _source_scope_exists(folder / SOURCE_SCOPE_POLICY)
-                nested = not declared and _source_scope_exists(folder / ".git")
-            except ValueError as error:
-                raise _source_scope_failure(error) from None
-            if nested:
-                # A nested owner is qualified exactly like the repository root:
-                # a declaration holds, and so does metadata (submodule pointers,
-                # alternates) that cannot be qualified. Nothing beneath is read.
-                declared = source_scope_declared(folder)
-            if declared:
-                raise SourceScopeError("source-scope requires a reviewed isolated projection; full validation held")
-            clear_directories.add(folder)
-
     def add(relative: str, path: Path, details: os.stat_result) -> bool:
         nonlocal remaining_bytes
         if not (stat.S_ISREG(details.st_mode) or stat.S_ISDIR(details.st_mode)
                 or stat.S_ISLNK(details.st_mode)):
             return False
         link = os.readlink(path) if stat.S_ISLNK(details.st_mode) else None
-        if link is not None:
-            # A link target's owners need not be walked ancestors of this tree.
-            target_path = path.resolve(strict=True)
-            require_clear(target_path if target_path.is_dir() else target_path.parent)
         descriptor, resolved = open_owned(path)
         try:
             target = os.fstat(descriptor)
@@ -1149,13 +1196,6 @@ def ready_identity(root: Path, item: dict, *, key: bytes | None = None) -> str |
         root_identity = state(os.fstat(root_fd))[:3]
         for name in item.get("ready_paths", []):
             path = ready_path(root, name)
-            # Owners between the repository root and this declared tree hold
-            # before any of its bytes are read.
-            # Clear the lexical route and the physical one: an intermediate
-            # link or ".." after a link can place the file under another owner.
-            require_clear(Path(os.path.abspath(path)).parent)
-            physical = path.resolve()
-            require_clear(physical if physical.is_dir() else physical.parent)
             try:
                 details = path.lstat()
             except FileNotFoundError:
@@ -1195,7 +1235,6 @@ def ready_identity(root: Path, item: dict, *, key: bytes | None = None) -> str |
                     os.close(descriptor)
                     continue
                 visited.add(real)
-                require_clear(real)
                 entries = names(descriptor, count=True)
                 if state(os.fstat(descriptor)) != before_state:
                     return None

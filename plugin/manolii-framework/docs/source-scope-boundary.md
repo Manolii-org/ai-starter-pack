@@ -62,9 +62,12 @@ inputs are checked at both their lexical and resolved owning locations before
 any plan snapshot or payload read, including legacy linked recipes. Low-level
 file readers likewise check a followed leaf's owner and a directory input's own
 boundary; dotenv traversal checks a nested directory before enumerating it.
-Declared readiness trees clear each directory, link target and declared path's
-lexical and physical route once per walk, before listing or reading beneath it;
-a nested owner's declaration or unqualified metadata holds like the root's.
+A declaration anywhere below an owner holds the whole owner: a subfolder's
+working or committed policy, or a nested repository whose metadata is declared
+or cannot be qualified (including initialized submodules). Detection reads
+names and Git metadata only, once per process; validation commands could
+otherwise read that subfolder. Reads routed through directory links also check
+the target's owners first.
 Ordinary unscoped linked and absent inputs keep their existing observations;
 cycles and inaccessible ownership metadata hold without exposing private paths.
 The Cursor hook classifies commands before repository/scope probes: ordinary

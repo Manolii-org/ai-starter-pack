@@ -303,7 +303,7 @@ def _source_scope_tree_declared(owner: Path, environment: dict, timeout: int) ->
     if result.stdout:
         return True
     if result.returncode == 0:
-        return False
+        return _source_scope_nested_tree_declared(owner, environment, timeout, "HEAD")
     head = metadata("rev-parse", "--verify", "--quiet", "HEAD")
     symbolic = metadata("symbolic-ref", "--quiet", "HEAD")
     ref = symbolic.stdout.decode("utf-8").strip()
@@ -313,6 +313,73 @@ def _source_scope_tree_declared(owner: Path, environment: dict, timeout: int) ->
               and metadata("show-ref", "--verify", "--quiet", ref).returncode == 1)
     if not unborn:
         raise ValueError("source-scope metadata unavailable")
+    return False
+
+
+SOURCE_SCOPE_WALK_MAX_ENTRIES = 2_000_000
+_SOURCE_SCOPE_UNDECLARED_WORKTREES: set = set()
+# Bound at import: this names-only walk opens directories, never files.
+_WALK_OPEN, _WALK_SCANDIR, _WALK_CLOSE = os.open, os.scandir, os.close
+
+
+def _source_scope_nested_tree_declared(owner: Path, environment: dict, timeout: int, revision: str) -> bool:
+    """List committed names only; any nested policy path declares the owner."""
+    result = subprocess.run(["git", "--no-replace-objects", "-c", "protocol.allow=never",
+                             "ls-tree", "-r", "-z", "--name-only", revision],
+                            cwd=owner, env=environment, capture_output=True, timeout=timeout, check=False)
+    if result.returncode != 0:
+        raise ValueError("source-scope metadata unavailable")
+    suffix = b"/" + SOURCE_SCOPE_POLICY.encode()
+    return any(name.endswith(suffix) for name in result.stdout.split(b"\0"))
+
+
+def _source_scope_nested_working(owner: Path, environment: dict, timeout: int) -> bool:
+    """Walk names and link metadata only; nested declarations hold the whole owner.
+
+    A subfolder with its own policy, or a nested repository whose metadata is
+    declared or cannot be qualified, holds validation of the enclosing owner:
+    its commands could otherwise read that subfolder. No file is opened. The
+    undeclared answer is observed once per process; it is not an atomic
+    snapshot of later working-tree changes.
+    """
+    key = owner.resolve()
+    if key in _SOURCE_SCOPE_UNDECLARED_WORKTREES:
+        return False
+    remaining = SOURCE_SCOPE_WALK_MAX_ENTRIES
+    flags = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0)
+    stack = [owner]
+    while stack:
+        directory = stack.pop()
+        # Descriptor listing never follows a directory swapped for a link.
+        descriptor = _WALK_OPEN(directory, flags)
+        try:
+            with _WALK_SCANDIR(descriptor) as entries:
+                listed = [(entry.name, entry.is_dir(follow_symlinks=False)) for entry in entries]
+        finally:
+            _WALK_CLOSE(descriptor)
+        remaining -= len(listed)
+        if remaining < 0:
+            raise ValueError("Git metadata entry bound exceeded")
+        for name, is_directory in listed:
+            if name == ".git":
+                if directory == owner:
+                    continue
+                # A nested repository is qualified exactly like the owner.
+                _source_scope_git_controls(directory)
+                if _source_scope_tree_declared(directory, environment, timeout):
+                    return True
+                continue
+            if name == ".ai" and directory != owner and is_directory:
+                try:
+                    (directory / name / "source-scope-policy.json").lstat()
+                    return True
+                except FileNotFoundError:
+                    pass
+            if is_directory:
+                stack.append(directory / name)
+    if len(_SOURCE_SCOPE_UNDECLARED_WORKTREES) >= 256:
+        _SOURCE_SCOPE_UNDECLARED_WORKTREES.clear()
+    _SOURCE_SCOPE_UNDECLARED_WORKTREES.add(key)
     return False
 
 
@@ -342,6 +409,8 @@ def source_scope_declared(root: Path) -> bool:
         try:
             _source_scope_git_controls(owner)
             if _source_scope_tree_declared(owner, environment, 30):
+                return True
+            if _source_scope_nested_working(owner, environment, 30):
                 return True
         except (OSError, ValueError, TypeError, RuntimeError, subprocess.SubprocessError):
             return True
@@ -585,6 +654,10 @@ def load_qa_config(root: Path) -> tuple[dict, bool]:
     path = root / "config" / "qa.json"
     if not path.is_file():
         return {}, False
+    # A linked configuration (leaf or intermediate directory) is read only
+    # after both its lexical and resolved owners are checked.
+    require_source_scope(path.parent)
+    require_source_scope(_source_scope_resolved_path(path).parent)
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:

@@ -33,6 +33,13 @@ def fixed_probe_tail(test, command, kwargs, real, *, full=False):
     if full:
         test.assertEqual(len(command), 9)
     tail = command[-5:]
+    if tail[:4] == ["ls-tree", "-r", "-z", "--name-only"]:
+        # Committed nested declarations: names only, of the same listed revision.
+        if tail[4] != "HEAD":
+            current = real(["git", "rev-parse", "--verify", "HEAD^{commit}"], cwd=kwargs["cwd"], env=kwargs["env"],
+                           capture_output=True, text=True, check=True).stdout.strip()
+            test.assertEqual(tail[4], current)
+        return
     test.assertEqual(tail[:2] + tail[3:], ["ls-tree", "-z", "--", ".ai/source-scope-policy.json"])
     if tail[2] != "HEAD":
         current = real(["git", "rev-parse", "--verify", "HEAD^{commit}"], cwd=kwargs["cwd"], env=kwargs["env"],
@@ -41,7 +48,7 @@ def fixed_probe_tail(test, command, kwargs, real, *, full=False):
 
 
 def is_listing(command):
-    return "ls-tree" in command
+    return "ls-tree" in command and "-r" not in command
 
 
 class SourceScopeBoundary(unittest.TestCase):
@@ -512,8 +519,10 @@ raise SystemExit(module.main(['--repo-root',str(root),*sys.argv[3:]]))
                 self.assertEqual(self.finalise.source_scope_declared(self.root), declared)
         # One listing per runner/gate call; the runner adds Git's HEAD^{commit}
         # resolution (re-checked after an undeclared listing before caching).
+        # An undeclared root listing is followed by one names-only listing for
+        # committed nested declarations in each of the runner and the gate.
         self.assertEqual(sum(map(is_listing, observed)), 4)
-        self.assertEqual(len(observed), 7)
+        self.assertEqual(len(observed), 9)
 
     def test_committed_enclosing_scope_is_checked_before_nested_git_control_bytes(self):
         self.declare()
@@ -1076,7 +1085,7 @@ class ScopeControlCompatibility(unittest.TestCase):
             return actual_run(command, **kwargs)
         with patch.dict(os.environ, context), patch.object(subprocess, "run", side_effect=observed):
             self.assertEqual(self.finalise.git_toplevel(self.root), self.root)
-        self.assertEqual(len(calls), 2)
+        self.assertEqual(len(calls), 3)  # root listing, nested names listing, toplevel
         self.assertEqual(trace.read_bytes(), b"synthetic unchanged trace\n")
         self.assertEqual((foreign / ".git/config").read_text(), "SYNTHETIC_PRIVATE_INVALID_CONFIG\n")
 
@@ -1786,9 +1795,10 @@ class ScopeControlCompatibility(unittest.TestCase):
         with patch.object(self.runner.subprocess, "run", side_effect=counting):
             self.assertFalse(self.runner.source_scope_declared(self.root))
             self.assertFalse(self.runner.source_scope_declared(self.root))
-            # Identical observation: Git resolved, listed and re-resolved once only.
+            # Identical observation: Git resolved, listed (root and nested names)
+            # and re-resolved once only.
             self.assertEqual(sum(map(is_listing, probes)), 1)
-            self.assertEqual(len(probes), 3)
+            self.assertEqual(len(probes), 4)
             # Every other hold is still observed fresh on a memoized route.
             with patch.dict(os.environ, {self.runner.SOURCE_SCOPE_PIN: ""}):
                 self.assertTrue(self.runner.source_scope_declared(self.root))
@@ -2161,6 +2171,70 @@ class NestedScopeAndCommonDirectory(unittest.TestCase):
             with self.subTest(ready=ready), self.guarded_open(name):
                 with self.assertRaises(self.runner.SourceScopeError):
                     self.runner.ready_identity(self.root, {"ready_paths": [ready]})
+
+    def test_tracked_nested_declaration_holds_tracked_and_snapshot_readers(self):
+        owner = self.root / "src/vendored"
+        owner.mkdir()
+        (owner / ".ai").mkdir()
+        (owner / self.runner.SOURCE_SCOPE_POLICY).write_bytes(self.raw)
+        self.nested_payload(owner)
+        for args in (("add", "."), ("-c", "commit.gpgsign=false", "commit", "-qm", "Nested scope")):
+            subprocess.run(["git", *args], cwd=self.root, check=True, capture_output=True,
+                           env=self.runner.git_environment())
+        for working_policy in (True, False):
+            if not working_policy:
+                (owner / self.runner.SOURCE_SCOPE_POLICY).unlink()  # committed only
+            self.runner._SOURCE_SCOPE_UNDECLARED_TREES.clear()
+            self.runner._SOURCE_SCOPE_UNDECLARED_WORKTREES.clear()
+            with self.subTest(working_policy=working_policy), self.guarded_open("opaque.bin"):
+                for reader in (self.runner.raw_tracked_inputs, self.runner.snapshot):
+                    with self.assertRaises(self.runner.SourceScopeError):
+                        reader(self.root)
+                self.assertTrue(self.finalise.source_scope_declared(self.root))
+
+    def test_qa_config_linked_into_a_scoped_owner_holds_before_read(self):
+        external = self.other_root()
+        self.init_source(external)
+        (external / ".ai").mkdir()
+        (external / self.runner.SOURCE_SCOPE_POLICY).write_bytes(self.raw)
+        (external / "qa.json").write_text(json.dumps({"schema_version": 1, "finalise_gate": {"mode": "off"}}))
+        (external / "configs").mkdir()
+        (external / "configs/qa.json").write_text(json.dumps({"schema_version": 1, "finalise_gate": {"mode": "off"}}))
+        target = self.root / "config/qa.json"
+        for route in ("leaf", "directory"):
+            with self.subTest(route=route):
+                if route == "leaf":
+                    target.symlink_to(external / "qa.json")
+                else:
+                    target.unlink()
+                    (self.root / "config").rename(self.root / "config-original")
+                    (self.root / "config").symlink_to(external / "configs", target_is_directory=True)
+                with patch.object(Path, "read_text", side_effect=AssertionError("scoped QA config read")):
+                    with self.assertRaises(self.finalise.SourceScopeHeld):
+                        self.finalise.load_qa_config(self.root)
+
+    def test_actual_cli_holds_a_repository_with_any_declared_subfolder(self):
+        owner = self.root / "src/vendored"
+        owner.mkdir()
+        (owner / ".ai").mkdir()
+        (owner / self.runner.SOURCE_SCOPE_POLICY).write_bytes(self.raw)
+        self.nested_payload(owner)
+        marker = self.other_root()
+        write = lambda name: [sys.executable, "-c", f"open({str(marker / name)!r}, 'w').close()"]
+        config = {"schema_version": 1, "base": "origin/main",
+                  "environments": [{"id": "deps", "ready_paths": ["src"], "commands": [write("setup")]}],
+                  "checks": [{"id": "uses-deps", "paths": ["src/*"], "environment": "deps",
+                              "commands": [write("check")]}]}
+        (self.root / "config/agent-checks.json").write_text(json.dumps(config))
+        for arguments in (["--plan"], ["--provision"], ["--provision", "--no-cache"]):
+            with self.subTest(arguments=arguments):
+                result = subprocess.run([sys.executable, "-B", str(SCRIPTS / "agent-check.py"),
+                                         "--repo-root", str(self.root), *arguments],
+                                        capture_output=True, text=True, timeout=60,
+                                        env=self.runner.git_environment())
+                self.assertEqual(result.returncode, 4, result.stdout + result.stderr)
+                self.assertIn("SOURCE-SCOPE-HELD", result.stderr)
+                self.assertEqual(sorted(path.name for path in marker.iterdir()), [])
 
     def test_link_heavy_trees_check_each_directory_once_without_per_link_git(self):
         subprocess.run(["git", "pack-refs", "--all"], cwd=self.root, check=True, capture_output=True,

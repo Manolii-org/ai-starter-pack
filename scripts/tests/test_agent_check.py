@@ -244,8 +244,11 @@ class AgentCheckTests(unittest.TestCase):
         (self.root / "module").mkdir()
         self.run_check()
         (self.root / "module/.git").write_text("gitdir: fixture")
-        self.run_check(expected=2)
-        self.assertFalse((self.root / ".ai/agent-checks/receipt.json").exists())
+        # An initialized nested repository is an unqualified nested owner: held
+        # before any cache reuse. The gate ignores receipts on a held run.
+        held = self.run_check(expected=4)
+        self.assertIn("SOURCE-SCOPE-HELD", held.stdout + held.stderr)
+        self.assertNotIn("AGENT-CHECK-CACHED", held.stdout)
 
     def test_empty_directory_replacing_a_regular_tracked_file_stays_blocked(self):
         (self.root / "src/value.py").unlink()
@@ -440,7 +443,8 @@ class AgentCheckTests(unittest.TestCase):
         self.assertEqual(len(scope_reads), 1)
         resolutions = [command for command in calls if command[-1:] == ["HEAD^{commit}"]]
         self.assertEqual(len(resolutions), 2)  # before and after the one listing
-        self.assertEqual(len(calls) - len(scope_reads) - len(resolutions), 4)
+        # One names-only listing checks committed nested declarations.
+        self.assertEqual(len(calls) - len(scope_reads) - len(resolutions), 5)
         self.run_check()
         with mock.patch.object(runner, "plan_for", side_effect=subprocess.TimeoutExpired(["git"], 30)):
             self.assertEqual(runner.main(["--repo-root", str(self.root), "--provider", "codex"]), 2)
