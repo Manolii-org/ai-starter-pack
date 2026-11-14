@@ -231,7 +231,20 @@
         "plugin/manolii-framework/.github/actions/validate-release-manifest/**",
         "registry/platform/framework/.github/actions/validate-release-manifest/**",
         "plugin/manolii-framework/scripts/lib/delivery_component.py",
-        "registry/platform/framework/scripts/lib/delivery_component.py"
+        "registry/platform/framework/scripts/lib/delivery_component.py",
+        ".github/workflows/release-tag.yml",
+        "tests/test_release_tag_namespaces.py",
+        "tests/test_hydrate_assessment.py",
+        "tests/test_workflow_security.py",
+        "README.md",
+        "docs/renovate-preset.md",
+        "docs/node-runtime-support.md",
+        "docs/contracts/integration-admission.md",
+        "default.json",
+        "tests/test_renovate_config.py",
+        "config/workflow-outcomes.json",
+        ".github/workflows/integration-admission-reusable.yml",
+        "scripts/tests/test_lint_workflow_outcomes.py"
       ],
       "tools": [
         "uv"
@@ -272,11 +285,22 @@
           "-m",
           "pytest",
           "-q",
-          "tests/test_delivery_component_distribution.py"
+          "tests/test_delivery_component_distribution.py",
+          "tests/test_release_tag_namespaces.py",
+          "tests/test_hydrate_assessment.py::test_pack_ref_input_exists_and_defaults_to_major_alias",
+          "tests/test_workflow_security.py::test_documented_callers_pin_pack_ref_to_the_uses_sha",
+          "tests/test_renovate_config.py",
+          "scripts/tests/test_lint_workflow_outcomes.py"
         ]
       ],
       "timeout_seconds": 180,
-      "environment": "release-contract-python"
+      "environment": "release-contract-python",
+      "ci_sources": [
+        {
+          "path": ".github/workflows/plugin-eval-gate.yml",
+          "contains": "python3 -m pytest tests/ -q"
+        }
+      ]
     },
     {
       "id": "feature-controls",

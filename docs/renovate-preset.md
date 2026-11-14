@@ -66,7 +66,7 @@ the owner case-insensitively (`Manolii-org` and `manolii-org`).
 
 **Tag namespaces.** The pack also publishes component tags
 (`email-capture-vX.Y.Z`, `feature-controls-vX.Y.Z`), legacy bare `v0.x`
-email-capture tags and the moving `v1` alias. Renovate must only ever propose
+email-capture tags and the retained legacy `v1` alias. Renovate must only ever propose
 plain `vX.Y.Z` pack releases. The `github-actions` manager's default `docker`
 versioning already treats the prefixed tags as invalid and `v1` as
 incompatible with a `vX.Y.Z` pin, and bare `v0.x` tags sort below every `v1`
