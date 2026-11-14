@@ -955,7 +955,10 @@ def invoke_agent(
     try:
         subscription_required = _subscription_required()
     except (OSError, RuntimeError, ImportError):
-        return _incomplete(agent_config, "subscription_guest_unavailable")
+        result = _incomplete(agent_config, "subscription_guest_unavailable")
+        # Missing required security coverage stays fail-closed for the Judge.
+        result["first_party"] = bool(result["first_party"] or agent_config.required_security_review)
+        return result
     if subscription_required:
         if agent_config.first_party or agent_config.required_security_review:
             # The fixed subscription route cannot satisfy a required security

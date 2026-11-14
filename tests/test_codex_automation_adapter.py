@@ -513,3 +513,42 @@ def test_governed_default_security_broad_agent_is_held_as_missing_coverage(flag,
     result = module.invoke_agent(config, "", "diff")
     assert result == {"source": "security-deep-dive", "findings": [], "first_party": True,
                       "skipped": "subscription_explicit_provider_policy_held"}
+
+
+def test_subscription_specialist_finding_is_not_stamped_first_party(mounted, monkeypatch, tmp_path):
+    """A subscription result must not force the Judge's first-party hold."""
+    module = guest_module("run-specialists.py", mounted, monkeypatch)
+    monkeypatch.delenv("SECURITY_REVIEW_MODE", raising=False)
+    monkeypatch.setattr(module, "_load_skill", lambda _: ({"model": "haiku", "data_sensitivity": "internal"}, "Trusted fixture"))
+    finding = {"file": "sample.py", "line": 1, "severity": "WARNING", "message": "fixture",
+               "fix": "Inspect `sample.py:1`."}
+    monkeypatch.setattr(adapter.transport, "invoke", lambda *a, **k: {"text": json.dumps(
+        {"source": "scope-adherence", "findings": [finding]})})
+    _, error = module._invoke_skill("scope-adherence", "+fixture", tmp_path)
+    result = json.loads((tmp_path / "scope-adherence.json").read_text())
+    assert error is None and result["findings"] and result["first_party"] is False
+
+
+@pytest.mark.parametrize("skill", ["sast-scan", "scope-adherence"])
+def test_unavailable_guest_keeps_security_coverage_fail_closed(skill, mounted, monkeypatch, tmp_path):
+    module = guest_module("run-specialists.py", mounted, monkeypatch)
+    monkeypatch.delenv("SECURITY_REVIEW_MODE", raising=False)
+    flags = {"required_security_review": True} if skill == "sast-scan" else {}
+    monkeypatch.setattr(module, "_load_skill", lambda _: ({"model": "haiku", "data_sensitivity": "internal", **flags}, "Trusted fixture"))
+    def unavailable():
+        raise OSError("guest missing")
+    monkeypatch.setattr(module, "_subscription_required", unavailable)
+    _, error = module._invoke_skill(skill, "+fixture", tmp_path)
+    result = json.loads((tmp_path / f"{skill}.json").read_text())
+    assert error and result["skipped"] == "subscription_guest_unavailable"
+    assert bool(result.get("first_party", False)) is (skill == "sast-scan")
+
+
+def test_unavailable_guest_keeps_security_broad_agent_fail_closed(mounted, monkeypatch):
+    module = guest_module("run-broad-agents.py", mounted, monkeypatch)
+    def unavailable():
+        raise OSError("guest missing")
+    monkeypatch.setattr(module, "_subscription_required", unavailable)
+    config = module.AgentConfig("security-deep-dive", "sonnet", "internal", "system", "checks", required_security_review=True)
+    result = module.invoke_agent(config, "", "diff")
+    assert result["skipped"] == "subscription_guest_unavailable" and result["first_party"] is True

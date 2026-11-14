@@ -436,7 +436,7 @@ def _invoke_skill(skill_name: str, diff: str, output_dir: pathlib.Path) -> tuple
     try:
         subscription_required = _subscription_required()
     except (OSError, RuntimeError, ImportError):
-        writer = _write_skip_marker if first_party else _write_skipped_marker
+        writer = _write_skip_marker if (security_role or first_party) else _write_skipped_marker
         writer(skill_name, output_dir, "subscription_guest_unavailable")
         return skill_name, "required subscription guest unavailable"
     if subscription_required and security_role:
@@ -445,7 +445,7 @@ def _invoke_skill(skill_name: str, diff: str, output_dir: pathlib.Path) -> tuple
         _write_skip_marker(skill_name, output_dir, "subscription_explicit_provider_policy_held")
         return skill_name, "required security role held on subscription transport"
     if subscription_required and skill_name not in _policy_module.selected_review_roles():
-        writer = _write_skip_marker if first_party else _write_skipped_marker
+        writer = _write_skip_marker if (security_role or first_party) else _write_skipped_marker
         writer(skill_name, output_dir, "subscription_role_not_selected")
         return skill_name, "required subscription role not selected"
 
@@ -573,9 +573,13 @@ def _invoke_skill(skill_name: str, diff: str, output_dir: pathlib.Path) -> tuple
                 _write_skipped_marker(skill_name, output_dir, "api_error")
             return skill_name, f"'findings' is not a list of objects: {type(data['findings'])}"
 
-        if mode != "estate-ci-v1" or not estate_requested:
+        if subscription_required:
+            # The fixed subscription route is never first-party provenance;
+            # security roles were held before transport.
+            data["first_party"] = False
+        elif mode != "estate-ci-v1" or not estate_requested:
             data["first_party"] = not proxied_preview
-        if first_party and not proxied_preview and data.get("findings"):
+        if not subscription_required and first_party and not proxied_preview and data.get("findings"):
             # Preserve actual direct provenance for the optional compatibility
             # lane. Governed/proxy output is normalized above.
             data["first_party"] = True
