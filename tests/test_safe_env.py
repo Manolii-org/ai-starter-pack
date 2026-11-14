@@ -134,9 +134,8 @@ source {self.safe_env_script}
 safe_prefix API_KEY
 """
         output, _ = self.run_bash(script)
-        self.assertIn("aaaaaa", output)
-        # Should NOT contain chars past the 6-char head
-        self.assertNotIn("bbbbbbbbbb", output)
+        # Exactly the complete six-character default head, nothing past it.
+        self.assertEqual(output, "aaaaaa")
 
     def test_safe_prefix_with_custom_length(self):
         """safe_prefix with custom N should show first N chars."""
