@@ -620,8 +620,53 @@ def git_environment(environ: dict | None = None) -> dict:
     return {key: value for key, value in source.items() if key not in locations}
 
 
+_GIT_SIDE_INPUTS_CLEAR: set = set()
+
+
+def require_git_side_inputs(root: Path) -> None:
+    """Hold before Git reads attribute or exclude files from a declared owner.
+
+    core.attributesFile, core.excludesFile and the default user attribute and
+    ignore files are read by content-bearing Git commands from outside the
+    work tree. A file under a declared owner holds; other locations keep the
+    documented unsandboxed limit. Observed once per process and environment.
+    """
+    environment = git_environment()
+    key = (root.resolve(), environment.get("HOME"), environment.get("XDG_CONFIG_HOME"))
+    if key in _GIT_SIDE_INPUTS_CLEAR:
+        return
+    paths = []
+    for name in ("core.attributesFile", "core.excludesFile"):
+        result = subprocess.run(["git", "config", "--path", "--get", name], cwd=root, env=environment,
+                                capture_output=True, timeout=GIT_TIMEOUT, check=False)
+        if result.returncode == 0 and result.stdout.strip():
+            paths.append(Path(os.fsdecode(result.stdout.strip())))
+        elif result.returncode not in (0, 1):
+            raise SourceScopeError("source-scope Git side-input metadata unavailable; content reads held")
+    if environment.get("XDG_CONFIG_HOME"):
+        base = Path(environment["XDG_CONFIG_HOME"])
+    elif environment.get("HOME"):
+        base = Path(environment["HOME"]) / ".config"
+    else:
+        base = None
+    if base is not None:
+        paths += [base / "git" / "attributes", base / "git" / "ignore"]
+    for path in paths:
+        selected = path if path.is_absolute() else root / path
+        try:
+            declared = _source_scope_roots(selected.parent)[1]
+        except FileNotFoundError:
+            continue
+        except (OSError, ValueError, RuntimeError) as error:
+            raise _source_scope_failure(error) from None
+        if declared:
+            raise SourceScopeError("source-scope Git side input lies in a declared owner; content reads held")
+    _GIT_SIDE_INPUTS_CLEAR.add(key)
+
+
 def git(root: Path, *args: str) -> bytes:
     require_source_scope(root)
+    require_git_side_inputs(root)
     if args and args[0] == "diff":
         # Evidence must describe bytes, independently of display-only drivers.
         args = (args[0], "--no-ext-diff", "--no-textconv", "--no-color", *args[1:])
@@ -694,6 +739,7 @@ def inside(root: Path, value: str) -> Path:
 def require_unfiltered_tracked_inputs(root: Path, *, text_checkout_lf: bool = False) -> set[str]:
     """Reject Git metadata that can conceal raw working-file changes."""
     require_source_scope(root)
+    require_git_side_inputs(root)
     names = subprocess.run(["git", "ls-files", "-z"], cwd=root,
                            env=git_environment(), capture_output=True, timeout=GIT_TIMEOUT, check=True).stdout
     attributes = subprocess.run(["git", "check-attr", "--all", "-z", "--stdin"],

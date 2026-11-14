@@ -2436,6 +2436,41 @@ class NestedScopeAndCommonDirectory(unittest.TestCase):
         self.assertEqual(result.returncode, 4, result.stdout + result.stderr)
         self.assertIn("SOURCE-SCOPE-HELD", result.stderr)
 
+    def test_git_side_inputs_in_a_declared_owner_hold_before_content_git(self):
+        scoped = self.other_root()
+        self.init_source(scoped)
+        (scoped / ".ai").mkdir()
+        (scoped / self.runner.SOURCE_SCOPE_POLICY).write_bytes(self.raw)
+        (scoped / "git").mkdir()
+        (scoped / "git/attributes").write_text("* filter=sentinel\n")
+        (scoped / "git/ignore").write_text("sentinel\n")
+        real = subprocess.run
+        def no_content_git(command, *args, **kwargs):
+            if command[:2] in (["git", "check-attr"], ["git", "ls-files"], ["git", "diff"]):
+                raise AssertionError("content Git ran before the side-input hold")
+            return real(command, *args, **kwargs)
+        cases = (("core.attributesFile", str(scoped / "git/attributes"), {}),
+                 ("core.excludesFile", str(scoped / "git/ignore"), {}),
+                 (None, None, {"XDG_CONFIG_HOME": str(scoped)}))
+        for key, value, environ in cases:
+            with self.subTest(key=key or "XDG default"):
+                getattr(self.runner, "_GIT_SIDE_INPUTS_CLEAR", set()).clear()
+                if key:
+                    subprocess.run(["git", "config", key, value], cwd=self.root, check=True)
+                with patch.dict(os.environ, environ), \
+                     patch.object(self.runner.subprocess, "run", side_effect=no_content_git):
+                    for reader in (lambda: self.runner.require_unfiltered_tracked_inputs(self.root),
+                                   lambda: self.runner.git(self.root, "ls-files", "--others", "--exclude-standard", "-z")):
+                        with self.assertRaises(self.runner.SourceScopeError):
+                            reader()
+                if key:
+                    subprocess.run(["git", "config", "--unset", key], cwd=self.root, check=True)
+        getattr(self.runner, "_GIT_SIDE_INPUTS_CLEAR", set()).clear()
+        outside = self.other_root() / "attributes"
+        outside.write_text("")
+        subprocess.run(["git", "config", "core.attributesFile", str(outside)], cwd=self.root, check=True)
+        self.runner.require_unfiltered_tracked_inputs(self.root)  # an undeclared location stays usable
+
     def test_link_heavy_trees_check_each_directory_once_without_per_link_git(self):
         subprocess.run(["git", "pack-refs", "--all"], cwd=self.root, check=True, capture_output=True,
                        env=self.runner.git_environment())

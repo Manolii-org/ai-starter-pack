@@ -443,8 +443,9 @@ class AgentCheckTests(unittest.TestCase):
         self.assertEqual(len(scope_reads), 1)
         resolutions = [command for command in calls if command[-1:] == ["HEAD^{commit}"]]
         self.assertEqual(len(resolutions), 2)  # before and after the one listing
-        # One names-only listing checks committed nested declarations.
-        self.assertEqual(len(calls) - len(scope_reads) - len(resolutions), 5)
+        # One names-only listing checks committed nested declarations; two
+        # git-config reads qualify attribute and exclude side inputs once.
+        self.assertEqual(len(calls) - len(scope_reads) - len(resolutions), 7)
         self.run_check()
         with mock.patch.object(runner, "plan_for", side_effect=subprocess.TimeoutExpired(["git"], 30)):
             self.assertEqual(runner.main(["--repo-root", str(self.root), "--provider", "codex"]), 2)
