@@ -1,0 +1,47 @@
+name: Source qualification receipt
+description: Record an existing native job's exact combined source and executed evidence; never authorize deployment.
+inputs:
+  role:
+    description: classify, deterministic or security; supplied by the reviewed owning job.
+    required: true
+  artifact_key:
+    description: Reviewed unique job or matrix namespace; compile the same key in owner policy.
+    default: ${{ github.job }}
+  policy_path:
+    description: Reviewed source policy read from the exact immutable PR base.
+    default: config/source-qualification.json
+  semgrep_exit:
+    description: Native Semgrep step exit output for a security job.
+    default: ''
+  bandit_exit:
+    description: Native Bandit step exit output for a security job.
+    default: ''
+outputs:
+  file:
+    description: Owner-local qualification artifact file.
+    value: ${{ steps.receipt.outputs.file }}
+runs:
+  using: composite
+  steps:
+    - name: Capture native source and complete scanner scope
+      id: receipt
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        POLICY_PATH: ${{ inputs.policy_path }}
+        ARTIFACT_KEY: ${{ inputs.artifact_key }}
+        RECEIPT_ROLE: ${{ inputs.role }}
+        SEMGREP_EXIT: ${{ inputs.semgrep_exit }}
+        BANDIT_EXIT: ${{ inputs.bandit_exit }}
+      run: |
+        set -euo pipefail
+        output="$RUNNER_TEMP/source-qualification-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$GITHUB_JOB-$ARTIFACT_KEY/source-qualification.json"
+        python3 "$GITHUB_ACTION_PATH/../../../scripts/ci/source_qualification.py" receipt --policy-path "$POLICY_PATH" --role "$RECEIPT_ROLE" --artifact-key "$ARTIFACT_KEY" --output "$output"
+        echo "file=$output" >> "$GITHUB_OUTPUT"
+    - name: Retain owner-local native qualification
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      with:
+        name: source-qualification-${{ inputs.artifact_key }}-${{ github.run_attempt }}
+        path: ${{ steps.receipt.outputs.file }}
+        if-no-files-found: error
+        retention-days: 7

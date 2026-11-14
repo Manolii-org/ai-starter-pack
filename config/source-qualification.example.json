@@ -1,0 +1,80 @@
+{
+  "schema_version": 1,
+  "model_assessment": "optional",
+  "required_checks": [
+    {
+      "name": "Synthetic classify",
+      "app_id": 10101,
+      "workflow_path": ".github/workflows/owning-checks.yml",
+      "workflow_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "job_key": "classify",
+      "role": "classify",
+      "steps": [
+        "Execute classify"
+      ],
+      "artifact_key": "classify"
+    },
+    {
+      "name": "Synthetic deterministic",
+      "app_id": 10101,
+      "workflow_path": ".github/workflows/owning-checks.yml",
+      "workflow_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "job_key": "deterministic",
+      "role": "deterministic",
+      "steps": [
+        "Execute deterministic"
+      ],
+      "artifact_key": "deterministic"
+    },
+    {
+      "name": "Synthetic security",
+      "app_id": 10101,
+      "workflow_path": ".github/workflows/owning-checks.yml",
+      "workflow_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "job_key": "security",
+      "role": "security",
+      "steps": [
+        "Execute security"
+      ],
+      "artifact_key": "security"
+    }
+  ],
+  "optional_model_checks": [
+    {
+      "name": "Synthetic optional model",
+      "app_id": 10101,
+      "workflow_path": ".github/workflows/owning-checks.yml",
+      "workflow_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "job_key": "optional_model",
+      "role": "model",
+      "steps": [
+        "Execute classify"
+      ],
+      "artifact_key": "optional_model"
+    }
+  ],
+  "review_publishers": [
+    {
+      "login": "coderabbitai[bot]",
+      "user_id": 1001
+    },
+    {
+      "login": "chatgpt-codex-connector[bot]",
+      "user_id": 1002
+    }
+  ],
+  "security_scope": {
+    "semgrep": {
+      "include": [
+        "*.py"
+      ],
+      "exclude": []
+    },
+    "bandit": {
+      "include": [
+        "*.py"
+      ],
+      "exclude": []
+    }
+  }
+}

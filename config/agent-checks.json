@@ -539,6 +539,97 @@
       ]
     },
     {
+      "id": "source-qualification-contract",
+      "paths": [
+        "scripts/ci/source_qualification.py",
+        "tests/test_source_qualification.py",
+        ".github/actions/source-qualification-receipt/**",
+        ".github/workflows/source-qualification-reusable.yml",
+        "schemas/source-qualification.schema.json",
+        "config/source-qualification.example.json",
+        "docs/contracts/source-qualification.md",
+        "scripts/ci/review_evidence.py",
+        "scripts/tests/test_review_evidence.py",
+        "config/agent-checks.json",
+        "scripts/ci/source_qualification_transport.py",
+        ".github/workflows/source-qualification-producer-proof.yml",
+        "config/source-qualification-producer.json",
+        "config/agent-checks.json.jinja",
+        "tests/test_copier_render.py",
+        "README-STARTER-PACK.md.jinja",
+        ".github/workflows/REUSABLE-WORKFLOWS.md",
+        ".github/workflows/*-reusable.yml",
+        "scripts/gen-reusable-matrix.py",
+        "tests/test_reusable_matrix.py"
+      ],
+      "tools": [
+        "uv"
+      ],
+      "environment": "release-contract-python",
+      "commands": [
+        [
+          ".ai/agent-checks/release-venv/bin/python",
+          "-B",
+          "-m",
+          "pytest",
+          "-q",
+          "tests/test_source_qualification.py",
+          "scripts/tests/test_review_evidence.py"
+        ],
+        [
+          ".ai/agent-checks/release-venv/bin/python",
+          "scripts/gen-reusable-matrix.py",
+          "--check"
+        ],
+        [
+          ".ai/agent-checks/release-venv/bin/python",
+          "-B",
+          "-m",
+          "pytest",
+          "-q",
+          "tests/test_reusable_matrix.py::test_matrix_is_generated_and_current",
+          "tests/test_reusable_matrix.py::test_every_reusable_has_a_row"
+        ]
+      ],
+      "timeout_seconds": 120,
+      "ci_sources": [
+        {
+          "path": ".github/workflows/plugin-eval-gate.yml",
+          "contains": "python3 -m pytest tests/ -q"
+        }
+      ]
+    },
+    {
+      "id": "native-owner-recipe-contract",
+      "paths": [
+        "scripts/ci/native_owner_recipe.py",
+        ".github/workflows/native-owner-recipe.yml",
+        "tests/test_native_owner_recipe.py",
+        "docs/native-owner-recipe.md",
+        "scripts/agent-check.py",
+        "config/agent-checks.json"
+      ],
+      "tools": [
+        "uv"
+      ],
+      "environment": "release-contract-python",
+      "timeout_seconds": 120,
+      "commands": [
+        [
+          ".ai/agent-checks/release-venv/bin/python",
+          "-B",
+          "-m",
+          "unittest",
+          "discover",
+          "-s",
+          "tests",
+          "-p",
+          "test_native_owner_recipe.py",
+          "-v"
+        ]
+      ]
+    },
+    {
       "id": "installer-layout-contract",
       "paths": [
         "scripts/install-agent-validation.py",
