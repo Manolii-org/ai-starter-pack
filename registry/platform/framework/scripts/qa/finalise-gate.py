@@ -438,6 +438,9 @@ def require_evidence_route(root: Path, path: Path) -> None:
         while not existing.exists() and existing != real_root:
             existing = existing.parent
         require_source_scope(existing if existing.is_dir() else existing.parent)
+    # A hard link carries another owner's bytes under this name.
+    if resolved.is_file() and resolved.stat().st_nlink != 1:
+        raise SourceScopeHeld("FINALISE-GATE SOURCE-SCOPE-HELD: no qualified content projection; no hand-off authority.")
 
 
 def require_source_scope(root: Path) -> None:
@@ -767,6 +770,14 @@ def run_checks(root: Path, provider: str, timeout: int) -> dict:
                 "summary": "no qualified content projection; full validation held"}
     receipt = {}
     receipt_path = state / "receipt.json"
+    try:
+        # Each leaf the gate reads is re-qualified after the runner's commands
+        # ran: a leaf link or hard link must not route a read to another owner.
+        for evidence in (receipt_path, log_path, root / "config" / "agent-checks.json"):
+            require_evidence_route(root, evidence)
+    except SourceScopeHeld:
+        return {"duration_ms": duration_ms, "outcome": "source-scope-held",
+                "summary": "evidence route leaves this owner; held"}
     if receipt_path.is_file():
         try:
             receipt = json.loads(receipt_path.read_text(encoding="utf-8"))

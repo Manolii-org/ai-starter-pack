@@ -2334,6 +2334,37 @@ class NestedScopeAndCommonDirectory(unittest.TestCase):
         config.write_bytes(original.replace(b"[core]\n", b"[core]\n\tworktreeConfig = false\n", 1))
         self.assertFalse(self.runner.source_scope_declared(self.root))  # other keys stay compatible
 
+    def test_gate_evidence_leaf_links_hold_before_reads_after_the_runner(self):
+        scoped = self.other_root()
+        self.init_source(scoped)
+        (scoped / ".ai").mkdir()
+        (scoped / self.runner.SOURCE_SCOPE_POLICY).write_bytes(self.raw)
+        (scoped / "receipt.json").write_text(json.dumps({"digest": "external-digest-x", "results": []}))
+        state = self.root / ".ai/agent-checks"
+        (self.root / "scripts").mkdir(exist_ok=True)
+        (self.root / "scripts/agent-check.py").write_text("")
+        for leaf, form in (("receipt.json", "symlink"), ("receipt.json", "hardlink"),
+                           ("finalise-gate.log", "symlink")):
+            with self.subTest(leaf=leaf, form=form):
+                def runner_links_leaf(*args, **kwargs):
+                    target = state / leaf
+                    if target.exists() or target.is_symlink():
+                        target.unlink()
+                    if form == "symlink":
+                        target.symlink_to(scoped / "receipt.json")
+                    else:
+                        os.link(scoped / "receipt.json", target)
+                    process = unittest.mock.Mock()
+                    process.wait.return_value = 2
+                    return process
+                with patch.object(self.finalise.subprocess, "Popen", side_effect=runner_links_leaf), \
+                     patch.object(self.finalise, "source_scope_declared", return_value=False), \
+                     patch.object(Path, "read_text", side_effect=AssertionError("external evidence read")):
+                    result = self.finalise.run_checks(self.root, "codex", 10)
+                self.assertEqual(result["outcome"], "source-scope-held")
+                self.assertNotIn("external-digest", json.dumps(result))
+                (state / leaf).unlink()
+
     def test_link_heavy_trees_check_each_directory_once_without_per_link_git(self):
         subprocess.run(["git", "pack-refs", "--all"], cwd=self.root, check=True, capture_output=True,
                        env=self.runner.git_environment())
