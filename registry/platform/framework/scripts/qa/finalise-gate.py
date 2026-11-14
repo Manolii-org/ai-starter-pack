@@ -245,6 +245,10 @@ def _source_scope_git_controls(root: Path) -> None:
     if stat.S_ISDIR(marker.lstat().st_mode):
         gitdir = marker
         common = gitdir
+        # Git honours a commondir file here and would read refs, objects and
+        # config elsewhere; that routing is not modeled, so it holds.
+        if _source_scope_exists(gitdir / "commondir"):
+            raise ValueError("Git common-directory routing requires a qualified adapter")
     else:
         raw = _source_scope_control_bytes(marker)
         if raw is None or not raw.startswith(b"gitdir: ") or len(raw.splitlines()) != 1:

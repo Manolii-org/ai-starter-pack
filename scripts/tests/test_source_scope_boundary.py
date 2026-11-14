@@ -2007,3 +2007,84 @@ class ScopeControlCompatibility(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NestedScopeAndCommonDirectory(unittest.TestCase):
+    """Review regressions: nested owners in ready trees and finalise commondir."""
+
+    setUp = SourceScopeBoundary.setUp
+    other_root = ScopeControlCompatibility.other_root
+    init_source = ScopeControlCompatibility.init_source
+
+    def scoped_owner(self, owner):
+        self.init_source(owner)
+        (owner / ".ai").mkdir()
+        (owner / self.runner.SOURCE_SCOPE_POLICY).write_bytes(self.raw)
+        (owner / "opaque.bin").write_bytes(b"synthetic nested opaque payload\n")
+
+    def guarded_open(self, forbidden):
+        # Patching os.open would remove dir_fd support and short-circuit the
+        # walk; guard the payload read itself through the descriptor's name.
+        original = os.read
+        def no_payload(descriptor, *args, **kwargs):
+            if os.readlink(f"/proc/self/fd/{descriptor}").endswith("/" + forbidden):
+                raise AssertionError("nested scoped payload read")
+            return original(descriptor, *args, **kwargs)
+        return patch.object(self.runner.os, "read", side_effect=no_payload)
+
+    def test_nested_scoped_checkout_in_ready_tree_holds_before_payload_read(self):
+        self.scoped_owner(self.root / "deps/owned")
+        with self.assertRaises(self.runner.SourceScopeError):
+            self.runner.require_content_path_scope(self.root / "deps/owned/opaque.bin")
+        with self.guarded_open("opaque.bin"):
+            with self.assertRaises(self.runner.SourceScopeError):
+                self.runner.ready_identity(self.root, {"ready_paths": ["deps"]})
+
+    def test_ready_root_inside_a_nested_scoped_owner_holds(self):
+        self.scoped_owner(self.root / "vendor")
+        (self.root / "vendor/lib").mkdir()
+        (self.root / "vendor/lib/opaque.bin").write_bytes(b"synthetic payload\n")
+        with self.guarded_open("opaque.bin"):
+            with self.assertRaises(self.runner.SourceScopeError):
+                self.runner.ready_identity(self.root, {"ready_paths": ["vendor/lib"]})
+
+    def test_link_into_a_scoped_owner_outside_the_walked_tree_holds(self):
+        self.scoped_owner(self.root / "scoped")
+        (self.root / "scoped/inner").mkdir()
+        (self.root / "scoped/inner/opaque.bin").write_bytes(b"synthetic payload\n")
+        (self.root / "deps").mkdir()
+        (self.root / "deps/link").symlink_to(Path("../scoped/inner"), target_is_directory=True)
+        with self.guarded_open("opaque.bin"):
+            with self.assertRaises(self.runner.SourceScopeError):
+                self.runner.ready_identity(self.root, {"ready_paths": ["deps"]})
+
+    def test_unscoped_nested_trees_and_plain_nested_git_keep_a_usable_identity(self):
+        (self.root / "deps/plain/sub").mkdir(parents=True)
+        (self.root / "deps/plain/sub/file.txt").write_text("synthetic\n")
+        self.init_source(self.root / "deps/repo")  # nested Git without a declaration
+        first = self.runner.ready_identity(self.root, {"ready_paths": ["deps"]})
+        self.assertIsNotNone(first)
+        self.assertEqual(first, self.runner.ready_identity(self.root, {"ready_paths": ["deps"]}))
+        (self.root / "deps/plain/sub/file.txt").write_text("changed\n")
+        self.assertNotEqual(first, self.runner.ready_identity(self.root, {"ready_paths": ["deps"]}))
+
+    def test_finalise_commondir_in_a_plain_git_directory_holds_before_native_git(self):
+        other = self.other_root()
+        self.init_source(other)
+        include = self.other_root() / "external.config"
+        include.write_text("[core]\n\tsynthetic = true\n")
+        common = self.other_root() / "common.git"
+        common.mkdir()
+        (common / "config").write_text("[include]\n\tpath = " + str(include) + "\n")
+        (other / ".git/commondir").write_text(str(common) + "\n")
+        original = os.open
+        def no_external(path, *args, **kwargs):
+            if Path(os.fspath(path)).is_absolute() and Path(os.fspath(path)).is_relative_to(include.parent):
+                raise AssertionError("external common config read")
+            return original(path, *args, **kwargs)
+        with patch.object(self.finalise.subprocess, "run", side_effect=AssertionError("native Git before hold")), \
+             patch.object(self.finalise.os, "open", side_effect=no_external):
+            self.assertTrue(self.finalise.source_scope_declared(other))
+            with self.assertRaises(self.runner.SourceScopeError) as held:
+                self.runner.require_source_scope(other)
+        self.assertIn("Git common-directory routing requires a qualified adapter", str(held.exception))
