@@ -2261,6 +2261,17 @@ class NestedScopeAndCommonDirectory(unittest.TestCase):
             with self.assertRaises(self.runner.SourceScopeError):
                 self.runner.ready_identity(self.root, {"ready_paths": ["node_modules"]})
 
+    def test_recipe_command_after_one_that_creates_an_owner_is_never_launched(self):
+        package = self.root / "node_modules/pkg"
+        marker = self.other_root() / "second-ran"
+        install = ("import pathlib,sys; p=pathlib.Path(sys.argv[1]); (p/'.ai').mkdir(parents=True); "
+                   "(p/'.ai/source-scope-policy.json').write_text('{}')")
+        second = [sys.executable, "-c", f"open({str(marker)!r}, 'w').close()"]
+        with self.assertRaises(self.runner.SourceScopeError):
+            self.runner.execute(self.root, {"id": "install", "commands": [
+                [sys.executable, "-c", install, str(package)], second]})
+        self.assertFalse(marker.exists())
+
     def test_link_heavy_trees_check_each_directory_once_without_per_link_git(self):
         subprocess.run(["git", "pack-refs", "--all"], cwd=self.root, check=True, capture_output=True,
                        env=self.runner.git_environment())

@@ -1008,9 +1008,10 @@ def _execute(root: Path, item: dict, inherited: dict | None) -> dict:
     status, reason = "passed", "completed"
     env = execution_environment(item, inherited)
     for command in item["commands"]:
-        # Commands may create nested owners (dependency installs): later scope
-        # checks in this process observe the working tree afresh.
+        # Commands may create nested owners (dependency installs): observe the
+        # working tree afresh and hold before launching the next command.
         _SOURCE_SCOPE_UNDECLARED_WORKTREES.clear()
+        require_source_scope(root)
         print(f"AGENT-CHECK {item['id']}: {json.dumps(command)}", flush=True)
         try:
             proc = subprocess.run(command, cwd=inside(root, item.get("cwd", ".")), env=env,
