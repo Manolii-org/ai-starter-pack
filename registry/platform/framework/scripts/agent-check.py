@@ -53,6 +53,7 @@ _SOURCE_SCOPE_METADATA_REASONS = frozenset({
     "Git object alternates require a qualified metadata adapter",
     "source-scope ownership ancestry is ambiguous", "source-scope ownership ancestry bound exceeded",
     "Git common-directory routing requires a qualified adapter",
+    "Git work-tree redirection requires a qualified adapter",
 })
 
 
@@ -296,6 +297,9 @@ def _source_scope_git_controls(root: Path) -> tuple | None:
         raw = _source_scope_control_bytes(path, optional=True)
         if raw is not None and re.search(rb"\[\s*include", raw, re.IGNORECASE):
             raise ValueError("Git config includes require a qualified metadata adapter")
+        # core.worktree moves Git's content operations to another tree.
+        if raw is not None and re.search(rb"^\s*worktree\s*(=|$)", raw, re.IGNORECASE | re.MULTILINE):
+            raise ValueError("Git work-tree redirection requires a qualified adapter")
         configs.append(raw)
     # Native Git must not follow alternate-object routing from this probe.
     if _source_scope_exists(common / "objects/info/alternates"):

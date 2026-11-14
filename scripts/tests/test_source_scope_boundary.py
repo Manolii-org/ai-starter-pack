@@ -2316,6 +2316,24 @@ class NestedScopeAndCommonDirectory(unittest.TestCase):
                     self.finalise.record(self.root, {"probe": True})
                 self.assertEqual(sorted(path.name for path in target.iterdir()), before)
 
+    def test_core_worktree_redirection_holds_before_content_git(self):
+        external = self.other_root()
+        self.init_source(external)
+        (external / ".ai").mkdir()
+        (external / self.runner.SOURCE_SCOPE_POLICY).write_bytes(self.raw)
+        config = self.root / ".git/config"
+        original = config.read_bytes()
+        for form in (b"\tworktree = " + str(external).encode() + b"\n", b"\tWorkTree=" + str(external).encode() + b"\n"):
+            with self.subTest(form=form):
+                config.write_bytes(original.replace(b"[core]\n", b"[core]\n" + form, 1))
+                self.runner._SOURCE_SCOPE_UNDECLARED_TREES.clear()
+                with self.assertRaises(self.runner.SourceScopeError) as held:
+                    self.runner.git(self.root, "diff", "--binary", "HEAD")
+                self.assertIn("work-tree redirection", str(held.exception))
+                self.assertTrue(self.finalise.source_scope_declared(self.root))
+        config.write_bytes(original.replace(b"[core]\n", b"[core]\n\tworktreeConfig = false\n", 1))
+        self.assertFalse(self.runner.source_scope_declared(self.root))  # other keys stay compatible
+
     def test_link_heavy_trees_check_each_directory_once_without_per_link_git(self):
         subprocess.run(["git", "pack-refs", "--all"], cwd=self.root, check=True, capture_output=True,
                        env=self.runner.git_environment())
