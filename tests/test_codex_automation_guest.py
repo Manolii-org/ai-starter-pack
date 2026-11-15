@@ -1,5 +1,6 @@
 """Guest assessment/judge passes: orchestration, holds and captured publication."""
 
+import importlib.util
 import json
 import os
 import subprocess
@@ -285,3 +286,52 @@ def test_undecodable_pr_metadata_holds_with_its_own_reason(sandbox, monkeypatch,
     monkeypatch.setattr(guest, "PR_META", meta)
     with pytest.raises(guest.GuestHold, match="pr_metadata_invalid"):
         guest._pr_meta()
+
+
+def _workflow_repo(tmp_path, files_base, files_head):
+    src = tmp_path / "wf-src"
+    src.mkdir()
+    def git(*args):
+        return subprocess.check_output(["git", "-C", str(src), *args], stderr=subprocess.DEVNULL).decode().strip()
+    git("init", "-q")
+    git("config", "user.email", "offline@example.invalid")
+    git("config", "user.name", "Offline fixture")
+    for files in (files_base, files_head):
+        for name, text in files.items():
+            (src / name).parent.mkdir(parents=True, exist_ok=True)
+            (src / name).write_text(text)
+        git("add", ".")
+        git("commit", "-qm", "c")
+    base, head = git("rev-parse", "HEAD~1"), git("rev-parse", "HEAD")
+    bare = tmp_path / "wf.git"
+    subprocess.check_call(["git", "clone", "-q", "--bare", str(src), str(bare)])
+    return bare, base, head
+
+
+DEPLOY = "jobs:\n  deploy:\n    timeout-minutes: {t}\n    steps:\n      - run: flyctl deploy --remote-only\n"
+
+
+def test_timeout_only_workflow_change_keeps_the_deployment_review_floor(sandbox, monkeypatch, tmp_path):
+    """Codex review P2 (#347): the classifier's deployment floor reads complete
+    workflow files from its cwd; the guest workspace must hold the admitted
+    head's changed workflows or a timeout-only edit drops systems-consistency."""
+    bare, base, head = _workflow_repo(tmp_path, {".github/workflows/deploy.yml": DEPLOY.format(t=10)},
+                                      {".github/workflows/deploy.yml": DEPLOY.format(t=20)})
+    monkeypatch.setattr(guest, "REPO", bare)
+    work = tmp_path / "work"
+    work.mkdir()
+    guest._workflow_heads({"base_sha": base, "head_sha": head}, work)
+    assert (work / ".github/workflows/deploy.yml").read_text() == DEPLOY.format(t=20)
+    spec = importlib.util.spec_from_file_location("_cls", Path(guest.ROOT) / "scripts/run-pr-classifier.py")
+    cls = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(cls)
+    sections = {".github/workflows/deploy.yml": ["-    timeout-minutes: 10\n+    timeout-minutes: 20\n"]}
+    assert cls._deploying_workflows(sections, work) == [".github/workflows/deploy.yml"]
+    assert cls._deploying_workflows(sections, tmp_path / "empty") == []
+
+
+def test_workflow_copies_are_bounded(sandbox, monkeypatch, tmp_path):
+    bare, base, head = _workflow_repo(tmp_path, {"a.txt": "a"}, {".github/workflows/big.yml": "x" * 300000})
+    monkeypatch.setattr(guest, "REPO", bare)
+    with pytest.raises(guest.GuestHold, match="candidate_workflow_over_budget"):
+        guest._workflow_heads({"base_sha": base, "head_sha": head}, tmp_path)

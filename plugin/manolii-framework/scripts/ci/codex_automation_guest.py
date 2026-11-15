@@ -22,6 +22,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -123,6 +124,45 @@ def _diff(value, work):
     return path
 
 
+WORKFLOW_PATH = re.compile(r"(?:^|/)\.github/workflows/[^/]+\.ya?ml$")
+MAX_WORKFLOW_BYTES = 256 * 1024
+MAX_WORKFLOW_TOTAL = 2 * 1024 * 1024
+
+
+def _workflow_heads(value, work):
+    """Copy changed workflow files at the admitted head into the workspace.
+
+    The classifier's deterministic deployment floor reads complete workflow
+    files relative to its cwd; without them it sees only changed lines and can
+    drop the required systems-consistency review. These bytes are data for
+    that reader only: never executed, bounded, and confined to the workspace.
+    """
+    result = subprocess.run(
+        ["git", "--no-pager", "--no-replace-objects", "-C", str(REPO), "-c", "core.quotePath=false",
+         "diff", "--name-only", "-z", "--no-renames", "--diff-filter=AM",
+         value["base_sha"] + "..." + value["head_sha"]],
+        capture_output=True, timeout=60, check=False,
+        env={"PATH": "/usr/bin:/bin", "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
+             "GIT_TERMINAL_PROMPT": "0"})
+    if result.returncode:
+        raise GuestHold("candidate_diff_unavailable")
+    total = 0
+    for raw in result.stdout.split(b"\0"):
+        path = raw.decode("utf-8", "replace")
+        if not path or not WORKFLOW_PATH.search(path):
+            continue
+        parts = Path(path).parts
+        if Path(path).is_absolute() or ".." in parts or parts[0] in (".claude", ".ai") or "\ufffd" in path:
+            raise GuestHold("candidate_workflow_path_invalid")
+        content = _show(value, path)
+        if len(content) > MAX_WORKFLOW_BYTES or total + len(content) > MAX_WORKFLOW_TOTAL:
+            raise GuestHold("candidate_workflow_over_budget")
+        total += len(content)
+        target = work / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(content)
+
+
 def _remaining():
     """Stages share one total budget bounded by the host's guest deadline."""
     remaining = DEADLINE - time.monotonic()
@@ -155,6 +195,7 @@ def _candidates(directory):
 def assessment(value):
     work = _workspace()
     diff = _diff(value, work)
+    _workflow_heads(value, work)
     manifest = work / "classifier-output.json"
     candidates = work / ".ai/candidates"
     meta = _pr_meta()
