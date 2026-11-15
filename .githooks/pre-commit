@@ -12,6 +12,19 @@ set -euo pipefail
 
 STAGED=$(git diff --cached --name-only 2>/dev/null || true)
 
+# Staged secret scan: local, zero CI cost. Runs only when gitleaks is
+# installed; CI secret scanning remains the gate. Reads .gitleaks.toml when
+# present. Skip once with SKIP_GITLEAKS=1 (for example a known false positive
+# already recorded in .gitleaksignore).
+if [ -n "$STAGED" ] && [ "${SKIP_GITLEAKS:-0}" != "1" ] && command -v gitleaks >/dev/null 2>&1; then
+    echo "[pre-commit] Scanning staged changes for secrets (gitleaks)..."
+    if gitleaks git --help >/dev/null 2>&1; then
+        gitleaks git --pre-commit --staged --redact --no-banner
+    else
+        gitleaks protect --staged --redact --no-banner
+    fi
+fi
+
 if echo "$STAGED" | grep -qE '(\.claude/agents/.*\.md|\.claude/model-routing\.json)'; then
     echo "[pre-commit] Linting agent routing safety rules..."
     python3 "$(git rev-parse --show-toplevel)/scripts/lint-agent-routing.py"

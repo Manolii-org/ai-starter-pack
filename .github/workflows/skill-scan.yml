@@ -1,0 +1,76 @@
+name: Skill Scan
+# Pack-only (excluded from Copier renders). Scans the skills, agents and plugin
+# content this pack distributes, once, at the source — consumers do not need to
+# rescan what they receive (security-assurance plan, S7). Static mode only
+# (--no-llm): no model spend. This repository is public, so these minutes are
+# free. Not a required check, so a workflow-level paths filter is acceptable.
+
+on:
+  pull_request:
+    paths:
+      - 'plugin/**'
+      - 'registry/**'
+      - '.claude/skills/**'
+      - '.claude/agents/**'
+      - '.github/workflows/skill-scan.yml'
+      - 'scripts/skill-scan-gate.py'
+  push:
+    branches: [main]
+    paths:
+      - 'plugin/**'
+      - 'registry/**'
+      - '.claude/skills/**'
+      - '.claude/agents/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: skill-scan-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # NVIDIA/SkillSpector v2.9.4 (2026-08-12). Bump the commit and the version
+  # comment together after reviewing the upstream changelog.
+  SKILLSPECTOR_REF: 2d198ab910add401cad658d1087e7c7ba24fd640 # v2.9.4
+
+jobs:
+  scan:
+    name: SkillSpector (static)
+    runs-on: ubuntu-slim
+    timeout-minutes: 14
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
+        with:
+          python-version: '3.12'
+      - name: Install SkillSpector (pinned commit)
+        run: python3 -m pip install --quiet --disable-pip-version-check "git+https://github.com/NVIDIA/SkillSpector@${SKILLSPECTOR_REF}"
+      - name: Scan distributed skills and agents
+        run: |
+          set -euo pipefail
+          status=0
+          for dir in plugin/manolii-framework/skills .claude/skills plugin/manolii-framework/agents .claude/agents; do
+            [ -d "$dir" ] || continue
+            out="$RUNNER_TEMP/skill-scan-$(echo "$dir" | tr '/.' '__').json"
+            # SkillSpector writes the report, then exits 1 when the risk score
+            # exceeds its threshold and 2 when the scan is incomplete. Evaluate
+            # the report on 0/1; treat 2+ or a missing report as a scanner error.
+            set +e
+            skillspector scan "$dir" --recursive --no-llm --format json --output "$out" >/dev/null
+            rc=$?
+            set -e
+            if [ "$rc" -ge 2 ] || [ ! -s "$out" ]; then
+              echo "::error::SkillSpector scan of $dir failed (exit $rc)"
+              status=2
+              continue
+            fi
+            echo "### SkillSpector: \`$dir\`" >> "$GITHUB_STEP_SUMMARY"
+            if ! python3 scripts/skill-scan-gate.py "$out" --fail-on HIGH | tee -a "$GITHUB_STEP_SUMMARY"; then
+              [ "$status" -eq 2 ] || status=1
+            fi
+          done
+          exit "$status"
