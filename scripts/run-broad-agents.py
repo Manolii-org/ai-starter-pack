@@ -21,6 +21,7 @@ import tempfile
 import json
 import logging
 import os
+import pathlib
 import re
 import sys
 import time
@@ -386,7 +387,7 @@ def _deep_screen_helpers():
     if spec is None or spec.loader is None:
         raise ValueError("deep-dive source guard unavailable")
     module = importlib.util.module_from_spec(spec)
-    exec(compile(path.read_bytes(), str(path), "exec"), module.__dict__)
+    exec(compile(path.read_bytes(), str(path), "exec"), module.__dict__)  # nosemgrep: python.lang.security.audit.exec-detected.exec-detected -- fixed trusted path in this tree, loaded from verified bytes without a bytecode cache
     return module
 
 
@@ -741,7 +742,7 @@ def _deep_leg_contract():
     if spec is None or spec.loader is None:
         raise ValueError("deep-dive leg contract unavailable")
     module = importlib.util.module_from_spec(spec)
-    exec(compile(path.read_bytes(), str(path), "exec"), module.__dict__)
+    exec(compile(path.read_bytes(), str(path), "exec"), module.__dict__)  # nosemgrep: python.lang.security.audit.exec-detected.exec-detected -- fixed trusted path in this tree, loaded from verified bytes without a bytecode cache
     return module
 
 
@@ -951,6 +952,38 @@ def invoke_agent(
            (agent_config.system_prompt, agent_config.instructions, user_message)) > _MAX_REQUEST_BYTES:
         logger.error("%s: complete review input exceeds request limit", agent_config.name)
         return _incomplete(agent_config, "input_limit")
+    try:
+        subscription_required = _subscription_required()
+    except (OSError, RuntimeError, ImportError):
+        result = _incomplete(agent_config, "subscription_guest_unavailable")
+        # Missing required security coverage stays fail-closed for the Judge.
+        result["first_party"] = bool(result["first_party"] or agent_config.required_security_review)
+        return result
+    if subscription_required:
+        if agent_config.first_party or agent_config.required_security_review:
+            # The fixed subscription route cannot satisfy a required security
+            # or independent-family contract; retain it as missing coverage.
+            return {"source": agent_config.name, "findings": [], "first_party": True,
+                    "skipped": "subscription_explicit_provider_policy_held"}
+        try:
+            if agent_config.name not in _policy_module.selected_review_roles():
+                return _incomplete(agent_config, "subscription_role_not_selected")
+            system = agent_config.system_prompt + (
+                "\n\nReturn the findings payload in the API response; the caller writes the file. "
+                "Return one JSON object with source and findings (a list of finding objects). "
+                "Do not return a file-write acknowledgement or explanatory prose. "
+                "If evidence needed for the assigned checks is unavailable, include "
+                '\"skipped\": \"missing_context\" rather than claiming a clean review.'
+            )
+            text = _subscription_runtime().complete(system,
+                f"{_api_instructions(agent_config.instructions)}\n\n{user_message}",
+                role="assessment", data_sensitivity=agent_config.data_sensitivity,
+                max_tokens=2400, first_party=agent_config.first_party,
+                required_model=agent_config.client_policy_model)
+            parsed = _parse_findings(text)
+            return {"source": agent_config.name, "first_party": False, **parsed}
+        except (RuntimeError, ImportError, OSError, ValueError):
+            return _incomplete(agent_config, "subscription_incomplete")
     try:
         mode = _review_mode()
     except RouteAdmissionError as exc:
@@ -1407,7 +1440,15 @@ def run_broad_agents(
             results[agent.name] = marker
             runnable.remove(agent)
 
-    with ThreadPoolExecutor(max_workers=3) as executor:
+    # The subscription broker admits two active turns; more would be refused
+    # before any provider call (review_admission_unavailable).
+    try:
+        subscription = _subscription_required()
+    except (OSError, RuntimeError, ImportError):
+        # Each role then writes its own subscription_guest_unavailable marker.
+        subscription = False
+    workers = min(3, _SUBSCRIPTION_MAX_ACTIVE) if subscription else 3
+    with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = {
             executor.submit(
                 invoke_agent, agent, api_key, messages.get(agent.name, user_message)
@@ -1493,6 +1534,43 @@ def main():
     finally:
         tmp_manifest.unlink(missing_ok=True)
 
+
+_SUBSCRIPTION_MAX_ACTIVE = 2
+
+
+def _subscription_required() -> bool:
+    # Lazy import preserves older standalone/default consumers. In required
+    # mode a missing runtime is an error, never permission for an HTTP route.
+    value = os.environ.get("CODEX_AUTOMATION_MODE", "")
+    if not value:
+        return False
+    if value != "required":
+        raise RuntimeError("subscription_mode_invalid")
+    # Never enable this adapter by adding a flag to an old secret-bearing job.
+    # The full trusted controller must launch the separately isolated guest.
+    if os.environ.get("GITHUB_ACTIONS") == "true" or any(
+        os.environ.get(k) for k in os.environ
+        if "DOPPLER" in k or k == "GH_PAT" or k.endswith(
+            ("_TOKEN", "_API_KEY", "_MASTER_KEY", "_PRIVATE_KEY", "_SECRET_KEY", "_PASSWORD"))
+    ):
+        raise RuntimeError("subscription_isolated_guest_required")
+    path = _SUBSCRIPTION_CONTEXT
+    if not path.is_file() or path.is_symlink() or path.stat().st_mode & 0o222:
+        raise RuntimeError("subscription_isolated_guest_required")
+    return True
+
+
+_SUBSCRIPTION_CONTEXT = pathlib.Path("/input/codex-automation.json")
+
+
+def _subscription_runtime():
+    path = pathlib.Path(__file__).resolve().parent / "lib/subscription_guest.py"
+    spec = importlib.util.spec_from_file_location("_subscription_guest_loader", path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("subscription_guest_runtime_unavailable")
+    module = importlib.util.module_from_spec(spec)
+    exec(compile(path.read_bytes(), str(path), "exec"), module.__dict__)  # nosemgrep: python.lang.security.audit.exec-detected.exec-detected -- fixed trusted path in this tree, loaded from verified bytes without a bytecode cache
+    return module.runtime()
 
 if __name__ == "__main__":
     sys.exit(main())

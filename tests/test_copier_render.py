@@ -275,22 +275,22 @@ def test_cost_profile_lean_omits_measured_waste_callers(default_render):
     ("flags", "expected"),
     [
         ({}, {"Hooks": 5, "Commands": 51, "Skills": 41, "Agents": 27,
-              "Scripts": 63, "Husky": 3, "CI": 42, "Docs": 42}),
+              "Scripts": 63, "Husky": 3, "CI": 44, "Docs": 43}),
         ({flag: "true" for flag in FEATURE_FLAGS},
          {"Hooks": 5, "Commands": 54, "Skills": 45, "Agents": 28,
-              "Scripts": 63, "Husky": 3, "CI": 42, "Docs": 44}),
+              "Scripts": 63, "Husky": 3, "CI": 44, "Docs": 45}),
         ({"cost_profile": "lean"},
          {"Hooks": 5, "Commands": 51, "Skills": 41, "Agents": 27,
-              "Scripts": 63, "Husky": 3, "CI": 41, "Docs": 42}),
+              "Scripts": 63, "Husky": 3, "CI": 43, "Docs": 43}),
         ({"codex_review": "false"},
          {"Hooks": 5, "Commands": 51, "Skills": 41, "Agents": 27,
-              "Scripts": 63, "Husky": 3, "CI": 38, "Docs": 42}),
+              "Scripts": 63, "Husky": 3, "CI": 38, "Docs": 43}),
         ({"isolation_profile": "strict"},
          {"Hooks": 5, "Commands": 51, "Skills": 41, "Agents": 27,
-              "Scripts": 60, "Husky": 3, "CI": 34, "Docs": 42}),
+              "Scripts": 60, "Husky": 3, "CI": 34, "Docs": 43}),
         ({"isolation_profile": "strict", "cost_profile": "lean"},
          {"Hooks": 5, "Commands": 51, "Skills": 41, "Agents": 27,
-              "Scripts": 60, "Husky": 3, "CI": 34, "Docs": 42}),
+              "Scripts": 60, "Husky": 3, "CI": 34, "Docs": 43}),
     ],
 )
 def test_rendered_readme_counts_match_rendered_tree(flags, expected):
@@ -334,6 +334,21 @@ def test_validation_layout_distribution_boundary(default_render, branded_render)
         assert (rendered / "scripts/tests/test_agent_check.py").is_file()
 
 
+def test_subscription_guest_distribution_boundary(default_render, branded_render):
+    """Ship the accepted guest closure, without its Pack-only test command."""
+    paths = (
+        "scripts/ci/codex_automation_adapter.py", "scripts/ci/codex_automation_context.py",
+        "scripts/ci/codex_subscription_text.py", "scripts/ci/codex_text_response.py",
+        "scripts/ci/codex_review_models.py", "scripts/lib/subscription_guest.py",
+        "scripts/lib/agent_capabilities.py", "scripts/run-pr-classifier.py",
+        "scripts/run-specialists.py", "scripts/run-broad-agents.py", "scripts/run-judge.py",
+    )
+    for rendered in (default_render, branded_render):
+        for relative in paths:
+            assert (rendered / relative).read_bytes() == (ROOT / relative).read_bytes()
+        assert not (rendered / "tests/test_codex_automation_adapter.py").exists()
+        config = json.loads((rendered / "config/agent-checks.json").read_text())
+        assert "subscription-automation-text-contract" not in {c["id"] for c in config["checks"]}
 
 def test_source_scope_distribution_holds_before_reads_and_preserves_legacy_failure(tmp_path, default_render, branded_render):
     """Actual rendered code holds opaque bytes; absent scope still executes checks."""
@@ -425,7 +440,7 @@ def test_release_capability_distribution_boundary(default_render, branded_render
         for path in maintenance_paths:
             assert not (rendered / path.relative_to(ROOT)).exists()
         config = json.loads((rendered / "config/agent-checks.json").read_text())
-        assert all(c["id"] not in {"release-manifest-contract", "feature-controls", "feature-controls-distribution", "assessment-sast-failure-contract", "registry-bootstrap-contract", "source-qualification-contract", "native-owner-recipe-contract", "installer-layout-contract", "watch-continuity-contract"} for c in config["checks"])
+        assert all(c["id"] not in {"release-manifest-contract", "feature-controls", "feature-controls-distribution", "assessment-sast-failure-contract", "subscription-automation-text-contract", "registry-bootstrap-contract", "source-qualification-contract", "native-owner-recipe-contract", "installer-layout-contract", "watch-continuity-contract"} for c in config["checks"])
         assert all(e["id"] not in {"release-contract-python", "feature-controls-python"} for e in config["environments"])
         fixture = ROOT / "scripts/tests/fixtures/release-manifest.v1.json"
         release_id = json.loads(fixture.read_text())["release_id"]
@@ -552,7 +567,7 @@ def test_branded_attribution(branded_render, default_render):
 def test_agent_validation_base_uses_owner_ref(tmp_path, default_render, base_ref):
     """A real rendered CLI plans correctly with remote or local owner refs."""
     canonical = json.loads((ROOT / "config/agent-checks.json").read_text())
-    canonical["checks"] = [c for c in canonical["checks"] if c["id"] not in {"release-manifest-contract", "feature-controls", "feature-controls-distribution", "assessment-sast-failure-contract", "registry-bootstrap-contract", "source-qualification-contract", "native-owner-recipe-contract", "installer-layout-contract", "watch-continuity-contract"}]
+    canonical["checks"] = [c for c in canonical["checks"] if c["id"] not in {"release-manifest-contract", "feature-controls", "feature-controls-distribution", "assessment-sast-failure-contract", "subscription-automation-text-contract", "registry-bootstrap-contract", "source-qualification-contract", "native-owner-recipe-contract", "installer-layout-contract", "watch-continuity-contract"}]
     canonical["environments"] = [e for e in canonical["environments"] if e["id"] not in {"release-contract-python", "feature-controls-python"}]
     pack_only_paths = {"scripts/tests/test_source_scope_boundary.py", "scripts/tests/test_source_projection.py",
                        "scripts/lib/source_projection.py", "scripts/lib/source_executor.py",
@@ -604,7 +619,7 @@ def test_skip_if_exists_contract(has_native_lock):
     copier_config = yaml.safe_load((ROOT / "copier.yml").read_text())
     skip_if_exists = set(copier_config.get("_skip_if_exists", []))
 
-    expected = {"CLAUDE.md", ".claude/model-routing.json", ".claude/mcp.json", ".claude/hooks/session-start.sh", "ai-manifest.yaml", "config/agent-checks.json", "scripts/ci/codex-review-worker.json",
+    expected = {"CLAUDE.md", ".claude/model-routing.json", ".claude/mcp.json", ".claude/hooks/session-start.sh", "ai-manifest.yaml", "config/agent-checks.json", "scripts/ci/codex-review-worker.json", "scripts/ci/codex-automation-worker.json",
                 # QA framework owner config + host hook files (docs/qa-framework.md)
                 "config/qa.json", ".cursor/hooks.json", ".codex/hooks.json",
                 ".githooks/pre-push"}
@@ -1033,10 +1048,15 @@ TELEMETRY_ENV = {
 }
 STRICT_EXCLUDED = {
     "tests/test_codex_review_workflows.py",
+    "tests/test_codex_automation_request.py",
     ".github/workflows/codex-pr-review.yml",
     ".github/workflows/codex-security-diff-scan.yml",
     ".github/workflows/codex-review-worker.yml",
     ".github/workflows/codex-review-recovery.yml",
+    ".github/workflows/codex-automation-request.yml",
+    ".github/workflows/codex-automation-worker.yml",
+    "scripts/ci/codex-automation-worker.json",
+    "scripts/ci/codex-automation-runtime/Dockerfile",
     ".github/workflows/setup-env-secret.yml",
     ".github/workflows/dependabot-manual-automerge.yml",
     ".github/workflows/monitor-litellm.yml",
@@ -1148,6 +1168,10 @@ def test_standard_keeps_codex_review_unless_opted_out(default_render, tmp_path):
     codex = {".github/workflows/codex-pr-review.yml", ".github/workflows/codex-security-diff-scan.yml",
              ".github/workflows/codex-review-worker.yml", ".github/workflows/codex-review-recovery.yml"}
     codex.add("tests/test_codex_review_workflows.py")
+    codex.add("tests/test_codex_automation_request.py")
+    # The subscription automation producer/controller depend on the review runtime.
+    codex |= {".github/workflows/codex-automation-request.yml", ".github/workflows/codex-automation-worker.yml",
+              "scripts/ci/codex-automation-worker.json", "scripts/ci/codex-automation-runtime/Dockerfile"}
     assert codex <= file_set(default_render)
     dst = tmp_path / "nocodex"
     dst.mkdir()
@@ -1178,7 +1202,9 @@ def test_executor_pack_recipe_renders_without_linux_consumer_dependencies():
     runner = runpy.run_path(str(ROOT / "scripts/agent-check.py"))
     assert runner["TOOLS"]["bwrap"] == ["/usr/bin/bwrap", "--version"]
     assert runner["TOOLS"]["cc"] == ["/usr/bin/cc", "--version"]
-    assert len(owner["checks"]) == 11
+    # 11 accepted owner checks plus this train's pack-only subscription contract.
+    assert len(owner["checks"]) == 12
+    assert "subscription-automation-text-contract" in {check["id"] for check in owner["checks"]}
     assert {"installer-layout-contract", "native-owner-recipe-contract", "source-qualification-contract"} <= {
         check["id"] for check in owner["checks"]
     }
