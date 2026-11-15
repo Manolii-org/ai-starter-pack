@@ -96,7 +96,11 @@ def prepare(github, event):
 def context_document(target, config, role, run_id, run_attempt, roles=None):
     """`selected_roles` is the roster for assessment; for the judge it is exactly
     the roles the assessment pass dispatched, which the Judge requires to be
-    present (an undispatched roster role would count as missing evidence)."""
+    present (an undispatched roster role would count as missing evidence).
+
+    `pr_title`/`pr_body` are read-only PR metadata carried from admission so the
+    classifier and skills/specialists receive the same scope-adherence evidence
+    the producer (untrusted) never saw."""
     return {
         "schema": "codex-automation-context/v1",
         "repository": target["repository"],
@@ -109,6 +113,8 @@ def context_document(target, config, role, run_id, run_attempt, roles=None):
         "controller_run_id": run_id,
         "controller_run_attempt": run_attempt,
         "selected_roles": sorted(config["roster"] if roles is None else roles),
+        "pr_title": target.get("pr_title", ""),
+        "pr_body": target.get("pr_body", ""),
     }
 
 
@@ -161,6 +167,8 @@ def guest_args(image, name, source, broker_directory, context_file, candidates, 
                       ("PR_BASE_SHA", value["base_sha"]), ("PR_HEAD_SHA", value["head_sha"]),
                       ("GITHUB_RUN_ID", value["controller_run_id"]),
                       ("GITHUB_RUN_ATTEMPT", value["controller_run_attempt"]),
+                      ("PR_TITLE", value.get("pr_title", "")),
+                      ("PR_BODY", value.get("pr_body", "")),
                       ("CODEX_AUTOMATION_GUEST_SECONDS", value.get("guest_seconds", 1400))):
         args += ["--env", f"{key}={item}"]
     return [*args, image]
@@ -255,21 +263,25 @@ def execute(github, target, directory, *, run_id, run_attempt, workflow_sha, gue
                         correlation_id=f"{target['repository']}#{target['pull_request']}@{target['head_sha']}/{role}")
             if broker.terminal_error:
                 return {"state": "blocked_quota" if broker.terminal_error == "subscription_quota_exhausted"
-                        else "failed", "reason": broker.terminal_error, "passes": passes}, rows
+                        else "failed", "reason": broker.terminal_error, "passes": passes,
+                        "unmeasured_requests": unmeasured}, rows
             passes[role] = output
             if output["status"] != "completed":
-                return {"state": "held", "reason": output.get("reason", "guest_held"), "passes": passes}, rows
+                return {"state": "held", "reason": output.get("reason", "guest_held"), "passes": passes,
+                        "unmeasured_requests": unmeasured}, rows
             if role == "assessment":
                 ran = output.get("ran") or {}
                 dispatched = sorted({name for kind in ("skills", "agents") for name in (ran.get(kind) or [])})
                 if any(not isinstance(n, str) or not re.fullmatch(r"[a-z][a-z0-9-]{0,63}", n) for n in dispatched) \
                         or len(dispatched) > 100:
-                    return {"state": "failed", "reason": "dispatched_roles_invalid", "passes": passes}, rows
+                    return {"state": "failed", "reason": "dispatched_roles_invalid", "passes": passes,
+                            "unmeasured_requests": unmeasured}, rows
                 candidates = directory / "candidates"
                 candidates.mkdir(mode=0o700)
                 for name, body in output["candidates"].items():
                     if not re.fullmatch(r"[A-Za-z0-9_.-]{1,96}\.json", name):
-                        return {"state": "failed", "reason": "candidate_name_invalid", "passes": passes}, rows
+                        return {"state": "failed", "reason": "candidate_name_invalid", "passes": passes,
+                                "unmeasured_requests": unmeasured}, rows
                     (candidates / name).write_text(json.dumps(body))
         result = {"state": "completed", "reason": "adjudicated", "passes": passes,
                   "unmeasured_requests": unmeasured,
@@ -285,10 +297,12 @@ def execute(github, target, directory, *, run_id, run_attempt, workflow_sha, gue
         return result, rows
     except profiles.ProfileError as exc:
         return {"state": "blocked_quota" if str(exc) in {"profile_capacity_exhausted", "profile_session_busy"}
-                else "blocked_credentials", "reason": str(exc), "passes": passes}, rows
+                else "blocked_credentials", "reason": str(exc), "passes": passes,
+                "unmeasured_requests": unmeasured}, rows
     except (Incomplete, BrokerError, OSError, ValueError, subprocess.SubprocessError,
             receipts.ReceiptError) as exc:
-        return {"state": "failed", "reason": str(exc)[:200] or type(exc).__name__, "passes": passes}, rows
+        return {"state": "failed", "reason": str(exc)[:200] or type(exc).__name__, "passes": passes,
+                "unmeasured_requests": unmeasured}, rows
 
 
 def _safe(value, limit):

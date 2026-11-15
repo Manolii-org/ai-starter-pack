@@ -76,6 +76,44 @@ def test_assessment_pass_runs_every_requested_role_and_reports_held_roster(sandb
     assert "test_policy.py" in diff and "policy.py" in diff
 
 
+def test_assessment_passes_pr_title_and_body_to_the_classifier(sandbox, monkeypatch):
+    """Review P2: scope-adherence compares the diff against the stated scope.
+    The classifier needs --title/--body; both come from admitted context.
+    Bypasses the agent .claude/ checkout (skipped on agents without it)."""
+    calls = []
+    work_dir = guest.STATE / "work-stub"
+    work_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(guest, "_workspace", lambda: work_dir)
+    monkeypatch.setattr(guest, "_diff", lambda v, w: work_dir / "stub.diff")
+
+    def run(script, args, value, work):
+        calls.append((script, args, value["pr_title"], value["pr_body"]))
+        if script == "run-pr-classifier.py":
+            Path(args[args.index("--output") + 1]).write_text(json.dumps(
+                {"invoke_skills": ["scope-adherence"], "invoke_agents": []}))
+        else:
+            out = Path(args[args.index("--candidates-dir") + 1])
+            names = args[args.index("--skills" if "--skills" in args else "--agents") + 1].split(",")
+            for name in names:
+                (out / f"{name}.json").write_text(json.dumps({"source": name, "findings": []}))
+
+    monkeypatch.setattr(guest, "_run", run)
+    guest.assessment(guest._context())
+    classifier_call = next(c for c in calls if c[0] == "run-pr-classifier.py")
+    assert "--title" in classifier_call[1] and "--body" in classifier_call[1]
+    assert classifier_call[2] == "Stage subscription-only automation runtime"
+    assert classifier_call[3].startswith("Builds the portable subscription-only automation runtime.")
+
+
+def test_stage_env_carries_admitted_pr_title_and_body(sandbox):
+    """Every stage subprocess inherits PR_TITLE/PR_BODY from the bounded context,
+    so scope-adherence's title/body comparison survives even when the
+    classifier short-circuits on an empty diff."""
+    env = guest._stage_env(guest._context())
+    assert env["PR_TITLE"] == "Stage subscription-only automation runtime"
+    assert env["PR_BODY"].startswith("Builds the portable subscription-only automation runtime.")
+
+
 @pytest.mark.parametrize("manifest", [
     {"invoke_skills": [1]}, {"invoke_skills": ["a,b"]}, {"invoke_agents": [None]},
 ])

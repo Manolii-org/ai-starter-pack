@@ -20,6 +20,8 @@ SHA = re.compile(r"[a-f0-9]{40}\Z")
 MAX_ARCHIVE = 2 * 1024 * 1024
 MAX_REQUEST = 16384
 MAX_ARTIFACTS = 32
+MAX_TITLE = 512
+MAX_BODY = 12288
 HARD_HOLDS = frozenset({"human-merge", "security-remediation", "skip-ai-review"})
 
 
@@ -239,4 +241,16 @@ def admit(
         "request_workflow_id": workflow["id"],
         "request_artifact_id": artifact["id"],
         "head_ref": head_ref,
+        "pr_title": _bounded(pr.get("title"), MAX_TITLE),
+        "pr_body": _bounded(pr.get("body"), MAX_BODY),
     }
+
+
+def _bounded(value, limit):
+    """Read-only PR metadata, never the producer tool's view, bounded for the guest."""
+    if not isinstance(value, str):
+        return ""
+    if len(value) <= limit:
+        return value
+    marker = "\n[body truncated]"
+    return value[: max(0, limit - len(marker))] + marker

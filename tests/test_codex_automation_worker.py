@@ -19,7 +19,8 @@ REAL_CLAIM = worker.custody.claim
 TARGET = {"repository": "example/automation", "pull_request": 7, "base_sha": "b" * 40,
           "head_sha": "a" * 40, "operation": "assessment", "request_run_id": 11,
           "request_run_attempt": 1, "request_workflow_id": 5, "request_artifact_id": 9,
-          "head_ref": "feature"}
+          "head_ref": "feature", "pr_title": "Stage subscription-only automation runtime",
+          "pr_body": "Builds the portable subscription-only automation runtime."}
 COMPLETION = {"model": "gpt-6.1-sol", "model_verification": "provider_reported",
               "usage": {"input_tokens": 10, "output_tokens": 2, "cached_input_tokens": 0},
               "input_chars": 40, "observed_at": "2026-11-14T03:30:00Z"}
@@ -35,7 +36,9 @@ class FakeBroker:
         self.completions, self.terminal_error = completions, terminal
 
     def audit(self):
-        return {"text_completions": list(self.completions)}
+        # Mirror the real broker: every spend is an audited request, even when
+        # the completion never returned.
+        return {"requests": len(self.completions) + 1, "text_completions": list(self.completions)}
 
 
 @pytest.fixture
@@ -155,6 +158,51 @@ def test_guest_container_is_networkless_read_only_and_credential_free(tmp_path):
     assert "dst=/input/repo,readonly" in joined and "dst=/input/codex-automation.json,readonly" in joined
     assert "TOKEN" not in joined and "AUTH" not in joined and "DOPPLER" not in joined
     assert "--env HTTPS_PROXY=" in joined and "/input/candidates" not in joined
+
+
+def test_guest_environment_receives_pr_title_and_body(tmp_path):
+    """Review P2: classifier and specialists get PR metadata without an extra
+    GitHub read; both come from the admitted context, sized and bounded."""
+    value = worker.context_document(TARGET, worker.policy(), "assessment", 31, 1)
+    assert value["pr_title"] == TARGET["pr_title"] and value["pr_body"] == TARGET["pr_body"]
+    args = worker.guest_args("sha256:" + "1" * 64, "n", tmp_path / "s", tmp_path / "b",
+                             tmp_path / "c.json", None, value)
+    joined = " ".join(args)
+    assert f"--env PR_TITLE=Stage subscription-only automation runtime" in joined
+    assert f"--env PR_BODY=Builds the portable subscription-only automation runtime." in joined
+
+
+def test_quota_exhaustion_retains_unmeasured_request_counts(harness):
+    """Review P2: even when a pass fails the accounting must survive — the
+    terminal-result artifact is the only persisted proof the controller ran."""
+    run, _, _, terminal = harness
+    terminal["value"] = "subscription_quota_exhausted"
+    result, _ = run()
+    assert result["state"] == "blocked_quota"
+    # Counts the finally block computed before broker.terminal_error returned.
+    assert "unmeasured_requests" in result and "assessment" in result["unmeasured_requests"]
+
+
+def test_held_assessment_retains_unmeasured_request_counts(harness):
+    """Review P2: a held verification still owes the unknown-cost accounting
+    the receipt schema records for every exit after broker execution."""
+    run, _, outputs, _ = harness
+    outputs["assessment"] = {"status": "held", "reason": "stage_failed"}
+    result, _ = run()
+    assert result["state"] == "held"
+    assert "unmeasured_requests" in result and "assessment" in result["unmeasured_requests"]
+
+
+def test_unmeasured_requests_omitted_when_no_broker_session_ran(harness, monkeypatch):
+    """Pre-custody/empty-diff exits never reach the broker, so the empty
+    accounting is the truthful record — not a populated per-role map."""
+    run, events, _, _ = harness
+    def refuse(*a, **k):
+        events.append(("claim",))
+        raise worker.custody.CustodyHold("execution_already_claimed")
+    monkeypatch.setattr(worker.custody, "claim", refuse)
+    result, _ = run()
+    assert result["state"] == "held" and "unmeasured_requests" not in result
 
 
 def test_policy_roster_excludes_security_and_restricted_roles():

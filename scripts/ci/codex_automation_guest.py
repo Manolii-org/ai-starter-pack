@@ -70,6 +70,11 @@ def _stage_env(value):
         "PR_HEAD_SHA": value["head_sha"],
         "GITHUB_RUN_ID": str(value["controller_run_id"]),
         "GITHUB_RUN_ATTEMPT": str(value["controller_run_attempt"]),
+        # Read-only PR metadata carried from admission so scope-adherence can
+        # compare the diff against the stated scope. Provenance is the bounded
+        # context value (the host-set container env carries the same bytes).
+        "PR_TITLE": value.get("pr_title", ""),
+        "PR_BODY": value.get("pr_body", ""),
         "GITHUB_WORKSPACE": str(REPO),
         "PYTHONDONTWRITEBYTECODE": "1",
     }
@@ -135,7 +140,12 @@ def assessment(value):
     diff = _diff(value, work)
     manifest = work / "classifier-output.json"
     candidates = work / ".ai/candidates"
-    _run("run-pr-classifier.py", ["--diff", str(diff), "--output", str(manifest)], value, work)
+    # PR title/body are provenanced from admission's read-only API read; the
+    # context value is the canonical input. Specialists and the Judge read them
+    # from the container env set in _stage_env().
+    _run("run-pr-classifier.py",
+         ["--diff", str(diff), "--title", value.get("pr_title", ""),
+          "--body", value.get("pr_body", ""), "--output", str(manifest)], value, work)
     plan = json.loads(manifest.read_text(encoding="utf-8"))
     roster = set(value["selected_roles"])
     requested = {"skills": list(plan.get("invoke_skills", [])), "agents": list(plan.get("invoke_agents", []))}
