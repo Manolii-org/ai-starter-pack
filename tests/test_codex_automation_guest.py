@@ -207,7 +207,7 @@ def test_autofix_no_safe_fix_produces_no_candidate(sandbox):
 
 
 @pytest.mark.parametrize("text", [
-    "not json",
+    "not json", "[]", "1", json.dumps({"summary": "x"}),
     json.dumps({"summary": "x", "patch": "diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml\n"}),
     json.dumps({"summary": "x", "patch": AUTOFIX_PATCH.replace("origin == 'null'\n+", "origin == 'nul'\n+")}),
 ])

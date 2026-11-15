@@ -61,6 +61,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           CODEX_AUTOMATION_ENABLED: ${{ vars.CODEX_AUTOMATION_ENABLED }}
+          CODEX_AUTOMATION_PUBLISH: ${{ vars.CODEX_AUTOMATION_PUBLISH }}
         run: python3 -I trusted/scripts/ci/codex_automation_worker.py run
       - name: Retain result and inference receipts
         if: always() && steps.worker.outputs.artifact != ''

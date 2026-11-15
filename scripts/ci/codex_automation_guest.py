@@ -256,9 +256,13 @@ def autofix(value, adapter=None, patcher=None):
     user = json.dumps({"findings": findings, "files_at_head": files}, sort_keys=True)
     text = adapter.complete(AUTOFIX_SYSTEM, user, role="autofix",
                             data_sensitivity=value["data_sensitivity"], max_tokens=8000)
-    proposal = patcher.parse_proposal(text) if json.loads(text).get("patch") else None
-    if proposal is None:
+    try:
+        raw = json.loads(text)
+    except ValueError:
+        raw = None
+    if isinstance(raw, dict) and set(raw) == {"summary", "patch"} and raw["patch"] == "":
         return {"pass": "autofix", "outcome": "no_safe_fix"}
+    proposal = patcher.parse_proposal(text)
     work = STATE / "autofix"
     if work.exists():
         shutil.rmtree(work)

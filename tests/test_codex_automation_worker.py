@@ -2,6 +2,7 @@
 
 import json
 import re
+import subprocess
 import sys
 from contextlib import contextmanager
 from pathlib import Path
@@ -331,10 +332,13 @@ def test_held_detail_is_retained_but_never_published():
 
 
 
-def enable_autofix(monkeypatch, tmp_path):
+def enable_autofix(monkeypatch, tmp_path, *, rounds=0, admission=True, publish="true"):
     path = tmp_path / "policy.json"
     path.write_text(json.dumps({**json.loads(worker.CONFIG.read_text()), "autofix": True}))
     monkeypatch.setattr(worker, "CONFIG", path)
+    monkeypatch.setenv("CODEX_AUTOMATION_PUBLISH", publish)
+    monkeypatch.setattr(worker, "prior_autofix_rounds", lambda g, t: rounds)
+    monkeypatch.setattr(worker, "editor_admission", lambda t: admission)
 
 
 def test_autofix_is_off_by_default_and_never_claims_or_runs(harness):
@@ -399,3 +403,70 @@ def test_only_findings_from_a_blocking_or_comment_review_are_repairable(event):
     assert worker.surviving_findings([{"action": "review", "event": event,
                                        "surviving": [{"file": "p.py", "line": 1}]}]) == []
     assert worker.surviving_findings([{"action": "advisory", "detail": "x"}]) == []
+
+
+
+FINDING_REVIEW = [{"action": "review", "event": "COMMENT", "surviving": [{"file": "p.py", "line": 1, "message": "m"}]}]
+
+
+@pytest.mark.parametrize(("kwargs", "outcome"), [
+    ({"publish": "false"}, {"outcome": "publication_disabled"}),
+    ({"rounds": 1}, {"outcome": "round_cap_reached", "rounds": 1}),
+    ({"rounds": None}, {"outcome": "held", "reason": "autofix_history_unverified"}),
+    ({"admission": "editor_admission_held"}, {"outcome": "held", "reason": "editor_admission_held"}),
+])
+def test_autofix_preconditions_hold_before_consent_custody_or_model(harness, monkeypatch, tmp_path, kwargs, outcome):
+    """Review P1/P2: no self-repair loop, no editor without publication, and the
+    accepted custody/owner gate runs before any editor work."""
+    run, events, outputs, _ = harness
+    enable_autofix(monkeypatch, tmp_path, **kwargs)
+    outputs["judge"]["publication"] = FINDING_REVIEW
+    claims = []
+    monkeypatch.setattr(worker.custody, "claim", lambda g, t, **k: claims.append(t["operation"]) or "ack")
+    result, rows = run()
+    assert result["autofix"] == outcome and result["publication"] == FINDING_REVIEW
+    assert claims == ["assessment"] and ("consent", "autofix") not in events
+    assert [r["role"] for r in rows] == ["assessment", "judge"]
+
+
+def test_autofix_failure_never_discards_the_finished_judge_outcome(harness, monkeypatch, tmp_path):
+    run, _, outputs, _ = harness
+    enable_autofix(monkeypatch, tmp_path)
+    outputs["judge"]["publication"] = FINDING_REVIEW
+    def boom(*a, **k):
+        raise OSError("custody POST failed")
+    monkeypatch.setattr(worker.custody, "claim", lambda g, t, **k: boom() if t["operation"] == "autofix" else "ack")
+    result, _ = run()
+    assert result["state"] == "completed" and result["publication"] == FINDING_REVIEW
+    assert result["autofix"] == {"outcome": "failed", "reason": "OSError"}
+
+
+class CommitsGitHub(FakeGitHub):
+    def __init__(self, messages):
+        self.messages = messages
+
+    def pages(self, route):
+        assert route == "/pulls/7/commits"
+        return [{"commit": {"message": m}} for m in self.messages]
+
+
+def test_prior_rounds_count_only_autofix_commits():
+    assert worker.prior_autofix_rounds(CommitsGitHub(["feat: x", "[autofix] a", "fix: [autofix] b"]), TARGET) == 1
+    assert worker.prior_autofix_rounds(CommitsGitHub(["x"] * 250), TARGET) is None
+
+
+def test_editor_admission_uses_the_accepted_custody_script(monkeypatch, tmp_path):
+    seen = {}
+    def fake_run(cmd, env, **kwargs):
+        seen["cmd"], seen["env"] = cmd, env
+        Path(env["GITHUB_OUTPUT"]).write_text("skip=false\n")
+        return subprocess.CompletedProcess(cmd, 0)
+    monkeypatch.setattr(worker.subprocess, "run", fake_run)
+    assert worker.editor_admission(TARGET) is True
+    assert seen["cmd"][1].endswith("scripts/ci/autofix-custody.sh")
+    assert seen["env"]["EXPECTED_HEAD"] == TARGET["head_sha"] and seen["env"]["PR_NUMBER"] == "7"
+    def held(cmd, env, **kwargs):
+        Path(env["GITHUB_OUTPUT"]).write_text("skip=true\n")
+        return subprocess.CompletedProcess(cmd, 0)
+    monkeypatch.setattr(worker.subprocess, "run", held)
+    assert worker.editor_admission(TARGET) == "editor_admission_held"

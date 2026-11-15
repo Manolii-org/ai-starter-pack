@@ -133,15 +133,25 @@ current PR head and posts once per head (trusted-author marker).
 
 ### Guarded mutation and publication (`autofix`, default off)
 
-Enabled only by `"autofix": true` in the instance-owned controller policy. After
+Enabled only by `"autofix": true` in the instance-owned controller policy and
+`vars.CODEX_AUTOMATION_PUBLISH == 'true'` (no editor runs, no quota is spent and
+no custody is claimed when nothing could be published). Each published repair
+creates a new head, so `max_autofix_rounds` (default 1, at most 4) caps the
+`[autofix]` commits already on the PR from native history. The accepted
+`autofix-custody.sh` gate (open PR at the exact head, no fork, no human or
+security hold, no session owner, no held/uncertain publication) runs before
+any editor work, not only before publication. After
 the Judge, only surviving findings from a captured `COMMENT`/`REQUEST_CHANGES`
 review are repairable. The controller then needs explicit `autofix` consent
 (a refusal claims nothing) and appends its own `autofix` custody claim before
 one guest pass. The guest makes a single tool-free `autofix` text call whose
 output must be `{"summary", "patch"}` (`codex_automation_patch.py`): a plain
 unified diff limited to modifications and new regular files, at most 20 paths,
-never deletions, renames, mode/binary/symlink changes, `.git`, traversal or the
-publisher's instruction surfaces (the same `INSTRUCTIONS` rule, test-enforced).
+never deletions, renames, mode/binary/symlink changes (including retargeting an
+existing symlink), traversal, any dot-path segment, `conftest.py`, `Makefile`,
+`CODEOWNERS` or agent instruction files (case-insensitive, a strict superset of
+the publisher's `INSTRUCTIONS` rule, test-enforced). The summary is plain text
+without issue-closing keywords, `#` or mentions.
 It is applied with `git apply` to a hook-free clone of the exact head and
 committed once with an `[autofix]` subject; the result is bundled.
 

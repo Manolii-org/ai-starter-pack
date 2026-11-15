@@ -2,6 +2,7 @@
 
 import base64
 import importlib.util
+import os
 import re
 import subprocess
 import sys
@@ -48,6 +49,10 @@ def test_instruction_surface_rule_matches_the_accepted_publisher():
     "not json", '{"summary": "x"}', '{"summary": "x", "patch": "p", "extra": 1}',
     '{"summary": "x", "summary": "y", "patch": "p"}', '{"summary": "a\\nb", "patch": "p"}',
     '{"summary": "' + "x" * 101 + '", "patch": "p"}', '{"summary": "x", "patch": ""}',
+    # Review P3: no bidi/line separators/C1 controls, no issue-closing keywords.
+    '{"summary": "a\\u202eb", "patch": "p"}', '{"summary": "a\\u2028b", "patch": "p"}',
+    '{"summary": "a\\u0085b", "patch": "p"}', '{"summary": "Fixes #12", "patch": "p"}',
+    '{"summary": "closes 3", "patch": "p"}', '{"summary": "ping @org", "patch": "p"}',
 ])
 def test_malformed_proposals_are_refused(text):
     with pytest.raises(patch.PatchRefused):
@@ -70,6 +75,20 @@ def test_malformed_proposals_are_refused(text):
     "diff --git a/a.py b/a.py\n--- a/other.py\n+++ b/a.py\n",
     "".join(f"diff --git a/f{i}.py b/f{i}.py\n" for i in range(21)),
     "no header at all\n",
+    # Review P2: case-insensitive and wider protected surface.
+    "diff --git a/.Claude/settings.json b/.Claude/settings.json\n",
+    "diff --git a/Claude.md b/Claude.md\n",
+    "diff --git a/agents.md b/agents.md\n",
+    "diff --git a/.MCP.json b/.MCP.json\n",
+    "diff --git a/.cursor/rules/x.mdc b/.cursor/rules/x.mdc\n",
+    "diff --git a/.github/copilot-instructions.md b/.github/copilot-instructions.md\n",
+    "diff --git a/GEMINI.md b/GEMINI.md\n",
+    "diff --git a/.codex/config.toml b/.codex/config.toml\n",
+    "diff --git a/.github/CODEOWNERS b/.github/CODEOWNERS\n",
+    "diff --git a/.gitattributes b/.gitattributes\n",
+    "diff --git a/.pre-commit-config.yaml b/.pre-commit-config.yaml\n",
+    "diff --git a/tests/conftest.py b/tests/conftest.py\n",
+    "diff --git a/.vscode/tasks.json b/.vscode/tasks.json\n",
 ])
 def test_patch_operations_outside_the_contract_are_refused(body):
     with pytest.raises(patch.PatchRefused):
@@ -143,3 +162,26 @@ def test_packet_identity_is_validated_before_any_file_is_written(tmp_path, chang
     result = worker.write_packet(target, tmp_path, output)
     assert result["outcome"] == "failed"
     assert not (tmp_path / "packet" / "receipt.json").exists()
+
+
+
+def test_existing_symlink_target_cannot_be_rewritten(tmp_path):
+    """Review P3: a regular-looking patch to an existing symlink is refused."""
+    src = tmp_path / "s"
+    src.mkdir()
+    git(src, "init", "-q")
+    git(src, "config", "user.email", "f@example.invalid")
+    git(src, "config", "user.name", "f")
+    (src / "a.txt").write_text("a\n")
+    os.symlink("a.txt", src / "lnk")
+    git(src, "add", ".")
+    git(src, "commit", "-qm", "head")
+    bare = tmp_path / "s.git"
+    subprocess.check_call(["git", "clone", "-q", "--bare", str(src), str(bare)])
+    head = git(src, "rev-parse", "HEAD")
+    body = ("diff --git a/lnk b/lnk\n--- a/lnk\n+++ b/lnk\n@@ -1 +1 @@\n-a.txt\n\\ No newline at end of file\n"
+            "+b.txt\n\\ No newline at end of file\n")
+    work = tmp_path / "w"
+    work.mkdir()
+    with pytest.raises(patch.PatchRefused):
+        patch.build_candidate(bare, work, head, {"summary": "Retarget", "patch": body})

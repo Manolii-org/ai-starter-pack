@@ -22,7 +22,15 @@ from pathlib import Path
 
 # Must equal autofix-publish.py's INSTRUCTIONS (enforced by tests).
 INSTRUCTIONS = re.compile(r"(^|/)(\.claude(?:/|$)|CLAUDE\.md$|CLAUDE\.local\.md$|AGENTS\.md$)|^(\.mcp\.json|\.claude\.json|\.gitmodules|\.ripgreprc)$|^\.husky(?:/|$)|^\.github(?:$|/(workflows|actions)(?:/|$))")
+# Stricter than the publisher, never weaker: case-insensitive (case-folding
+# checkouts), every dot-path segment (.claude/.cursor/.codex/.github/.vscode,
+# .gitattributes, .pre-commit-config.yaml, ...) and files that tools execute or
+# load as agent instructions. A repair to these needs a person.
+PROTECTED_NAMES = frozenset({"claude.md", "claude.local.md", "agents.md", "gemini.md", "conftest.py",
+                             "copilot-instructions.md", "codeowners", "makefile"})
 SHA = re.compile(r"[0-9a-f]{40}\Z")
+SUMMARY = re.compile(r"[A-Za-z0-9 .,:;()'/_+=-]{1,100}\Z")
+CLOSING = re.compile(r"\b(close[sd]?|fix(e[sd])?|resolve[sd]?)\b", re.IGNORECASE)
 MAX_PATCH_BYTES = 200 * 1024
 MAX_FILES = 20
 MAX_SUMMARY = 100
@@ -55,7 +63,7 @@ def parse_proposal(text: str) -> dict:
         raise PatchRefused("proposal_shape_invalid")
     summary, patch = value["summary"], value["patch"]
     if (not isinstance(summary, str) or not summary.strip() or len(summary) > MAX_SUMMARY
-            or any(ord(c) < 32 or ord(c) == 127 for c in summary)):
+            or not SUMMARY.fullmatch(summary) or CLOSING.search(summary)):
         raise PatchRefused("proposal_summary_invalid")
     if not isinstance(patch, str) or not patch.strip() or len(patch.encode("utf-8")) > MAX_PATCH_BYTES:
         raise PatchRefused("proposal_patch_invalid")
@@ -76,7 +84,8 @@ def validate_patch(patch: str) -> list[str]:
             current = match.group(1)
             parts = current.split("/")
             if (not SAFE_PATH.fullmatch(current) or any(p in {"", ".", ".."} for p in parts)
-                    or parts[0] == ".git" or INSTRUCTIONS.search(current)):
+                    or any(p.startswith(".") for p in parts) or parts[-1].lower() in PROTECTED_NAMES
+                    or INSTRUCTIONS.search(current) or INSTRUCTIONS.search(current.lower())):
                 raise PatchRefused("patch_path_refused")
             if current in paths:
                 raise PatchRefused("patch_path_repeated")
@@ -123,6 +132,10 @@ def build_candidate(source: Path, work: Path, base_sha: str, proposal: dict) -> 
     changed = _git(edit, "diff", "--cached", "--name-only", "-z").decode().split("\0")
     if sorted(p for p in changed if p) != sorted(paths):
         raise PatchRefused("patch_effect_mismatch")
+    # Only regular files may result: an existing symlink's target is not code.
+    staged = _git(edit, "ls-files", "-s", "-z", "--", *paths).decode().split("\0")
+    if any(entry and entry.split(" ", 1)[0] not in {"100644", "100755"} for entry in staged):
+        raise PatchRefused("patch_mode_refused")
     _git(edit, "commit", "--quiet", "--no-verify", "-m", "[autofix] " + proposal["summary"])
     candidate = _git(edit, "rev-parse", "HEAD").decode().strip()
     _git(edit, "update-ref", "refs/heads/implementation", candidate)

@@ -60,6 +60,8 @@ def policy():
             or value.get("data_sensitivity") not in receipts.SENSITIVITY
             or value.get("reasoning_effort") not in ("medium", "xhigh")
             or type(value.get("autofix", False)) is not bool
+            or type(value.get("max_autofix_rounds", 1)) is not int
+            or not 1 <= value.get("max_autofix_rounds", 1) <= 4
             or any(type(value.get(k)) is not int or not 0 < value[k] <= limit
                    for k, limit in (("max_requests", 64), ("max_seconds", 1800)))):
         raise Incomplete("controller_policy_invalid")
@@ -271,10 +273,13 @@ def execute(github, target, directory, *, run_id, run_attempt, workflow_sha, gue
                   "unmeasured_requests": unmeasured,
                   "publication": passes["judge"].get("publication", [])}
         if config.get("autofix") is True:
-            result["autofix"] = autofix_stage(github, target, directory, config, result["publication"], image,
-                                              source, run_id=run_id, run_attempt=run_attempt,
-                                              workflow_sha=workflow_sha, guest=guest, session=session,
-                                              rows=rows, unmeasured=unmeasured)
+            try:
+                result["autofix"] = autofix_stage(github, target, directory, config, result["publication"], image,
+                                                  source, run_id=run_id, run_attempt=run_attempt,
+                                                  workflow_sha=workflow_sha, guest=guest, session=session,
+                                                  rows=rows, unmeasured=unmeasured)
+            except Exception as exc:  # noqa: BLE001 - the finished Judge outcome must survive
+                result["autofix"] = {"outcome": "failed", "reason": type(exc).__name__}
         return result, rows
     except profiles.ProfileError as exc:
         return {"state": "blocked_quota" if str(exc) in {"profile_capacity_exhausted", "profile_session_busy"}
@@ -308,6 +313,17 @@ def autofix_stage(github, target, directory, config, publication, image, source,
     findings = surviving_findings(publication)
     if not findings:
         return {"outcome": "nothing_to_fix"}
+    if os.environ.get("CODEX_AUTOMATION_PUBLISH") != "true":
+        # Never spend quota or burn a head's custody on a fix nothing can publish.
+        return {"outcome": "publication_disabled"}
+    rounds = prior_autofix_rounds(github, target)
+    if rounds is None:
+        return {"outcome": "held", "reason": "autofix_history_unverified"}
+    if rounds >= config.get("max_autofix_rounds", 1):
+        return {"outcome": "round_cap_reached", "rounds": rounds}
+    admitted = editor_admission(target)
+    if admitted is not True:
+        return {"outcome": "held", "reason": admitted}
     try:
         assignment = profiles.select_automation(target["repository"], "autofix")
     except profiles.ProfileError as exc:
@@ -339,16 +355,49 @@ def autofix_stage(github, target, directory, config, publication, image, source,
     finally:
         if audit is not None:
             unmeasured["autofix"] = max(0, audit.get("requests", 0) - len(audit.get("text_completions", [])))
-            rows += receipts.build(
-                audit.get("text_completions", []), repository=target["repository"], run_id=run_id,
-                run_attempt=run_attempt, base_sha=target["base_sha"], head_sha=target["head_sha"],
-                workflow_sha=workflow_sha, role="autofix", data_sensitivity=config["data_sensitivity"],
-                correlation_id=f"{target['repository']}#{target['pull_request']}@{target['head_sha']}/autofix")
+            try:
+                rows += receipts.build(
+                    audit.get("text_completions", []), repository=target["repository"], run_id=run_id,
+                    run_attempt=run_attempt, base_sha=target["base_sha"], head_sha=target["head_sha"],
+                    workflow_sha=workflow_sha, role="autofix", data_sensitivity=config["data_sensitivity"],
+                    correlation_id=f"{target['repository']}#{target['pull_request']}@{target['head_sha']}/autofix")
+            except receipts.ReceiptError:
+                unmeasured["autofix"] = audit.get("requests", 0)
     if output.get("status") != "completed":
         return {"outcome": "held", "reason": output.get("reason", "guest_held"), "detail": output.get("detail", "")}
     if output.get("outcome") != "candidate":
         return {"outcome": output.get("outcome", "no_safe_fix")}
     return write_packet(target, directory, output)
+
+
+def prior_autofix_rounds(github, target):
+    """Count [autofix] commits already on the PR: each published repair creates
+    a new head and a new request, so the cap must come from native history."""
+    try:
+        commits = github.pages(f"/pulls/{int(target['pull_request'])}/commits")
+    except (Incomplete, OSError, ValueError):
+        return None
+    if not isinstance(commits, list) or len(commits) >= 250:
+        return None
+    return sum(1 for c in commits if isinstance(c, dict)
+               and str((c.get("commit") or {}).get("message") or "").startswith("[autofix]"))
+
+
+def editor_admission(target):
+    """Run the accepted autofix-custody.sh before any editor work: open PR at the
+    exact head, no fork, no human/security holds, no session owner, no held or
+    uncertain publication. Returns True or a hold reason."""
+    script = HERE / "autofix-custody.sh"
+    with tempfile.NamedTemporaryFile("r", suffix=".out") as out:
+        env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "GH_TOKEN": os.environ.get("GH_TOKEN", ""),
+               "REPOSITORY": target["repository"], "PR_NUMBER": str(int(target["pull_request"])),
+               "EXPECTED_HEAD": target["head_sha"], "GITHUB_OUTPUT": out.name}
+        try:
+            subprocess.run(["bash", str(script)], env=env, capture_output=True, timeout=120, check=False)
+        except (OSError, subprocess.SubprocessError):
+            return "editor_admission_unavailable"
+        result = out.read()
+    return True if "skip=false" in result.split() else "editor_admission_held"
 
 
 def write_packet(target, directory, output):
