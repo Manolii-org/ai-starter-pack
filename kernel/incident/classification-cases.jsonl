@@ -10,3 +10,7 @@
 {"type": "TypeError", "message": "x", "in_app": false, "sha": "abcdef1", "expect": "unknown"}
 {"type": "TypeError", "message": "x", "in_app": null, "sha": "abcdef1", "expect": "unknown"}
 {"type": "TypeError", "message": "x", "in_app": true, "sha": null, "expect": "unknown"}
+{"type": "Timeout", "message": "litellm.Timeout: Timeout Error: upstream request", "in_app": false, "sha": "abcdef1", "expect": "provider"}
+{"type": "Timeout", "message": "Connection timed out after 180s", "in_app": true, "sha": "abcdef1", "expect": "provider"}
+{"type": "ProxyException", "message": "Client disconnected while uploading request body", "in_app": false, "sha": null, "expect": "provider"}
+{"type": "TimeoutError", "message": "database statement timeout", "in_app": false, "sha": "abcdef1", "expect": "unknown"}

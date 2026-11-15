@@ -30,12 +30,22 @@ def issue(i="42", project="11", level="error", short="API-1G"):
             "title": "secret=private user@example.com", "metadata": {"value": "private"}}
 
 
-def fake(pages: dict[str, list], events: dict[str, object] | None = None, calls: list | None = None):
+SUSTAINED = {"count": "1638", "firstSeen": "2026-08-31T13:50:00Z", "lastSeen": "2026-11-12T11:59:00Z"}
+
+
+def fake(pages: dict[str, list], events: dict[str, object] | None = None, calls: list | None = None,
+         lifetimes: dict[str, object] | None = None):
     def fetch(url):
         if calls is not None:
             calls.append(url)
         parsed = urllib.parse.urlparse(url)
         query = urllib.parse.parse_qs(parsed.query)
+        if parsed.path.rstrip("/").split("/")[-2] == "issues":
+            issue_id = parsed.path.rstrip("/").split("/")[-1]
+            value = (lifetimes or {}).get(issue_id, {})
+            if isinstance(value, Exception):
+                raise value
+            return value, {}
         if "/events/latest/" in parsed.path:
             issue_id = parsed.path.split("/issues/")[1].split("/")[0]
             value = (events or {}).get(issue_id, {})
@@ -60,7 +70,8 @@ def test_classification_corpus_is_shared_parity_contract():
 
 def test_emits_schema_shaped_candidates_routed_by_project_and_environment():
     result = sweep_mod.sweep(MANIFEST, fake({"production": [issue()], "scrape": [issue("7", short="API-2")]},
-                                            {"42": event(), "7": event("RateLimitError", "429")}), now=NOW)
+                                            {"42": event(), "7": event("RateLimitError", "429")},
+                                            lifetimes={"7": SUSTAINED}), now=NOW)
     by_repo = {c["repo"]: c for c in result["candidates"]}
     api = by_repo["Example-org/api"]
     assert api["classification"] == "code_defect"
@@ -208,3 +219,57 @@ def test_manifest_rejects_empty_or_incomplete_routes(tmp_path, bad):
     path.write_text(json.dumps(bad))
     with pytest.raises(sweep_mod.SweepError):
         sweep_mod.load_routes(path)
+
+
+def cron_issue(i, title="Cron failure: nightly-check"):
+    return dict(issue(i), issueType="monitor_check_in_failure", title=title)
+
+
+def test_transient_groups_are_admitted_only_when_sustained():
+    rows = [issue("1"), issue("2"), issue("3")]
+    events = {"1": event("ServiceUnavailableError", "upstream 503", in_app=False),
+              "2": event("Timeout", "litellm.Timeout: Connection timed out", in_app=False),
+              "3": event("RateLimitError", "429")}
+    lifetimes = {"1": SUSTAINED,
+                 "2": {"count": "5", "firstSeen": "2026-11-07T11:47:00Z", "lastSeen": "2026-11-12T11:00:00Z"},
+                 "3": {"count": "500", "firstSeen": "2026-11-10T00:00:00Z", "lastSeen": "2026-11-12T11:00:00Z"}}
+    result = sweep_mod.sweep(MANIFEST, fake({"production": rows}, events, lifetimes=lifetimes), now=NOW)
+    assert [c["delivery_id"].split(":")[2] for c in result["candidates"]] == ["1"]
+    assert result["stats"]["filtered_transient"] == 2  # counted, never silently lost
+
+
+def test_cron_monitor_below_threshold_is_filtered_but_a_persistent_one_is_admitted():
+    rows = [cron_issue("5"), cron_issue("6"), dict(issue("8"), title="Cron failure: legacy title only")]
+    lifetimes = {"5": {"count": "38", "firstSeen": "2026-07-19T06:04:00Z", "lastSeen": "2026-11-12T06:07:00Z"},
+                 "6": {"count": "318", "firstSeen": "2026-10-01T02:06:00Z", "lastSeen": "2026-11-12T11:00:00Z"},
+                 "8": {"count": "2", "firstSeen": "2026-11-12T10:00:00Z", "lastSeen": "2026-11-12T11:00:00Z"}}
+    result = sweep_mod.sweep(MANIFEST, fake({"production": rows}, {}, lifetimes=lifetimes), now=NOW)
+    assert [c["delivery_id"].split(":")[2] for c in result["candidates"]] == ["6"]
+    assert result["stats"]["filtered_transient"] == 2
+
+
+def test_non_transient_groups_skip_the_lifetime_read():
+    calls: list[str] = []
+    result = sweep_mod.sweep(MANIFEST, fake({"production": [issue()]}, {"42": event()}, calls=calls), now=NOW)
+    assert result["candidates"][0]["classification"] == "code_defect"
+    assert not [u for u in calls if urllib.parse.urlparse(u).path.endswith("/issues/42/")]
+
+
+def test_unreadable_lifetime_admits_rather_than_drops():
+    result = sweep_mod.sweep(MANIFEST, fake({"production": [issue()]}, {"42": event("APIError", "x")},
+                                            lifetimes={"42": sweep_mod.SweepError("HTTP 500")}), now=NOW)
+    assert len(result["candidates"]) == 1
+    assert result["stats"]["admission_unreadable"] == 1
+    assert result["stats"]["filtered_transient"] == 0
+
+
+@pytest.mark.parametrize("count,expected", [("100", True), ("99", False), ("", False), ("1e3", False), (None, False)])
+def test_sustained_requires_a_numeric_count_of_at_least_100(count, expected):
+    span = {"firstSeen": "2026-11-01T00:00:00Z", "lastSeen": "2026-11-08T00:00:00Z"}
+    assert sweep_mod.is_sustained(dict(span, count=count)) is expected
+
+
+def test_sustained_requires_seven_days_between_first_and_last_seen():
+    short = {"count": "5000", "firstSeen": "2026-11-01T00:00:01Z", "lastSeen": "2026-11-08T00:00:00Z"}
+    assert sweep_mod.is_sustained(short) is False
+    assert sweep_mod.is_sustained(dict(short, firstSeen="2026-11-01T00:00:00Z")) is True

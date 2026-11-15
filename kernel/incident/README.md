@@ -20,8 +20,33 @@ credential.
    using the candidate-schema enum `code_defect | migration | configuration |
    provider | quota | security | unknown`. `code_defect` requires an in-app
    stack frame **and** a commit-SHA release.
-4. Prints one candidate per group (JSON Lines) in the sanitized
-   production-incident candidate shape documented in `candidate-shape.md`.
+4. Applies the admission rule below, then prints one candidate per admitted
+   group (JSON Lines) in the sanitized production-incident candidate shape
+   documented in `candidate-shape.md`.
+
+## Admission
+
+A group is **transient** when its classification is `provider` or `quota`,
+its exception type is one of `Timeout`, `BadGatewayError`,
+`ServiceUnavailableError`, `APIError`, `ProxyException` or `RateLimitError`,
+or it is a Sentry cron-monitor issue. A cron-monitor issue has
+`issueType == "monitor_check_in_failure"`; a title starting with
+`Cron failure:` is the fallback.
+
+A transient group becomes a candidate only when it is **sustained**: at
+least 100 events, with at least 7 days between its first and last event.
+Those lifetime figures come from the issue itself, because the issue list's
+`count` and `firstSeen` cover only the query window. `count` is a string, and
+a non-numeric value counts as 0.
+
+A transient group that is not sustained is not emitted. It is counted in the
+stats as `filtered_transient`, so coverage stays visible. If the lifetime
+read fails, the group is admitted rather than dropped, and counted as
+`admission_unreadable`. Every other group is admitted as before.
+
+Why: one-off upstream failures and alerts from flapping cron monitors were
+most of the non-incidents in the first labelled shadow sample. Sustained
+rate-limit, guardrail or monitor failures are real incidents and stay in.
 
 It never writes to Sentry, GitHub or any store. The consumer owns admission,
 attestation, per-entity switches, caps, deduplication and execution

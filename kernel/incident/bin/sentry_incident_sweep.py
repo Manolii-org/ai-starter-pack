@@ -54,6 +54,14 @@ SHA_TAIL = re.compile(r"(?:^|@|[-+])([0-9a-f]{7,64})$", re.IGNORECASE)
 HEX = re.compile(r"^[0-9a-f]{7,64}$", re.IGNORECASE)
 SHORT_ID = re.compile(r"^[A-Z0-9-]{1,100}$")
 CURSOR = re.compile(r"^[0-9:-]{1,100}$")
+# Admission policy for transient groups (README "Admission"). A transient group
+# becomes a candidate only when sustained; otherwise it is counted, not emitted.
+TRANSIENT_CLASSIFICATIONS = {"provider", "quota"}
+TRANSIENT_TYPES = {"Timeout", "BadGatewayError", "ServiceUnavailableError", "APIError", "ProxyException",
+                   "RateLimitError"}
+CRON_ISSUE_TYPE = "monitor_check_in_failure"
+SUSTAINED_MIN_EVENTS = 100
+SUSTAINED_MIN_SPAN = timedelta(days=7)
 
 Fetch = Callable[[str], tuple[object, dict]]
 
@@ -196,6 +204,30 @@ def load_routes(path: Path) -> dict:
     return manifest
 
 
+def is_cron_monitor(row: dict) -> bool:
+    return row.get("issueType") == CRON_ISSUE_TYPE or str(row.get("title") or "").startswith("Cron failure:")
+
+
+def is_transient(row: dict, classification: str, exception_type: str | None) -> bool:
+    return (classification in TRANSIENT_CLASSIFICATIONS or exception_type in TRANSIENT_TYPES
+            or is_cron_monitor(row))
+
+
+def _seen(value: object) -> datetime | None:
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def is_sustained(issue: dict) -> bool:
+    """Lifetime volume and span: >=100 events across >=7 days."""
+    count = str(issue.get("count") or "")
+    events = int(count) if count.isdigit() else 0
+    first, last = _seen(issue.get("firstSeen")), _seen(issue.get("lastSeen"))
+    return bool(events >= SUSTAINED_MIN_EVENTS and first and last and last - first >= SUSTAINED_MIN_SPAN)
+
+
 def sweep(manifest: dict, fetch: Fetch, *, now: datetime | None = None, lookback_minutes: int | None = None,
           max_enrichments: int | None = None, deadline_seconds: float = 240.0,
           enrich_seconds: float = 120.0,
@@ -247,6 +279,7 @@ def sweep(manifest: dict, fetch: Fetch, *, now: datetime | None = None, lookback
             cursors.add(cursor)
 
     candidates, deferred, enriched, unreadable = [], 0, 0, 0
+    filtered_transient, admission_unreadable = 0, 0
     # Oldest lastSeen first: groups nearest the lookback edge are enriched now,
     # so a deferred group is among the newest and is re-observed next sweep.
     ordered = sorted(groups.values(), key=lambda item: str(item[0].get("lastSeen") or ""))
@@ -270,6 +303,19 @@ def sweep(manifest: dict, fetch: Fetch, *, now: datetime | None = None, lookback
         sha = release_sha(facts["release"])
         short_id = row.get("shortId") if isinstance(row.get("shortId"), str) and SHORT_ID.match(row["shortId"]) else issue_id
         exception_type = facts["exception_type"]
+        classification = classify(exception_type, facts["message"], facts["in_app"], sha)
+        if is_transient(row, classification, exception_type):
+            # The issue list's count/firstSeen cover only the query window, so
+            # read lifetime figures from the issue itself. Unreadable: admit.
+            try:
+                lifetime, _ = fetch(f"{API}/organizations/{org['slug']}/issues/{issue_id}/")
+                sustained = is_sustained(lifetime if isinstance(lifetime, dict) else {})
+            except SweepError:
+                admission_unreadable += 1
+                sustained = True
+            if not sustained:
+                filtered_transient += 1
+                continue
         candidates.append({
             "entity": manifest["entity"],
             "repo": route["repo"],
@@ -281,7 +327,7 @@ def sweep(manifest: dict, fetch: Fetch, *, now: datetime | None = None, lookback
             "release_sha": sha,
             "fingerprint": hashlib.sha256(f"sentry-group:{issue_id}".encode()).hexdigest(),
             "title": f"Sentry {short_id}" + (f": {exception_type}" if exception_type else ""),
-            "classification": classify(exception_type, facts["message"], facts["in_app"], sha),
+            "classification": classification,
             "severity": "fatal" if row.get("level") == "fatal" else "error",
             "environment": "production",
             "telemetry_links": [f"https://{org['slug']}.sentry.io/issues/{issue_id}/"],
@@ -289,6 +335,7 @@ def sweep(manifest: dict, fetch: Fetch, *, now: datetime | None = None, lookback
     return {"candidates": candidates, "stats": {
         "since": since, "pages": pages, "groups": len(groups), "enriched": enriched,
         "unreadable": unreadable, "deferred": deferred,
+        "filtered_transient": filtered_transient, "admission_unreadable": admission_unreadable,
     }}
 
 
