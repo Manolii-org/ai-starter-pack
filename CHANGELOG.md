@@ -1,5 +1,43 @@
 # Changelog
 
+## [1.27.0] — 2026-11-15
+
+Security-only maintenance release: v1.26.0 plus the central Security Assurance
+changes from #341. Every new input defaults to v1.26.0 behaviour; Node defaults
+are unchanged (the Node 24 move stays in 2.0.0).
+
+### Fixed
+
+- `static-review` / `static-review-reusable`: Semgrep no longer uses the
+  archived `returntocorp/semgrep-action` (archived 2024-04-09). The job runs in
+  Semgrep's own image pinned by tag and digest, fetches the same default
+  rulesets at run time (never vendored), sends no metrics, and on pull requests
+  and merge queues reports only findings the change introduces
+  (`--baseline-commit`). It still fails on findings. PR Assessment's own
+  Semgrep step leaves the archived action in 2.0.0.
+
+### Added
+
+- Security assurance (central shared service):
+  - `workflow-security-reusable`: `runs_on` (default `ubuntu-latest`;
+    `ubuntu-slim` suffices) and `changed_only` (default `false`). With
+    `changed_only`, pull requests and merge queues skip the scan visibly unless
+    a workflow, composite action or `action.yml` changed; detection fails safe
+    to scanning. The job name `Workflow security` is unchanged.
+  - `secret-scan-reusable`: `engine` (`gitleaks` default, or checksum-verified
+    `trufflehog` with `trufflehog_only_verified`) and `osv_scanner`
+    (`off` default, `report`, `enforce`): one OSV-Scanner pass over every
+    supported lockfile, including known-malicious package data, inside the
+    existing Dependency Vulnerability Audit job. Job names and outputs are
+    unchanged.
+  - `static-review-reusable`: `semgrep_runs_on`, `semgrep_config` and
+    `semgrep_local_rules` (defaults keep v1 behaviour).
+  - Pack-only `skill-scan.yml` + `scripts/skill-scan-gate.py`: SkillSpector
+    (pinned, static `--no-llm`) scans the skills this pack distributes once at
+    the source and fails on HIGH/CRITICAL skill risk.
+  - `.githooks/pre-commit`: optional staged-change secret scan when `gitleaks`
+    is installed (`SKIP_GITLEAKS=1` skips once).
+
 ## [2.0.0] — pending qualification
 
 ### Fixed
