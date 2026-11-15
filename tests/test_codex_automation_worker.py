@@ -196,7 +196,10 @@ def test_workflow_is_default_off_trusted_checkout_and_secret_free():
     assert "vars.CODEX_AUTOMATION_ENABLED == 'true'" in job["if"]
     checkout = job["steps"][0]["with"]
     assert checkout["ref"] == "${{ github.workflow_sha }}" and checkout["persist-credentials"] is False
-    assert "id-token" not in flow["permissions"]
+    # Least privilege (zizmor excessive-permissions): nothing at workflow level.
+    assert flow["permissions"] == {}
+    assert flow["jobs"]["execute"]["permissions"] == {
+        "contents": "read", "actions": "read", "pull-requests": "read", "issues": "write", "statuses": "write"}
     # The editor job never sees a secret; only the separate publisher holds one.
     execute_text = yaml.safe_dump(flow["jobs"]["execute"])
     assert "secrets." not in execute_text

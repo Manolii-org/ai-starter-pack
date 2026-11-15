@@ -9,12 +9,7 @@ on:
   workflow_run: # zizmor: ignore[dangerous-triggers]
     workflows: ["Codex Automation Request"]
     types: [completed]
-permissions:
-  contents: read
-  pull-requests: write
-  issues: write
-  statuses: write
-  actions: read
+permissions: {}
 concurrency:
   group: codex-automation-${{ github.event.workflow_run.pull_requests[0].number || github.event.workflow_run.id }}-${{ github.event.workflow_run.head_sha }}
   cancel-in-progress: false
@@ -29,6 +24,14 @@ jobs:
       github.event.workflow_run.event == 'pull_request'
     runs-on: ${{ fromJSON(vars.CODEX_AUTOMATION_RUNNER || '"ubuntu-24.04"') }}
     timeout-minutes: 60
+    # Least privilege per job: read the request/PR, append custody statuses,
+    # post one advisory comment. No contents write and no id-token.
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+      issues: write
+      statuses: write
     continue-on-error: true
     outputs:
       packet: ${{ steps.worker.outputs.packet }}
