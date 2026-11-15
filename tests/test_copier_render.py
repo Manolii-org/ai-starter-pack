@@ -1200,7 +1200,9 @@ def test_executor_pack_recipe_renders_without_linux_consumer_dependencies():
     runner = runpy.run_path(str(ROOT / "scripts/agent-check.py"))
     assert runner["TOOLS"]["bwrap"] == ["/usr/bin/bwrap", "--version"]
     assert runner["TOOLS"]["cc"] == ["/usr/bin/cc", "--version"]
-    assert len(owner["checks"]) == 11
+    # 11 accepted owner checks plus this train's pack-only subscription contract.
+    assert len(owner["checks"]) == 12
+    assert "subscription-automation-text-contract" in {check["id"] for check in owner["checks"]}
     assert {"installer-layout-contract", "native-owner-recipe-contract", "source-qualification-contract"} <= {
         check["id"] for check in owner["checks"]
     }
