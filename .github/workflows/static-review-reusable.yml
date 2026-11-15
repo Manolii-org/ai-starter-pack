@@ -106,6 +106,14 @@ jobs:
             fi
           fi
           base="${PR_BASE_SHA:-${MQ_BASE_SHA:-}}"
+          # On pull_request the checkout is GitHub's test merge commit, built on
+          # the base branch's current tip. pull_request.base.sha is not updated
+          # when the base branch moves, so baselining on it would report findings
+          # from base commits merged since. The merge commit's first parent is
+          # exactly the base it was built on.
+          if [ -n "${PR_BASE_SHA:-}" ] && git rev-parse -q --verify 'HEAD^2' >/dev/null; then
+            base="$(git rev-parse 'HEAD^1')"
+          fi
           if [ -n "$base" ]; then
             echo "Reporting findings introduced since ${base}"
             set -- "$@" --baseline-commit "$base"

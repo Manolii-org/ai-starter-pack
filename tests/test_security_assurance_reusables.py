@@ -189,3 +189,46 @@ def test_routing_lint_skips_callers_without_a_routing_config(tmp_path):
     assert found(".claude/skills/a/SKILL.md", "scripts/lint-agent-routing.py") == "found=false"
     assert found(".claude/agents/x.md", "scripts/lint-agent-routing.py", ".claude/model-routing.json") == "found=true"
     assert found(".claude/skills/a/SKILL.md", "scripts/lint-agent-routing.py", ".claude/model-routing.json") == "found=true"
+
+
+def _semgrep_script(name):
+    job = _load(name)["jobs"]["semgrep"]
+    return "\n".join(s["run"] for s in job["steps"] if "semgrep" in s.get("run", ""))
+
+
+def test_semgrep_baseline_is_the_merge_commits_base_not_a_stale_base_sha(tmp_path):
+    """A base branch that moved after the PR event must not be blamed on the PR."""
+    import os
+    import subprocess
+
+    def git(*a, cwd):
+        return subprocess.run(["git", *a], cwd=cwd, env=env_git, check=True, capture_output=True, text=True).stdout.strip()
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    env_git = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@x", "GIT_COMMITTER_NAME": "t",
+               "GIT_COMMITTER_EMAIL": "t@x", "HOME": str(tmp_path), "PATH": os.environ["PATH"]}
+    git("init", "-q", "-b", "main", cwd=repo)
+    (repo / "a").write_text("1")
+    git("add", "a", cwd=repo); git("commit", "-qm", "base", cwd=repo)
+    stale_base = git("rev-parse", "HEAD", cwd=repo)
+    git("checkout", "-qb", "pr", cwd=repo)
+    (repo / "b").write_text("pr")
+    git("add", "b", cwd=repo); git("commit", "-qm", "pr", cwd=repo)
+    git("checkout", "-q", "main", cwd=repo)
+    (repo / "c").write_text("base moved")
+    git("add", "c", cwd=repo); git("commit", "-qm", "moved", cwd=repo)
+    moved_base = git("rev-parse", "HEAD", cwd=repo)
+    git("merge", "-q", "--no-ff", "-m", "test merge", "pr", cwd=repo)  # GitHub's refs/pull/N/merge shape
+
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    args_file = tmp_path / "args"
+    (bindir / "semgrep").write_text(f"#!/bin/sh\nprintf '%s\\n' \"$@\" > {args_file}\n")
+    (bindir / "semgrep").chmod(0o755)
+    for name in ("static-review.yml", "static-review-reusable.yml"):
+        env = {**env_git, "PATH": f"{bindir}:{os.environ['PATH']}", "GITHUB_WORKSPACE": str(repo),
+               "PR_BASE_SHA": stale_base, "MQ_BASE_SHA": "", "SEMGREP_CONFIG": "p/default", "SEMGREP_LOCAL_RULES": ""}
+        subprocess.run(["sh", "-c", _semgrep_script(name)], cwd=repo, env=env, check=True)
+        args = args_file.read_text().split()
+        assert args[args.index("--baseline-commit") + 1] == moved_base, name

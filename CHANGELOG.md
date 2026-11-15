@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.27.2] — 2026-11-15
+
+### Fixed
+
+- `static-review` / `static-review-reusable`: on pull requests, Semgrep now
+  baselines on the first parent of GitHub's test merge commit (the base tip the
+  checkout was built on) instead of `pull_request.base.sha`. That field is not
+  updated when the base branch moves, so findings from base commits merged after
+  the PR's last push were reported as introduced by the PR. Merge-queue runs keep
+  `merge_group.base_sha`.
+
 ## [1.27.1] — 2026-11-15
 
 ### Fixed
