@@ -35,8 +35,10 @@ MAX_PATCH_BYTES = 200 * 1024
 MAX_FILES = 20
 MAX_SUMMARY = 100
 FORBIDDEN_HEADERS = ("deleted file mode", "old mode", "new mode", "rename from", "rename to",
+                     "rename old", "rename new",
                      "copy from", "copy to", "similarity index", "dissimilarity index",
                      "GIT binary patch", "Binary files ")
+HUNK = re.compile(r"@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@")
 SAFE_PATH = re.compile(r"[A-Za-z0-9_.@+\-][A-Za-z0-9_.@+\-/]{0,255}\Z")
 IDENTITY = {"GIT_AUTHOR_NAME": "subscription-automation", "GIT_AUTHOR_EMAIL": "automation@invalid",
             "GIT_COMMITTER_NAME": "subscription-automation", "GIT_COMMITTER_EMAIL": "automation@invalid",
@@ -76,7 +78,36 @@ def validate_patch(patch: str) -> list[str]:
         raise PatchRefused("patch_control_characters")
     paths = []
     current = None
+    old_left = new_left = 0
     for line in patch.split("\n"):
+        # Hunk content ("--- old comment" removing an SQL comment, "+++" added
+        # text) is never a header. Git ends a hunk by its line counts, so do we:
+        # anything after the counted lines is checked as a header again.
+        if old_left or new_left:
+            kind = line[:1]
+            if kind == "\\":
+                continue
+            if kind == " " and old_left and new_left:
+                old_left, new_left = old_left - 1, new_left - 1
+                continue
+            if kind == "-" and old_left:
+                old_left -= 1
+                continue
+            if kind == "+" and new_left:
+                new_left -= 1
+                continue
+            raise PatchRefused("patch_hunk_invalid")
+        if (line[:1] == " " or (line[:1] in "+-" and line[:1] and not line.startswith(("--- ", "+++ ")))):
+            # Content outside a counted hunk is malformed (git would refuse or
+            # read it as another patch); never pass it through unchecked.
+            raise PatchRefused("patch_hunk_invalid")
+        if line.startswith("@@"):
+            hunk = HUNK.match(line)
+            if current is None or not hunk:
+                raise PatchRefused("patch_hunk_invalid")
+            old_left = int(hunk.group(1) if hunk.group(1) is not None else 1)
+            new_left = int(hunk.group(2) if hunk.group(2) is not None else 1)
+            continue
         if line.startswith("diff --git "):
             match = re.fullmatch(r"diff --git a/(\S+) b/(\S+)", line)
             if not match or match.group(1) != match.group(2):
@@ -129,8 +160,12 @@ def build_candidate(source: Path, work: Path, base_sha: str, proposal: dict) -> 
     patch = proposal["patch"].encode("utf-8")
     _git(edit, "apply", "--check", "--whitespace=nowarn", "-", stdin=patch)
     _git(edit, "apply", "--index", "--whitespace=nowarn", "-", stdin=patch)
-    changed = _git(edit, "diff", "--cached", "--name-only", "-z").decode().split("\0")
-    if sorted(p for p in changed if p) != sorted(paths):
+    # Rename detection off: a rename must show as a deletion and be refused.
+    status = _git(edit, "diff", "--cached", "--no-renames", "--name-status", "-z").decode().split("\0")
+    entries = [item for item in status if item]
+    pairs = list(zip(entries[0::2], entries[1::2]))
+    if (len(entries) % 2 or any(kind not in {"A", "M"} for kind, _ in pairs)
+            or sorted(path for _, path in pairs) != sorted(paths)):
         raise PatchRefused("patch_effect_mismatch")
     # Only regular files may result: an existing symlink's target is not code.
     staged = _git(edit, "ls-files", "-s", "-z", "--", *paths).decode().split("\0")

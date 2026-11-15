@@ -746,17 +746,20 @@ class ModelBroker(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
             self.output_bytes += count
 
     def audit(self):
-        result = {
-            "requests": self.calls,
-            "successful_provider_turns": self.successful_turns,
-            "output_bytes": self.output_bytes,
-            "caller_headers_forwarded": False,
-            "provider_route": "fixed_responses_only",
-        }
-        if self.text_only:
-            result["execution_contract"] = "text_only"
-            result["text_completion"] = self.last_text_receipt
-            result["text_completions"] = [dict(row) for row in self.text_receipts]
+        # One consistent snapshot: counters and receipts must describe the
+        # same moment, or unmeasured = requests - completions is wrong.
+        with self.lock:
+            result = {
+                "requests": self.calls,
+                "successful_provider_turns": self.successful_turns,
+                "output_bytes": self.output_bytes,
+                "caller_headers_forwarded": False,
+                "provider_route": "fixed_responses_only",
+            }
+            if self.text_only:
+                result["execution_contract"] = "text_only"
+                result["text_completion"] = self.last_text_receipt
+                result["text_completions"] = [dict(row) for row in self.text_receipts]
         return result
 
     def remember_reasoning(self, body, content_type):

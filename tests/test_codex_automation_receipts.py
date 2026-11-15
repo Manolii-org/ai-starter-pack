@@ -46,7 +46,7 @@ def test_actual_broker_records_one_receipt_per_completion_with_actual_input_size
     assert len(rows) == 2 and all("text" not in row for row in rows)
     assert rows[0]["input_chars"] > rows[1]["input_chars"] > 0
     emitted = receipts.build(rows, **COORDINATES)
-    assert [r["attempt_id"] for r in emitted] == ["41.2:1", "41.2:2"]
+    assert [r["attempt_id"] for r in emitted] == ["41.2:assessment:1", "41.2:assessment:2"]
     assert all(r["subscription_eligible"] and r["cost_usd"] is None for r in emitted)
     assert all(r["model"] == broker.REVIEW_MODEL for r in emitted)
 

@@ -126,7 +126,7 @@ def build(completions, *, repository, run_id, run_attempt, base_sha, head_sha,
             "workflow_sha": workflow_sha,
             "correlation_id": correlation_id,
             "logical_request_id": f"{correlation_id}:{index}",
-            "attempt_id": f"{run_id}.{run_attempt}:{index}",
+            "attempt_id": f"{run_id}.{run_attempt}:{role}:{index}",
         }
         rows.append(validate(row))
     return rows

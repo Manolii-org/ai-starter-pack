@@ -27,6 +27,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -45,6 +46,10 @@ MARKER = "<!-- codex-automation-assessment:v1 -->"
 MAX_GUEST_OUTPUT = 2 * 1024 * 1024
 CLOSURE_DATA = (".ai/security/token-shapes.json", "data/token-shapes.json")
 GUEST_MARGIN_SECONDS = 60
+# The execute job has a 60-minute limit; keep setup and retention headroom.
+EXECUTE_SECONDS = 52 * 60
+SESSION_WAIT_SECONDS = 1250
+MIN_GUEST_SECONDS = 120
 MD_UNSAFE = re.compile(r"([\\`*_\[\]()<>#|~!])")
 STATES = frozenset({"completed", "held", "blocked_credentials", "blocked_quota", "failed"})
 MAX_PR_TITLE_BYTES = 1024
@@ -59,7 +64,9 @@ def policy():
             or not isinstance(value.get("hold_labels"), list)
             or not isinstance(roster, list) or not roster
             or any(not isinstance(v, str) or not re.fullmatch(r"[a-z0-9-]{1,64}", v) for v in roster)
-            or value.get("data_sensitivity") not in receipts.SENSITIVITY
+            # The Judge always submits "internal" input; a "public" policy would make
+            # the adapter refuse every Judge turn as a scope mismatch.
+            or value.get("data_sensitivity") != "internal"
             or value.get("reasoning_effort") not in ("medium", "xhigh")
             or type(value.get("autofix", False)) is not bool
             or type(value.get("max_autofix_rounds", 1)) is not int
@@ -239,6 +246,27 @@ def consent(target, roles):
     return assignments
 
 
+def _wait_budget(deadline):
+    """Lock wait that still leaves a guest pass inside the job deadline."""
+    remaining = deadline - time.monotonic() - MIN_GUEST_SECONDS - GUEST_MARGIN_SECONDS
+    if remaining < 1:
+        raise Incomplete("controller_time_budget_exhausted")
+    return int(min(SESSION_WAIT_SECONDS, remaining))
+
+
+def _guest_budget(deadline, config):
+    remaining = deadline - time.monotonic() - GUEST_MARGIN_SECONDS
+    if remaining < MIN_GUEST_SECONDS:
+        raise Incomplete("controller_time_budget_exhausted")
+    return int(min(config["max_seconds"] - GUEST_MARGIN_SECONDS, remaining))
+
+
+def _checkpoint(path, rows):
+    """Persist receipts after every pass so a cancelled job keeps them."""
+    if path is not None:
+        path.write_text(receipts.dumps(rows))
+
+
 def write_pr_meta(directory, meta):
     meta = meta or {}
     value = {"title": _bounded(meta.get("title", ""), MAX_PR_TITLE_BYTES),
@@ -252,7 +280,7 @@ def write_pr_meta(directory, meta):
 
 def execute(github, target, directory, *, run_id, run_attempt, workflow_sha, guest=run_guest,
             session=profiles.automation_session, image_builder=build_image, source_loader=git_input,
-            pr_meta=None):
+            pr_meta=None, deadline=None, checkpoint=None):
     """Return (result, receipt_rows). Never retries and never clears custody."""
     config = policy()
     rows = []
@@ -268,9 +296,11 @@ def execute(github, target, directory, *, run_id, run_attempt, workflow_sha, gue
     except custody.CustodyHold as exc:
         return {"state": "held", "reason": str(exc)}, rows
     unmeasured = {}
+    deadline = time.monotonic() + EXECUTE_SECONDS if deadline is None else deadline
     result = _passes(github, target, directory, config, rows, unmeasured, assignments, run_id=run_id,
                      run_attempt=run_attempt, workflow_sha=workflow_sha, guest=guest, session=session,
-                     image_builder=image_builder, source_loader=source_loader, pr_meta=pr_meta)
+                     image_builder=image_builder, source_loader=source_loader, pr_meta=pr_meta,
+                     deadline=deadline, checkpoint=checkpoint)
     # Every exit after broker execution keeps the unknown-outcome accounting,
     # not only the adjudicated one (failed/held/blocked passes most need it).
     result["unmeasured_requests"] = unmeasured
@@ -278,7 +308,7 @@ def execute(github, target, directory, *, run_id, run_attempt, workflow_sha, gue
 
 
 def _passes(github, target, directory, config, rows, unmeasured, assignments, *, run_id, run_attempt, workflow_sha,
-            guest, session, image_builder, source_loader, pr_meta):
+            guest, session, image_builder, source_loader, pr_meta, deadline, checkpoint):
     passes = {}
     try:
         write_pr_meta(directory, pr_meta)
@@ -293,19 +323,20 @@ def _passes(github, target, directory, config, rows, unmeasured, assignments, *,
             context_file = write_context(directory, document)
             broker_dir = directory / f"broker-{role}"
             broker_dir.mkdir(mode=0o700)
-            audit = None
+            audit, broker = None, None
             try:
-                with session(assignments[role], target["repository"], role) as (auth, _snapshot), \
+                with session(assignments[role], target["repository"], role,
+                             wait_seconds=_wait_budget(deadline)) as (auth, _snapshot), \
                         serve(broker_dir / "model.sock", Subscription(auth), text_only=True,
                               max_requests=config["max_requests"], max_seconds=config["max_seconds"],
                               expected_effort=config["reasoning_effort"]) as broker:
-                    try:
-                        output = guest(image if image else "", source, broker_dir, context_file, candidates,
-                                       document, seconds=config["max_seconds"] - GUEST_MARGIN_SECONDS)
-                    finally:
-                        # Spent completions are measured even when the guest fails.
-                        audit = broker.audit()
+                    output = guest(image if image else "", source, broker_dir, context_file, candidates,
+                                   document, seconds=_guest_budget(deadline, config))
             finally:
+                # Audit after the broker has shut down, so a completion recorded
+                # while it stopped is measured; spent completions are measured
+                # even when the guest fails.
+                audit = broker.audit() if broker is not None else None
                 if audit is not None:
                     unmeasured[role] = max(0, audit.get("requests", 0) - len(audit.get("text_completions", [])))
                     rows += receipts.build(
@@ -313,6 +344,7 @@ def _passes(github, target, directory, config, rows, unmeasured, assignments, *,
                         run_attempt=run_attempt, base_sha=target["base_sha"], head_sha=target["head_sha"],
                         workflow_sha=workflow_sha, role=role, data_sensitivity=config["data_sensitivity"],
                         correlation_id=f"{target['repository']}#{target['pull_request']}@{target['head_sha']}/{role}")
+                    _checkpoint(checkpoint, rows)
             if broker.terminal_error:
                 return {"state": "blocked_quota" if broker.terminal_error == "subscription_quota_exhausted"
                         else "failed", "reason": broker.terminal_error, "passes": passes}
@@ -339,7 +371,8 @@ def _passes(github, target, directory, config, rows, unmeasured, assignments, *,
                 result["autofix"] = autofix_stage(github, target, directory, config, result["publication"], image,
                                                   source, run_id=run_id, run_attempt=run_attempt,
                                                   workflow_sha=workflow_sha, guest=guest, session=session,
-                                                  rows=rows, unmeasured=unmeasured)
+                                                  rows=rows, unmeasured=unmeasured, deadline=deadline,
+                                                  checkpoint=checkpoint)
             except Exception as exc:  # noqa: BLE001 - the finished Judge outcome must survive
                 result["autofix"] = {"outcome": "failed", "reason": type(exc).__name__}
         return result
@@ -369,7 +402,7 @@ def surviving_findings(publication):
 
 
 def autofix_stage(github, target, directory, config, publication, image, source, *, run_id, run_attempt,
-                  workflow_sha, guest, session, rows, unmeasured):
+                  workflow_sha, guest, session, rows, unmeasured, deadline=None, checkpoint=None):
     """Editor half only: produce an inert publisher packet. No publication
     credential exists in this job; `autofix-publish.py` decides separately."""
     findings = surviving_findings(publication)
@@ -402,19 +435,20 @@ def autofix_stage(github, target, directory, config, publication, image, source,
     context_file = write_context(directory, document)
     broker_dir = directory / "broker-autofix"
     broker_dir.mkdir(mode=0o700)
-    audit, output = None, None
+    audit, output, broker = None, None, None
+    deadline = time.monotonic() + EXECUTE_SECONDS if deadline is None else deadline
     try:
-        with session(assignment, target["repository"], "autofix") as (auth, _snapshot), \
+        with session(assignment, target["repository"], "autofix",
+                     wait_seconds=_wait_budget(deadline)) as (auth, _snapshot), \
                 serve(broker_dir / "model.sock", Subscription(auth), text_only=True, max_requests=2,
                       max_seconds=config["max_seconds"], expected_effort=config["reasoning_effort"]) as broker:
-            try:
-                output = guest(image, source, broker_dir, context_file, handoff, document,
-                               seconds=config["max_seconds"] - GUEST_MARGIN_SECONDS)
-            finally:
-                audit = broker.audit()
+            output = guest(image, source, broker_dir, context_file, handoff, document,
+                           seconds=_guest_budget(deadline, config))
     except (Incomplete, BrokerError, OSError, ValueError, subprocess.SubprocessError, profiles.ProfileError) as exc:
         return {"outcome": "failed", "reason": str(exc)[:200] or type(exc).__name__}
     finally:
+        # Audit after broker shutdown (see _passes).
+        audit = broker.audit() if broker is not None else None
         if audit is not None:
             unmeasured["autofix"] = max(0, audit.get("requests", 0) - len(audit.get("text_completions", [])))
             try:
@@ -425,6 +459,7 @@ def autofix_stage(github, target, directory, config, publication, image, source,
                     correlation_id=f"{target['repository']}#{target['pull_request']}@{target['head_sha']}/autofix")
             except receipts.ReceiptError:
                 unmeasured["autofix"] = audit.get("requests", 0)
+            _checkpoint(checkpoint, rows)
     if output.get("status") != "completed":
         return {"outcome": "held", "reason": output.get("reason", "guest_held"), "detail": output.get("detail", "")}
     if output.get("outcome") != "candidate":
@@ -525,12 +560,20 @@ def main(argv):
         return 0
     target = json.loads((state / "target.json").read_text(encoding="utf-8"))
     if command == "run":
+        out = state / "result"
+        out.mkdir(exist_ok=True)
+        # Name the retained artifact before any model work: a cancelled job
+        # still uploads the per-pass receipt checkpoint.
+        _output(artifact=f"codex-automation-result-{target['pull_request']}-{target['head_sha']}")
+        # Never an empty retained directory, even if execution fails before a pass.
+        _checkpoint(out / "inference-receipts.jsonl", [])
         with tempfile.TemporaryDirectory(dir=state) as tmp:
             meta = state / "pr-meta.json"
             result, rows = execute(github, target, Path(tmp), run_id=int(os.environ["GITHUB_RUN_ID"]),
                                    run_attempt=int(os.environ["GITHUB_RUN_ATTEMPT"]),
                                    workflow_sha=os.environ["GITHUB_WORKFLOW_SHA"],
-                                   pr_meta=json.loads(meta.read_text(encoding="utf-8")) if meta.is_file() else None)
+                                   pr_meta=json.loads(meta.read_text(encoding="utf-8")) if meta.is_file() else None,
+                                   checkpoint=out / "inference-receipts.jsonl")
             packet = (result.get("autofix") or {}).get("packet_dir")
             if packet:
                 # Retain the inert packet before the temporary editor workspace is removed.
@@ -538,12 +581,9 @@ def main(argv):
                 result["autofix"]["packet_dir"] = "packet"
         if result["state"] not in STATES:
             result = {"state": "failed", "reason": "unknown_state"}
-        out = state / "result"
-        out.mkdir(exist_ok=True)
         (out / "result.json").write_text(json.dumps(result, sort_keys=True))
         (out / "inference-receipts.jsonl").write_text(receipts.dumps(rows))
-        _output(artifact=f"codex-automation-result-{target['pull_request']}-{target['head_sha']}",
-                state=result["state"])
+        _output(state=result["state"])
         if (state / "packet").is_dir():
             _output(packet=f"codex-automation-packet-{target['pull_request']}-{target['head_sha']}",
                     pr_number=str(int(target["pull_request"])), expected_head=target["head_sha"],

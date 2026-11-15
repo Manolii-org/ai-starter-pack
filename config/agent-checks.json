@@ -557,6 +557,7 @@
     },
     {
       "id": "subscription-automation-text-contract",
+      "environment": "release-contract-python",
       "paths": [
         "scripts/ci/codex_automation_adapter.py",
         "scripts/ci/codex_automation_context.py",
@@ -587,6 +588,10 @@
         "scripts/ci/codex_automation_patch.py",
         "scripts/ci/autofix-publish.py",
         "tests/test_codex_automation_patch.py",
+        "scripts/ci/codex_automation_request.py",
+        "scripts/ci/codex_automation_custody.py",
+        "tests/test_codex_automation_request.py",
+        "tests/test_codex_automation_custody.py",
         "config/agent-checks.json"
       ],
       "tools": [
@@ -594,7 +599,7 @@
       ],
       "commands": [
         [
-          "python3",
+          ".ai/agent-checks/release-venv/bin/python",
           "-m",
           "pytest",
           "-q",
@@ -608,7 +613,9 @@
           "tests/test_codex_automation_guest.py",
           "tests/test_codex_automation_receipts.py",
           "tests/test_codex_automation_worker.py",
-          "tests/test_codex_automation_patch.py"
+          "tests/test_codex_automation_patch.py",
+          "tests/test_codex_automation_request.py",
+          "tests/test_codex_automation_custody.py"
         ]
       ],
       "ci_sources": [

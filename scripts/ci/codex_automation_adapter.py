@@ -7,6 +7,8 @@ not host authorization, independently verified execution or publication proof.
 
 from __future__ import annotations
 
+import importlib.util
+import json
 import os
 from pathlib import Path
 
@@ -38,6 +40,35 @@ def context() -> dict:
     return value
 
 
+_ADMISSION = None
+
+
+def _admit(system: str, user: str) -> None:
+    """Apply the HTTP lanes' review-content admission to the subscription lane.
+
+    The guest runs only the accepted closure (built from the trusted workflow
+    SHA, never candidate code), so this is the same strict screen the HTTP
+    lanes apply before export; a refusal holds instead of sending.
+    """
+    global _ADMISSION
+    if _ADMISSION is None:
+        path = Path(__file__).resolve().parents[1] / "lib/agent_capabilities.py"
+        spec = importlib.util.spec_from_file_location("_guest_review_admission", path)
+        if spec is None or spec.loader is None:
+            raise AutomationHold("unsafe_review_input")
+        module = importlib.util.module_from_spec(spec)
+        try:
+            spec.loader.exec_module(module)
+        except (OSError, ImportError, SyntaxError):
+            raise AutomationHold("unsafe_review_input") from None
+        _ADMISSION = module
+    payload = json.dumps({"system": system, "messages": [{"role": "user", "content": user}]}).encode("utf-8")
+    try:
+        _ADMISSION.admit_review_wire(payload)
+    except _ADMISSION.ReviewInputError:
+        raise AutomationHold("unsafe_review_input") from None
+
+
 def complete(system: str, user: str, *, role: str, data_sensitivity: str,
              max_tokens: int, first_party: bool = False, required_model: str | None = None) -> str:
     """One admitted full-input turn; no retries, truncation or HTTP fallback.
@@ -54,6 +85,7 @@ def complete(system: str, user: str, *, role: str, data_sensitivity: str,
     if (type(first_party) is not bool or first_party or required_model is not None
             or os.environ.get("CLIENT_AI_POLICY")):
         raise AutomationHold("subscription_explicit_provider_policy_held")
+    _admit(system, user)
     try:
         response = transport.invoke(system, user, role=role, data_sensitivity=data_sensitivity,
                                     max_tokens=max_tokens, reasoning_effort=value["reasoning_effort"])

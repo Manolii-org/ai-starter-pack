@@ -335,3 +335,79 @@ def test_workflow_copies_are_bounded(sandbox, monkeypatch, tmp_path):
     monkeypatch.setattr(guest, "REPO", bare)
     with pytest.raises(guest.GuestHold, match="candidate_workflow_over_budget"):
         guest._workflow_heads({"base_sha": base, "head_sha": head}, tmp_path)
+
+
+def test_autofix_request_keeps_unicode_raw_within_the_transport_budget(sandbox):
+    """CodeRabbit (#347): escaped CJK multiplied the request past the transport's
+    180,000-character limit although the file fit the context budget."""
+    import sys as _sys
+    _sys.path.insert(0, str(Path(guest.ROOT) / "scripts/ci"))
+    import codex_subscription_text as text
+    assert guest.MAX_REQUEST_CHARS == text.MAX_INPUT_CHARS
+    value = autofix_inbox(sandbox)
+    monkey_files = {"policy.py": "界" * 35000}
+    calls = []
+
+    class Recording(FakeAdapter):
+        def complete(self, system, user, **kwargs):
+            calls.append(len(system) + len(user))
+            return json.dumps({"summary": "no safe fix", "patch": ""})
+    original = guest._show
+    try:
+        guest._show = lambda v, p: monkey_files[p].encode("utf-8")
+        assert guest.autofix(guest._context(), adapter=Recording(""))["outcome"] == "no_safe_fix"
+    finally:
+        guest._show = original
+    assert calls and calls[0] < text.MAX_INPUT_CHARS
+
+
+def test_workflow_renamed_out_of_the_workflow_directory_keeps_the_floor(sandbox, monkeypatch, tmp_path):
+    """CodeRabbit (#347): an unchanged deploying workflow moved out of
+    .github/workflows/ must still reach the classifier's rename-target read."""
+    src = tmp_path / "rn-src"
+    src.mkdir()
+    def git(*args):
+        return subprocess.check_output(["git", "-C", str(src), *args], stderr=subprocess.DEVNULL).decode().strip()
+    git("init", "-q")
+    git("config", "user.email", "offline@example.invalid")
+    git("config", "user.name", "Offline fixture")
+    (src / ".github/workflows").mkdir(parents=True)
+    (src / ".github/workflows/release.yml").write_text(DEPLOY.format(t=10))
+    git("add", ".")
+    git("commit", "-qm", "base")
+    (src / "archive").mkdir()
+    git("mv", ".github/workflows/release.yml", "archive/release.yml")
+    git("commit", "-qm", "move")
+    bare = tmp_path / "rn.git"
+    subprocess.check_call(["git", "clone", "-q", "--bare", str(src), str(bare)])
+    monkeypatch.setattr(guest, "REPO", bare)
+    work = tmp_path / "rn-work"
+    work.mkdir()
+    guest._workflow_heads({"base_sha": git("rev-parse", "HEAD~1"), "head_sha": git("rev-parse", "HEAD")}, work)
+    assert (work / "archive/release.yml").read_text() == DEPLOY.format(t=10)
+    spec = importlib.util.spec_from_file_location("_cls2", Path(guest.ROOT) / "scripts/run-pr-classifier.py")
+    cls = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(cls)
+    sections = {".github/workflows/release.yml": ["rename from .github/workflows/release.yml\n"
+                                                  "rename to archive/release.yml\n"]}
+    assert cls._deploying_workflows(sections, work) == [".github/workflows/release.yml"]
+
+
+def test_unreadable_or_colliding_workflow_copies_hold(sandbox, monkeypatch, tmp_path):
+    """Independent review (#347): never an empty stand-in, never a crash."""
+    bare, base, head = _workflow_repo(tmp_path, {"a.txt": "a"}, {".github/workflows/d.yml": DEPLOY.format(t=1)})
+    monkeypatch.setattr(guest, "REPO", bare)
+    work = tmp_path / "wk"
+    (work / ".github/workflows").mkdir(parents=True)
+    (work / ".github/workflows/d.yml").write_text("existing")
+    with pytest.raises(guest.GuestHold, match="candidate_workflow_path_invalid"):
+        guest._workflow_heads({"base_sha": base, "head_sha": head}, work)
+    real = subprocess.run
+
+    def failing_show(args, **kwargs):
+        if "show" in args:
+            return subprocess.CompletedProcess(args, 128, b"", b"")
+        return real(args, **kwargs)
+    monkeypatch.setattr(guest.subprocess, "run", failing_show)
+    with pytest.raises(guest.GuestHold, match="candidate_workflow_unreadable"):
+        guest._workflow_heads({"base_sha": base, "head_sha": head}, tmp_path / "wk2")

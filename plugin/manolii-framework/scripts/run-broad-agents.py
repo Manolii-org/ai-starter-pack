@@ -1440,7 +1440,15 @@ def run_broad_agents(
             results[agent.name] = marker
             runnable.remove(agent)
 
-    with ThreadPoolExecutor(max_workers=3) as executor:
+    # The subscription broker admits two active turns; more would be refused
+    # before any provider call (review_admission_unavailable).
+    try:
+        subscription = _subscription_required()
+    except (OSError, RuntimeError, ImportError):
+        # Each role then writes its own subscription_guest_unavailable marker.
+        subscription = False
+    workers = min(3, _SUBSCRIPTION_MAX_ACTIVE) if subscription else 3
+    with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = {
             executor.submit(
                 invoke_agent, agent, api_key, messages.get(agent.name, user_message)
@@ -1525,6 +1533,9 @@ def main():
         )
     finally:
         tmp_manifest.unlink(missing_ok=True)
+
+
+_SUBSCRIPTION_MAX_ACTIVE = 2
 
 
 def _subscription_required() -> bool:

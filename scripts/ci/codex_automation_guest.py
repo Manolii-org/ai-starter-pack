@@ -133,34 +133,59 @@ def _workflow_heads(value, work):
     """Copy changed workflow files at the admitted head into the workspace.
 
     The classifier's deterministic deployment floor reads complete workflow
-    files relative to its cwd; without them it sees only changed lines and can
-    drop the required systems-consistency review. These bytes are data for
-    that reader only: never executed, bounded, and confined to the workspace.
+    files relative to its cwd (including a rename target, so a workflow moved
+    out of .github/workflows/ is still seen); without them it sees only changed
+    lines and can drop the required systems-consistency review. These bytes are
+    data for that reader only: never executed, bounded, confined to the workspace.
     """
     result = subprocess.run(
         ["git", "--no-pager", "--no-replace-objects", "-C", str(REPO), "-c", "core.quotePath=false",
-         "diff", "--name-only", "-z", "--no-renames", "--diff-filter=AM",
+         "diff", "--name-status", "-z", "-M", "--diff-filter=AMR",
          value["base_sha"] + "..." + value["head_sha"]],
         capture_output=True, timeout=60, check=False,
         env={"PATH": "/usr/bin:/bin", "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
              "GIT_TERMINAL_PROMPT": "0"})
     if result.returncode:
         raise GuestHold("candidate_diff_unavailable")
+    fields = [f.decode("utf-8", "replace") for f in result.stdout.split(b"\0")]
+    targets, index = [], 0
+    while index < len(fields) and fields[index]:
+        status = fields[index]
+        if status.startswith("R"):
+            old, new = fields[index + 1], fields[index + 2]
+            index += 3
+            if WORKFLOW_PATH.search(old) or WORKFLOW_PATH.search(new):
+                targets.append(new)
+        else:
+            path = fields[index + 1]
+            index += 2
+            if WORKFLOW_PATH.search(path):
+                targets.append(path)
     total = 0
-    for raw in result.stdout.split(b"\0"):
-        path = raw.decode("utf-8", "replace")
-        if not path or not WORKFLOW_PATH.search(path):
-            continue
+    for path in targets:
         parts = Path(path).parts
-        if Path(path).is_absolute() or ".." in parts or parts[0] in (".claude", ".ai") or "\ufffd" in path:
+        if (not parts or Path(path).is_absolute() or ".." in parts or parts[0] in (".claude", ".ai")
+                or "\ufffd" in path):
             raise GuestHold("candidate_workflow_path_invalid")
-        content = _show(value, path)
+        shown = subprocess.run(
+            ["git", "--no-pager", "-C", str(REPO), "show", f"{value['head_sha']}:{path}"],
+            capture_output=True, timeout=30, check=False,
+            env={"PATH": "/usr/bin:/bin", "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull})
+        if shown.returncode:
+            # Never an empty stand-in: the floor would fail open for this file.
+            raise GuestHold("candidate_workflow_unreadable")
+        content = shown.stdout
         if len(content) > MAX_WORKFLOW_BYTES or total + len(content) > MAX_WORKFLOW_TOTAL:
             raise GuestHold("candidate_workflow_over_budget")
         total += len(content)
         target = work / path
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(content)
+        try:
+            if target.exists():
+                raise OSError("workspace path collision")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(content)
+        except OSError:
+            raise GuestHold("candidate_workflow_path_invalid") from None
 
 
 def _remaining():
@@ -273,6 +298,7 @@ AUTOFIX_SYSTEM = (
     "{\"summary\": \"no safe fix\", \"patch\": \"\"}."
 )
 MAX_CONTEXT_BYTES = 120 * 1024
+MAX_REQUEST_CHARS = 180000  # codex_subscription_text.MAX_INPUT_CHARS
 MAX_BUNDLE_BYTES = 1024 * 1024
 
 
@@ -319,7 +345,10 @@ def autofix(value, adapter=None, patcher=None):
             raise GuestHold("autofix_context_over_budget")
         used += len(content)
         files[path] = content.decode("utf-8", "replace")
-    user = json.dumps({"findings": findings, "files_at_head": files}, sort_keys=True)
+    # Raw Unicode: escaping CJK/emoji would multiply the size past the transport budget.
+    user = json.dumps({"findings": findings, "files_at_head": files}, sort_keys=True, ensure_ascii=False)
+    if len(AUTOFIX_SYSTEM) + len(user) > MAX_REQUEST_CHARS:
+        raise GuestHold("autofix_context_over_budget")
     text = adapter.complete(AUTOFIX_SYSTEM, user, role="autofix",
                             data_sensitivity=value["data_sensitivity"], max_tokens=8000)
     try:

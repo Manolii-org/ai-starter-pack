@@ -1048,6 +1048,7 @@ TELEMETRY_ENV = {
 }
 STRICT_EXCLUDED = {
     "tests/test_codex_review_workflows.py",
+    "tests/test_codex_automation_request.py",
     ".github/workflows/codex-pr-review.yml",
     ".github/workflows/codex-security-diff-scan.yml",
     ".github/workflows/codex-review-worker.yml",
@@ -1167,6 +1168,7 @@ def test_standard_keeps_codex_review_unless_opted_out(default_render, tmp_path):
     codex = {".github/workflows/codex-pr-review.yml", ".github/workflows/codex-security-diff-scan.yml",
              ".github/workflows/codex-review-worker.yml", ".github/workflows/codex-review-recovery.yml"}
     codex.add("tests/test_codex_review_workflows.py")
+    codex.add("tests/test_codex_automation_request.py")
     # The subscription automation producer/controller depend on the review runtime.
     codex |= {".github/workflows/codex-automation-request.yml", ".github/workflows/codex-automation-worker.yml",
               "scripts/ci/codex-automation-worker.json", "scripts/ci/codex-automation-runtime/Dockerfile"}

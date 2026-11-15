@@ -136,6 +136,21 @@ sees the stated intent; guest
 stages share one budget below the host deadline; publication re-checks the
 current PR head and posts once per head (trusted-author marker).
 
+Landing review (#347) added: every subscription completion passes the same
+review-content admission (`admit_review_wire`) as the HTTP lanes before it is
+sent, and a refusal holds (without the HTTP broad lane's local identifier proofs,
+so it is stricter there and can hold where HTTP would not; it never fails open); the classifier sees the admitted head's changed
+workflow files (data only, bounded) so its deployment-review floor still
+applies; concurrent subscription calls are capped at the broker's two active
+turns; account-lock waits and guest runs share one deadline inside the
+execute job's limit, and receipts are checkpointed after each pass so a
+cancelled job keeps them; the broker audit is taken after shutdown under its
+lock; `attempt_id` is `<run>.<attempt>:<role>:<n>`, unique across role
+batches; the controller policy admits only `internal` sensitivity (the Judge's
+input class); autofix patches refuse legacy `rename old/new` headers, accept
+only added or modified files in the staged result, and treat `---`/`+++` hunk
+content as content.
+
 ### Guarded mutation and publication (`autofix`, default off)
 
 Enabled only by `"autofix": true` in the instance-owned controller policy and

@@ -186,3 +186,55 @@ def test_existing_symlink_target_cannot_be_rewritten(tmp_path):
     work.mkdir()
     with pytest.raises(patch.PatchRefused):
         patch.build_candidate(bare, work, head, {"summary": "Retarget", "patch": body})
+
+
+def test_legacy_rename_headers_are_refused():
+    """CodeRabbit (#347): `rename old`/`rename new` would delete a file the
+    validator never admitted."""
+    for body in ("diff --git a/dst.py b/dst.py\nrename old src.py\nrename new dst.py\n",
+                 FIX + "rename old policy.py\n"):
+        with pytest.raises(patch.PatchRefused, match="patch_operation_refused"):
+            patch.validate_patch(body)
+
+
+def test_staged_effect_must_be_additions_or_modifications_only(repo, tmp_path, monkeypatch):
+    bare, head = repo
+    real = patch.validate_patch
+    monkeypatch.setattr(patch, "validate_patch", lambda text: ["dst.py"])
+    rename = "diff --git a/policy.py b/dst.py\nsimilarity index 100%\nrename from policy.py\nrename to dst.py\n"
+    with pytest.raises(patch.PatchRefused, match="patch_effect_mismatch"):
+        patch.build_candidate(bare, tmp_path, head, {"summary": "x", "patch": rename})
+    monkeypatch.setattr(patch, "validate_patch", real)
+
+
+def test_hunk_content_that_looks_like_a_header_is_content(repo, tmp_path):
+    """CodeRabbit (#347): removing `-- old` (SQL comment) yields `--- old`."""
+    src = tmp_path / "s2"
+    src.mkdir()
+    git(src, "init", "-q")
+    git(src, "config", "user.email", "fixture@example.invalid")
+    git(src, "config", "user.name", "fixture")
+    (src / "q.sql").write_text("-- old comment\nselect 1;\n")
+    git(src, "add", ".")
+    git(src, "commit", "-qm", "h")
+    bare = tmp_path / "s2.git"
+    subprocess.check_call(["git", "clone", "-q", "--bare", str(src), str(bare)])
+    body = ("diff --git a/q.sql b/q.sql\n--- a/q.sql\n+++ b/q.sql\n@@ -1,2 +1,2 @@\n"
+            "--- old comment\n+++ new comment\n select 1;\n")
+    assert patch.validate_patch(body) == ["q.sql"]
+    work = tmp_path / "w2"
+    work.mkdir()
+    result = patch.build_candidate(bare, work, git(src, "rev-parse", "HEAD"), {"summary": "Fix comment", "patch": body})
+    assert result["paths"] == ["q.sql"]
+
+
+def test_text_after_the_counted_hunk_lines_is_checked_as_headers():
+    """Independent review (#347): git ends a hunk by its line counts, so a
+    second plain patch after a hunk must not hide from the validator."""
+    smuggled = FIX + ("--- a/.github/workflows/x.yml\n+++ b/.github/workflows/x.yml\n@@ -1 +1 @@\n-a\n+b\n")
+    with pytest.raises(patch.PatchRefused):
+        patch.validate_patch(smuggled)
+    overlong = FIX.replace("@@ -1,2 +1,2 @@", "@@ -1,1 +1,1 @@")
+    with pytest.raises(patch.PatchRefused):
+        patch.validate_patch(overlong)
+    assert patch.validate_patch(FIX) == ["policy.py"]

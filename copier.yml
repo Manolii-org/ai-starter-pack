@@ -423,6 +423,7 @@ _exclude:
   - "{% if not codex_review %}scripts/ci/codex-automation-worker.json{% endif %}"
   - "{% if not codex_review %}scripts/ci/codex-automation-runtime{% endif %}"
   - "{% if not codex_review %}tests/test_codex_review_workflows.py{% endif %}"
+  - "{% if not codex_review %}tests/test_codex_automation_request.py{% endif %}"
   # isolation_profile=strict: the maintainer's Doppler / LiteLLM / fleet-coupled files.
   - "{% if isolation_profile == 'strict' %}.github/workflows/setup-env-secret.yml{% endif %}"
   - "{% if isolation_profile == 'strict' %}.github/workflows/dependabot-manual-automerge.yml{% endif %}"

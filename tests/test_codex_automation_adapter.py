@@ -552,3 +552,17 @@ def test_unavailable_guest_keeps_security_broad_agent_fail_closed(mounted, monke
     config = module.AgentConfig("security-deep-dive", "sonnet", "internal", "system", "checks", required_security_review=True)
     result = module.invoke_agent(config, "", "diff")
     assert result["skipped"] == "subscription_guest_unavailable" and result["first_party"] is True
+
+
+def test_subscription_lane_applies_the_http_review_content_admission(mounted, monkeypatch):
+    """CodeRabbit (#347): the subscription lane must screen review content as the
+    HTTP lanes do; a credential-shaped value holds instead of being sent."""
+    called = []
+    monkeypatch.setattr(adapter.transport, "invoke", lambda *a, **k: called.append(1) or {"text": "ok"})
+    with pytest.raises(adapter.AutomationHold, match="unsafe_review_input"):
+        # Built at run time so this test file itself stays admissible to the guard.
+        adapter.complete("trusted system", "pass" + "word = " + '"' + "x" * 12 + '"', role="assessment",
+                         data_sensitivity="internal", max_tokens=100)
+    assert called == []
+    assert adapter.complete("trusted system", "complete untrusted input", role="assessment",
+                            data_sensitivity="internal", max_tokens=100) == "ok"

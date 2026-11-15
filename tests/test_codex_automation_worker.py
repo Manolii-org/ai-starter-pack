@@ -48,7 +48,7 @@ def harness(monkeypatch, tmp_path):
                         lambda *a, **k: events.append(("claim", a[1]["operation"])) or "ack")
 
     @contextmanager
-    def session(assignment, repo, role):
+    def session(assignment, repo, role, **_kwargs):
         events.append(("session", role))
         yield {"fixture": True}, {}
 
@@ -168,7 +168,8 @@ def test_policy_roster_excludes_security_and_restricted_roles():
 
 
 @pytest.mark.parametrize("change", [{"schema": "x"}, {"roster": []}, {"roster": ["Bad Name"]},
-                                    {"data_sensitivity": "restricted"}, {"max_requests": 0},
+                                    {"data_sensitivity": "restricted"}, {"data_sensitivity": "public"},
+                                    {"max_requests": 0},
                                     {"reasoning_effort": "low"}])
 def test_invalid_controller_policy_is_refused(monkeypatch, tmp_path, change):
     path = tmp_path / "policy.json"
@@ -529,7 +530,7 @@ def test_real_custody_claim_authenticates_the_running_controller_not_the_produce
 
 def harness_session(events):
     @contextmanager
-    def session(assignment, repo, role):
+    def session(assignment, repo, role, **_kwargs):
         events.append(("session", role))
         yield {}, {}
     return session
@@ -655,3 +656,73 @@ def test_automation_sources_and_tests_stay_admissible_to_the_review_guard():
     assert len(paths) >= 10
     for path in paths:
         judge._require_safe_packet({"source": path.read_text(encoding="utf-8")})
+
+
+def test_session_waits_and_guest_runs_are_bounded_by_one_job_deadline(harness, monkeypatch):
+    """CodeRabbit (#347): lock waits and guest time must fit the execute job."""
+    run, events, _, _ = harness
+    seen = []
+
+    @contextmanager
+    def session(assignment, repo, role, *, wait_seconds):
+        seen.append(("wait", role, wait_seconds))
+        yield {}, {}
+
+    def guest(image, source, broker_dir, context_file, candidates, value, *, seconds):
+        seen.append(("guest", value["role"], seconds))
+        return {"status": "held", "reason": "stop"}
+    now = worker.time.monotonic()
+    result, _ = run(session=session, guest=guest, deadline=now + 600)
+    waits = [s for s in seen if s[0] == "wait"]
+    guests = [s for s in seen if s[0] == "guest"]
+    assert waits and waits[0][2] <= 600 - worker.MIN_GUEST_SECONDS - worker.GUEST_MARGIN_SECONDS
+    assert guests and guests[0][2] <= 600 - worker.GUEST_MARGIN_SECONDS
+    with pytest.raises(worker.Incomplete, match="controller_time_budget_exhausted"):
+        worker._wait_budget(worker.time.monotonic() + 100)
+    with pytest.raises(worker.Incomplete, match="controller_time_budget_exhausted"):
+        worker._guest_budget(worker.time.monotonic() + 100, worker.policy())
+
+
+def test_receipts_are_checkpointed_after_each_pass(harness, tmp_path):
+    run, _, _, _ = harness
+    checkpoint = tmp_path / "inference-receipts.jsonl"
+    snapshots = []
+
+    def guest(image, source, broker_dir, context_file, candidates, value, *, seconds):
+        snapshots.append(checkpoint.read_text().count("\n") if checkpoint.exists() else 0)
+        if value["role"] == "assessment":
+            return {"status": "completed", "pass": "assessment", "ran": {"skills": ["scope-adherence"], "agents": []},
+                    "candidates": {"scope-adherence.json": {"source": "scope-adherence", "findings": []}}}
+        return {"status": "completed", "pass": "judge", "publication": []}
+    result, rows = run(guest=guest, checkpoint=checkpoint)
+    # The Judge pass starts with the assessment receipt already persisted.
+    assert snapshots == [0, 1] and checkpoint.read_text().count("\n") == len(rows) == 2
+
+
+def test_audit_is_taken_after_the_broker_has_shut_down(harness, monkeypatch):
+    run, _, _, _ = harness
+    order = []
+
+    class Late(FakeBroker):
+        def audit(self):
+            order.append("audit")
+            return {"requests": 1, "text_completions": [COMPLETION]}
+
+    @contextmanager
+    def serve(path, subscription, **kwargs):
+        try:
+            yield Late([])
+        finally:
+            order.append("shutdown")
+    monkeypatch.setattr(worker, "serve", serve)
+    run(guest=lambda *a, **k: {"status": "held", "reason": "stop"})
+    assert order == ["shutdown", "audit"]
+
+
+def test_worker_count_probe_failure_does_not_crash_the_stage(monkeypatch):
+    """Independent review (#347): the guarded per-role path writes markers; the
+    worker-count probe must not raise before it."""
+    import importlib.util as iu
+    for name in ("run-specialists.py", "run-broad-agents.py"):
+        source = (ROOT / "scripts" / name).read_text()
+        assert "subscription = _subscription_required()\n    except (OSError, RuntimeError, ImportError):" in source

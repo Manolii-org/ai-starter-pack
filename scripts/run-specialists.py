@@ -709,7 +709,15 @@ def main() -> None:
 
     # Invoke skills in parallel
     errors: dict[str, str] = {}
-    with concurrent.futures.ThreadPoolExecutor(max_workers=_MAX_WORKERS) as executor:
+    # The subscription broker admits two active turns; more would be refused
+    # before any provider call (review_admission_unavailable).
+    try:
+        subscription = _subscription_required()
+    except (OSError, RuntimeError, ImportError):
+        # Each role then writes its own subscription_guest_unavailable marker.
+        subscription = False
+    workers = min(_MAX_WORKERS, _SUBSCRIPTION_MAX_ACTIVE) if subscription else _MAX_WORKERS
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
         futures = {
             executor.submit(_invoke_skill, skill, diff, output_dir): skill
             for skill in invoke_skills
@@ -730,6 +738,9 @@ def main() -> None:
 
     # Fail open: never exit 1 unless API key is missing
     sys.exit(0)
+
+
+_SUBSCRIPTION_MAX_ACTIVE = 2
 
 
 def _subscription_required() -> bool:
