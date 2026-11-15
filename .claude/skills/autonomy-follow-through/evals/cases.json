@@ -54,5 +54,16 @@
     ],
     "category": "edge_case",
     "tags": []
+  },
+  {
+    "id": "continuation-post-merge-verification-retains-owner",
+    "prompt": "The authorized task asks for a PR to be merged and then for post-merge CI and the merged tree to be verified. The PR has just merged.",
+    "expectedBehaviors": [
+      "Do not report done or retire the owner at merge alone",
+      "Verify the merged composition and requested post-merge checks, then record verified outcomes",
+      "Only then transition to done; a failed post-merge check stays owned for repair or escalation"
+    ],
+    "category": "edge_case",
+    "tags": []
   }
 ]
