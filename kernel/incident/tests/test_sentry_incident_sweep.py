@@ -287,3 +287,27 @@ def test_mixed_timezone_lifetime_is_unreadable_and_admitted():
 def test_generic_timeout_wording_does_not_make_a_code_defect_transient():
     assert sweep_mod.classify("OperationalError", "database connection timed out", True, "a" * 40) == "code_defect"
     assert sweep_mod.classify("Timeout", "litellm.Timeout: upstream", False, None) == "provider"
+
+
+SHORT = lt("3", "2026-11-12T10:00:00Z")
+
+
+def test_code_defect_proxy_exception_is_admitted_even_when_short_lived():
+    row = dict(issue(), lifetime=SHORT)
+    result = sweep_mod.sweep(MANIFEST, fake({"production": [row]},
+                                            {"42": event("ProxyException", "internal state", in_app=True)}), now=NOW)
+    assert result["candidates"][0]["classification"] == "code_defect"
+    assert result["stats"]["filtered_transient"] == 0
+
+
+def test_unknown_proxy_exception_is_suppressed_when_short_lived():
+    row = dict(issue(), lifetime=SHORT)
+    result = sweep_mod.sweep(MANIFEST, fake({"production": [row]},
+                                            {"42": event("ProxyException", "internal state", in_app=False)}), now=NOW)
+    assert result["candidates"] == [] and result["stats"]["filtered_transient"] == 1
+
+
+def test_code_defect_cron_monitor_wrapper_is_still_suppressed():
+    row = dict(issue(), issueType="monitor_check_in_failure", lifetime=SHORT)
+    result = sweep_mod.sweep(MANIFEST, fake({"production": [row]}, {"42": event()}), now=NOW)
+    assert result["candidates"] == [] and result["stats"]["filtered_transient"] == 1

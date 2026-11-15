@@ -209,8 +209,14 @@ def is_cron_monitor(row: dict) -> bool:
 
 
 def is_transient(row: dict, classification: str, exception_type: str | None) -> bool:
-    return (classification in TRANSIENT_CLASSIFICATIONS or exception_type in TRANSIENT_TYPES
-            or is_cron_monitor(row))
+    # Cron-monitor wrappers are transient whatever their classification. The
+    # exception-type fallback never overrides an affirmative code_defect: an
+    # in-app frame with a release SHA is actionable even when short-lived.
+    if is_cron_monitor(row):
+        return True
+    if classification in TRANSIENT_CLASSIFICATIONS:
+        return True
+    return classification != "code_defect" and exception_type in TRANSIENT_TYPES
 
 
 def _seen(value: object) -> datetime | None:
