@@ -240,7 +240,11 @@ def is_sustained(lifetime: object) -> bool | None:
     first, last = _seen(lifetime.get("firstSeen")), _seen(lifetime.get("lastSeen"))
     if first is None or last is None:
         return None
-    return events >= SUSTAINED_MIN_EVENTS and last - first >= SUSTAINED_MIN_SPAN
+    try:
+        span = last - first
+    except TypeError:  # one timestamp timezone-aware, the other naive
+        return None
+    return events >= SUSTAINED_MIN_EVENTS and span >= SUSTAINED_MIN_SPAN
 
 
 def sweep(manifest: dict, fetch: Fetch, *, now: datetime | None = None, lookback_minutes: int | None = None,

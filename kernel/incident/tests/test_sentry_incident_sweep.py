@@ -274,3 +274,16 @@ def test_sustained_requires_at_least_100_events(count, expected):
 def test_sustained_requires_seven_days_between_first_and_last_seen():
     assert sweep_mod.is_sustained(lt("5000", "2026-11-01T00:00:01Z", "2026-11-08T00:00:00Z")) is False
     assert sweep_mod.is_sustained(lt("5000", "2026-11-01T00:00:00Z", "2026-11-08T00:00:00Z")) is True
+
+
+def test_mixed_timezone_lifetime_is_unreadable_and_admitted():
+    mixed = lt("900", "2026-01-01T00:00:00", "2026-11-12T00:00:00Z")  # naive vs aware
+    assert sweep_mod.is_sustained(mixed) is None
+    row = dict(issue(), lifetime=mixed)
+    result = sweep_mod.sweep(MANIFEST, fake({"production": [row]}, {"42": event("APIError", "x")}), now=NOW)
+    assert len(result["candidates"]) == 1 and result["stats"]["admission_unreadable"] == 1
+
+
+def test_generic_timeout_wording_does_not_make_a_code_defect_transient():
+    assert sweep_mod.classify("OperationalError", "database connection timed out", True, "a" * 40) == "code_defect"
+    assert sweep_mod.classify("Timeout", "litellm.Timeout: upstream", False, None) == "provider"
