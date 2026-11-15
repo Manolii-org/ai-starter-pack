@@ -19,8 +19,7 @@ REAL_CLAIM = worker.custody.claim
 TARGET = {"repository": "example/automation", "pull_request": 7, "base_sha": "b" * 40,
           "head_sha": "a" * 40, "operation": "assessment", "request_run_id": 11,
           "request_run_attempt": 1, "request_workflow_id": 5, "request_artifact_id": 9,
-          "head_ref": "feature", "pr_title": "Stage subscription-only automation runtime",
-          "pr_body": "Builds the portable subscription-only automation runtime."}
+          "head_ref": "feature"}
 COMPLETION = {"model": "gpt-6.1-sol", "model_verification": "provider_reported",
               "usage": {"input_tokens": 10, "output_tokens": 2, "cached_input_tokens": 0},
               "input_chars": 40, "observed_at": "2026-11-14T03:30:00Z"}
@@ -36,9 +35,7 @@ class FakeBroker:
         self.completions, self.terminal_error = completions, terminal
 
     def audit(self):
-        # Mirror the real broker: every spend is an audited request, even when
-        # the completion never returned.
-        return {"requests": len(self.completions) + 1, "text_completions": list(self.completions)}
+        return {"text_completions": list(self.completions)}
 
 
 @pytest.fixture
@@ -158,51 +155,6 @@ def test_guest_container_is_networkless_read_only_and_credential_free(tmp_path):
     assert "dst=/input/repo,readonly" in joined and "dst=/input/codex-automation.json,readonly" in joined
     assert "TOKEN" not in joined and "AUTH" not in joined and "DOPPLER" not in joined
     assert "--env HTTPS_PROXY=" in joined and "/input/candidates" not in joined
-
-
-def test_guest_environment_receives_pr_title_and_body(tmp_path):
-    """Review P2: classifier and specialists get PR metadata without an extra
-    GitHub read; both come from the admitted context, sized and bounded."""
-    value = worker.context_document(TARGET, worker.policy(), "assessment", 31, 1)
-    assert value["pr_title"] == TARGET["pr_title"] and value["pr_body"] == TARGET["pr_body"]
-    args = worker.guest_args("sha256:" + "1" * 64, "n", tmp_path / "s", tmp_path / "b",
-                             tmp_path / "c.json", None, value)
-    joined = " ".join(args)
-    assert f"--env PR_TITLE=Stage subscription-only automation runtime" in joined
-    assert f"--env PR_BODY=Builds the portable subscription-only automation runtime." in joined
-
-
-def test_quota_exhaustion_retains_unmeasured_request_counts(harness):
-    """Review P2: even when a pass fails the accounting must survive — the
-    terminal-result artifact is the only persisted proof the controller ran."""
-    run, _, _, terminal = harness
-    terminal["value"] = "subscription_quota_exhausted"
-    result, _ = run()
-    assert result["state"] == "blocked_quota"
-    # Counts the finally block computed before broker.terminal_error returned.
-    assert "unmeasured_requests" in result and "assessment" in result["unmeasured_requests"]
-
-
-def test_held_assessment_retains_unmeasured_request_counts(harness):
-    """Review P2: a held verification still owes the unknown-cost accounting
-    the receipt schema records for every exit after broker execution."""
-    run, _, outputs, _ = harness
-    outputs["assessment"] = {"status": "held", "reason": "stage_failed"}
-    result, _ = run()
-    assert result["state"] == "held"
-    assert "unmeasured_requests" in result and "assessment" in result["unmeasured_requests"]
-
-
-def test_unmeasured_requests_omitted_when_no_broker_session_ran(harness, monkeypatch):
-    """Pre-custody/empty-diff exits never reach the broker, so the empty
-    accounting is the truthful record — not a populated per-role map."""
-    run, events, _, _ = harness
-    def refuse(*a, **k):
-        events.append(("claim",))
-        raise worker.custody.CustodyHold("execution_already_claimed")
-    monkeypatch.setattr(worker.custody, "claim", refuse)
-    result, _ = run()
-    assert result["state"] == "held" and "unmeasured_requests" not in result
 
 
 def test_policy_roster_excludes_security_and_restricted_roles():
@@ -580,3 +532,111 @@ def harness_session(events):
         events.append(("session", role))
         yield {}, {}
     return session
+
+
+class CountingBroker(FakeBroker):
+    def audit(self):
+        return {"requests": 3, "text_completions": list(self.completions)}
+
+
+@pytest.mark.parametrize("outcome", ["held", "raises", "terminal"])
+def test_unmeasured_requests_survive_every_exit_after_broker_execution(harness, monkeypatch, outcome):
+    """Codex review P2: only the adjudicated path kept the unknown-outcome count."""
+    run, _, _, _ = harness
+
+    @contextmanager
+    def serve(path, subscription, **kwargs):
+        yield CountingBroker([COMPLETION], "upstream_withheld" if outcome == "terminal" else None)
+    monkeypatch.setattr(worker, "serve", serve)
+
+    def guest(*a, **k):
+        if outcome == "raises":
+            raise worker.Incomplete("failed_scan")
+        return {"status": "held", "reason": "stop"} if outcome == "held" else {"status": "completed"}
+    result, rows = run(guest=guest)
+    assert result["state"] != "completed" and result["unmeasured_requests"] == {"assessment": 2}
+    assert len(rows) == 1
+
+
+def test_admitted_pr_title_and_body_reach_the_guest_as_a_read_only_mount(harness, tmp_path):
+    run, _, _, _ = harness
+    seen = {}
+
+    def guest(image, source, broker_dir, context_file, candidates, value, *, seconds):
+        meta = Path(context_file).with_name("pr-meta.json")
+        seen["meta"] = json.loads(meta.read_text())
+        seen["mode"] = oct(meta.stat().st_mode & 0o777)
+        seen["args"] = worker.guest_args("sha256:" + "1" * 64, "n", source, broker_dir, context_file,
+                                         candidates, value)
+        return {"status": "held", "reason": "stop"}
+    run(guest=guest, pr_meta={"title": "Fix origin check", "body": "Closes #1. " + "x" * 70000})
+    assert seen["meta"]["title"] == "Fix origin check" and seen["meta"]["body"].startswith("Closes #1.")
+    assert seen["meta"]["body"].endswith("[truncated]") and len(seen["meta"]["body"]) < 66 * 1024
+    assert seen["mode"] == "0o444"
+    assert any(a.endswith("dst=/input/pr-meta.json,readonly") for a in seen["args"])
+
+
+class MetaGitHub:
+    def __init__(self, head):
+        self.head = head
+
+    def json(self, route, method="GET", data=None):
+        assert route == "/pulls/7"
+        return {"title": "T", "body": None, "head": {"sha": self.head}}
+
+
+def test_pr_metadata_is_bound_to_the_admitted_head():
+    assert worker.pr_metadata(MetaGitHub(TARGET["head_sha"]), TARGET) == {"title": "T", "body": ""}
+    with pytest.raises(worker.requests_.RequestRefused, match="superseded"):
+        worker.pr_metadata(MetaGitHub("b" * 40), TARGET)
+
+
+def test_pr_metadata_is_argv_and_env_safe():
+    """Independent review P3: NUL/C0 controls and unpaired surrogates never reach
+    the guest's argv/env (they would crash prepare or hold every stage)."""
+    value = worker._bounded("a\x00b\x01c\td\ne\ud800f", 1024)
+    assert value == "abc\td\ne?f"
+    value.encode("utf-8")
+
+
+def test_unwritable_pr_metadata_fails_the_run_instead_of_escaping(harness, monkeypatch):
+    run, _, _, _ = harness
+    def boom(directory, meta):
+        raise OSError("disk full")
+    monkeypatch.setattr(worker, "write_pr_meta", boom)
+    result, _ = run()
+    assert result["state"] == "failed" and result["reason"] == "disk full"
+
+
+# Kept from the [autofix] commit c7abf3d (approach-independent accounting tests).
+def test_quota_exhaustion_retains_unmeasured_request_counts(harness):
+    """Review P2: even when a pass fails the accounting must survive — the
+    terminal-result artifact is the only persisted proof the controller ran."""
+    run, _, _, terminal = harness
+    terminal["value"] = "subscription_quota_exhausted"
+    result, _ = run()
+    assert result["state"] == "blocked_quota"
+    # Counts the finally block computed before broker.terminal_error returned.
+    assert "unmeasured_requests" in result and "assessment" in result["unmeasured_requests"]
+
+
+def test_held_assessment_retains_unmeasured_request_counts(harness):
+    """Review P2: a held verification still owes the unknown-cost accounting
+    the receipt schema records for every exit after broker execution."""
+    run, _, outputs, _ = harness
+    outputs["assessment"] = {"status": "held", "reason": "stage_failed"}
+    result, _ = run()
+    assert result["state"] == "held"
+    assert "unmeasured_requests" in result and "assessment" in result["unmeasured_requests"]
+
+
+def test_unmeasured_requests_omitted_when_no_broker_session_ran(harness, monkeypatch):
+    """Pre-custody/empty-diff exits never reach the broker, so the empty
+    accounting is the truthful record — not a populated per-role map."""
+    run, events, _, _ = harness
+    def refuse(*a, **k):
+        events.append(("claim",))
+        raise worker.custody.CustodyHold("execution_already_claimed")
+    monkeypatch.setattr(worker.custody, "claim", refuse)
+    result, _ = run()
+    assert result["state"] == "held" and "unmeasured_requests" not in result

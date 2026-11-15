@@ -76,44 +76,6 @@ def test_assessment_pass_runs_every_requested_role_and_reports_held_roster(sandb
     assert "test_policy.py" in diff and "policy.py" in diff
 
 
-def test_assessment_passes_pr_title_and_body_to_the_classifier(sandbox, monkeypatch):
-    """Review P2: scope-adherence compares the diff against the stated scope.
-    The classifier needs --title/--body; both come from admitted context.
-    Bypasses the agent .claude/ checkout (skipped on agents without it)."""
-    calls = []
-    work_dir = guest.STATE / "work-stub"
-    work_dir.mkdir(parents=True, exist_ok=True)
-    monkeypatch.setattr(guest, "_workspace", lambda: work_dir)
-    monkeypatch.setattr(guest, "_diff", lambda v, w: work_dir / "stub.diff")
-
-    def run(script, args, value, work):
-        calls.append((script, args, value["pr_title"], value["pr_body"]))
-        if script == "run-pr-classifier.py":
-            Path(args[args.index("--output") + 1]).write_text(json.dumps(
-                {"invoke_skills": ["scope-adherence"], "invoke_agents": []}))
-        else:
-            out = Path(args[args.index("--candidates-dir") + 1])
-            names = args[args.index("--skills" if "--skills" in args else "--agents") + 1].split(",")
-            for name in names:
-                (out / f"{name}.json").write_text(json.dumps({"source": name, "findings": []}))
-
-    monkeypatch.setattr(guest, "_run", run)
-    guest.assessment(guest._context())
-    classifier_call = next(c for c in calls if c[0] == "run-pr-classifier.py")
-    assert "--title" in classifier_call[1] and "--body" in classifier_call[1]
-    assert classifier_call[2] == "Stage subscription-only automation runtime"
-    assert classifier_call[3].startswith("Builds the portable subscription-only automation runtime.")
-
-
-def test_stage_env_carries_admitted_pr_title_and_body(sandbox):
-    """Every stage subprocess inherits PR_TITLE/PR_BODY from the bounded context,
-    so scope-adherence's title/body comparison survives even when the
-    classifier short-circuits on an empty diff."""
-    env = guest._stage_env(guest._context())
-    assert env["PR_TITLE"] == "Stage subscription-only automation runtime"
-    assert env["PR_BODY"].startswith("Builds the portable subscription-only automation runtime.")
-
-
 @pytest.mark.parametrize("manifest", [
     {"invoke_skills": [1]}, {"invoke_skills": ["a,b"]}, {"invoke_agents": [None]},
 ])
@@ -270,3 +232,56 @@ def test_autofix_uses_the_accepted_guest_loader_and_holds_on_import_failure(sand
     monkeypatch.setattr(guest, "_adapter", broken)
     assert guest.main() == 3
     assert json.loads(capsys.readouterr().out)["status"] == "held"
+
+
+def test_assessment_passes_admitted_pr_metadata_to_classifier_and_specialists(sandbox, monkeypatch):
+    """Codex review P2: scope-adherence needs the title/body; they arrive as
+    untrusted data, and a leading '-' must stay a value, not an option."""
+    meta = guest.STATE.parent / "pr-meta.json"
+    meta.write_text(json.dumps({"title": "-x Fix origin", "body": "Closes #1 and adds docs"}))
+    monkeypatch.setattr(guest, "PR_META", meta)
+    calls = []
+    fake_stages(monkeypatch, {"invoke_skills": ["scope-adherence"]}, calls)
+    value = guest._context()
+    guest.assessment(value)
+    assert "--title=-x Fix origin" in calls[0][1] and "--body=Closes #1 and adds docs" in calls[0][1]
+    env = guest._stage_env(value)
+    assert env["PR_TITLE"] == "-x Fix origin" and env["PR_BODY"] == "Closes #1 and adds docs"
+
+
+@pytest.mark.parametrize("content", ['{"title": "t"}', '{"title": 1, "body": ""}', "[]"])
+def test_malformed_pr_metadata_holds(sandbox, monkeypatch, content):
+    meta = guest.STATE.parent / "pr-meta.json"
+    meta.write_text(content)
+    monkeypatch.setattr(guest, "PR_META", meta)
+    with pytest.raises(guest.GuestHold, match="pr_metadata_invalid"):
+        guest._stage_env(guest._context())
+
+
+def test_absent_pr_metadata_is_empty_not_an_error(sandbox, monkeypatch):
+    monkeypatch.setattr(guest, "PR_META", guest.STATE.parent / "absent.json")
+    env = guest._stage_env(guest._context())
+    assert env["PR_TITLE"] == "" and env["PR_BODY"] == ""
+
+
+@pytest.mark.parametrize("body", ["界" * 30000, "\U0001F600" * 20000, '"\\' * 40000, "\n\t" * 40000])
+def test_worst_case_bodies_written_by_the_host_are_accepted_by_the_guest(sandbox, monkeypatch, body):
+    """Independent review P1: JSON escaping of a bounded body must stay within the
+    guest's file bound (non-ASCII is written raw; quotes/backslashes at most double)."""
+    from ci import codex_automation_worker as worker
+    out = guest.STATE.parent / "meta-out"
+    out.mkdir()
+    path = worker.write_pr_meta(out, {"title": "界" * 2000, "body": body})
+    monkeypatch.setattr(guest, "PR_META", path)
+    meta = guest._pr_meta()
+    assert meta["body"].endswith("[truncated]") or meta["body"] == body
+    assert len(meta["body"].encode()) <= 64 * 1024 + 20 and len(meta["title"].encode()) <= 1024 + 20
+
+
+@pytest.mark.parametrize("raw", [b"{not json", b"\xff\xfe", b'{"title": "a", "body": "b"'])
+def test_undecodable_pr_metadata_holds_with_its_own_reason(sandbox, monkeypatch, raw):
+    meta = guest.STATE.parent / "bad-meta.json"
+    meta.write_bytes(raw)
+    monkeypatch.setattr(guest, "PR_META", meta)
+    with pytest.raises(guest.GuestHold, match="pr_metadata_invalid"):
+        guest._pr_meta()

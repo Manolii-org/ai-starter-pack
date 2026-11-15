@@ -32,6 +32,10 @@ ROOT = Path(__file__).resolve().parents[2]
 CONTEXT = Path("/input/codex-automation.json")
 REPO = Path("/input/repo")
 CANDIDATES_IN = Path("/input/candidates")
+PR_META = Path("/input/pr-meta.json")
+# Host bound: 1 KiB title + 64 KiB body of raw UTF-8; JSON escaping of quotes,
+# backslashes and tab/newline/CR can at most double that.
+MAX_PR_META_BYTES = 2 * (1024 + 64 * 1024) + 4096
 STATE = Path("/state")
 MAX_CANDIDATE_BYTES = 512 * 1024
 STAGE_SECONDS = 900
@@ -59,7 +63,23 @@ def _context():
     return module.read_context(CONTEXT, os.environ)
 
 
+def _pr_meta():
+    """Admitted PR title/body: untrusted data the stage runners wrap as such."""
+    if not PR_META.exists():
+        return {"title": "", "body": ""}
+    raw = PR_META.read_bytes()
+    try:
+        meta = json.loads(raw.decode("utf-8")) if len(raw) <= MAX_PR_META_BYTES else None
+    except ValueError:
+        meta = None
+    if (not isinstance(meta, dict) or set(meta) != {"title", "body"}
+            or not all(isinstance(v, str) for v in meta.values())):
+        raise GuestHold("pr_metadata_invalid")
+    return meta
+
+
 def _stage_env(value):
+    meta = _pr_meta()
     env = {
         "PATH": "/usr/local/bin:/usr/bin:/bin",
         "HOME": str(STATE),
@@ -70,13 +90,10 @@ def _stage_env(value):
         "PR_HEAD_SHA": value["head_sha"],
         "GITHUB_RUN_ID": str(value["controller_run_id"]),
         "GITHUB_RUN_ATTEMPT": str(value["controller_run_attempt"]),
-        # Read-only PR metadata carried from admission so scope-adherence can
-        # compare the diff against the stated scope. Provenance is the bounded
-        # context value (the host-set container env carries the same bytes).
-        "PR_TITLE": value.get("pr_title", ""),
-        "PR_BODY": value.get("pr_body", ""),
         "GITHUB_WORKSPACE": str(REPO),
         "PYTHONDONTWRITEBYTECODE": "1",
+        "PR_TITLE": meta["title"],
+        "PR_BODY": meta["body"],
     }
     return env
 
@@ -140,12 +157,10 @@ def assessment(value):
     diff = _diff(value, work)
     manifest = work / "classifier-output.json"
     candidates = work / ".ai/candidates"
-    # PR title/body are provenanced from admission's read-only API read; the
-    # context value is the canonical input. Specialists and the Judge read them
-    # from the container env set in _stage_env().
-    _run("run-pr-classifier.py",
-         ["--diff", str(diff), "--title", value.get("pr_title", ""),
-          "--body", value.get("pr_body", ""), "--output", str(manifest)], value, work)
+    meta = _pr_meta()
+    _run("run-pr-classifier.py", ["--diff", str(diff), "--output", str(manifest),
+                                  # `=` form: a title/body starting with "-" stays a value.
+                                  "--title=" + meta["title"], "--body=" + meta["body"]], value, work)
     plan = json.loads(manifest.read_text(encoding="utf-8"))
     roster = set(value["selected_roles"])
     requested = {"skills": list(plan.get("invoke_skills", [])), "agents": list(plan.get("invoke_agents", []))}

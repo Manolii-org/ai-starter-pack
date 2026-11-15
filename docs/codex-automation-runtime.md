@@ -127,7 +127,12 @@ catalog (`.ai/security/token-shapes.json`) required by Judge evidence
 redaction, and refuses to build without it; the advisory comment neutralises
 Markdown and @mentions and accepts only known Judge events; spent completions
 are measured even when a guest pass fails, and requests without a verified
-completion are reported as `unmeasured_requests` (never as receipts); guest
+completion are reported as `unmeasured_requests` (never as receipts) on every
+exit after broker execution, including held, failed and quota-blocked passes; the
+admitted PR title and body (bounded, read at admission and bound to the admitted
+head) reach the guest as a read-only `/input/pr-meta.json` and the stage runners
+(classifier and specialists) as untrusted PR metadata, so scope comparison
+sees the stated intent; guest
 stages share one budget below the host deadline; publication re-checks the
 current PR head and posts once per head (trusted-author marker).
 

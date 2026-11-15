@@ -70,8 +70,6 @@ class GitHub:
                 "number": 7,
                 "state": "open",
                 "draft": False,
-                "title": "Stage subscription-only automation runtime",
-                "body": "Builds the portable subscription-only automation runtime.",
                 "labels": [],
                 "base": {"sha": BASE, "ref": "main", "repo": repo},
                 "head": {"sha": HEAD, "ref": "codex/fixture", "repo": repo},
@@ -126,8 +124,6 @@ def test_exact_api_run_workflow_artifact_and_current_revision_bind_request():
         "request_workflow_id": 3,
         "request_artifact_id": 25,
         "head_ref": "codex/fixture",
-        "pr_title": "Stage subscription-only automation runtime",
-        "pr_body": "Builds the portable subscription-only automation runtime.",
     }
     assert github.archives_read == [25]
     assert all(not route.startswith("http") for route in github.routes)

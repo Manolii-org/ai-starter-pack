@@ -25,9 +25,7 @@ def mounted(monkeypatch, tmp_path):
              "base_sha": "b" * 40, "head_sha": "a" * 40, "role": "assessment",
              "data_sensitivity": "internal", "reasoning_effort": "medium",
              "controller_run_id": 31, "controller_run_attempt": 1,
-             "selected_roles": ["scope-adherence", "systems-consistency"],
-             "pr_title": "Stage subscription-only automation runtime",
-             "pr_body": "Builds the portable subscription-only automation runtime."}
+             "selected_roles": ["scope-adherence", "systems-consistency"]}
     path = tmp_path / "context.json"
     def write(data=None, raw=None):
         if path.exists():

@@ -10,10 +10,8 @@ CONTEXT = Path("/input/codex-automation.json")
 SCHEMA = "codex-automation-context/v1"
 FIELDS = frozenset({"schema", "repository", "pull_request", "base_sha", "head_sha", "role",
                     "data_sensitivity", "reasoning_effort", "controller_run_id",
-                    "controller_run_attempt", "selected_roles", "pr_title", "pr_body"})
+                    "controller_run_attempt", "selected_roles"})
 ROLES = frozenset({"assessment", "triage", "critic", "judge", "implementation", "autofix"})
-MAX_TITLE = 512
-MAX_BODY = 12288
 
 
 def _pairs(rows):
@@ -53,9 +51,6 @@ def read_context(path=CONTEXT, environ=None):
         or value.get("data_sensitivity") not in ("public", "internal")
         or value.get("reasoning_effort") not in ("medium", "xhigh")
     ):
-        raise ValueError("subscription_context_invalid")
-    if not all(isinstance(value.get(k), str) and len(value[k]) <= limit
-               for k, limit in (("pr_title", MAX_TITLE), ("pr_body", MAX_BODY))):
         raise ValueError("subscription_context_invalid")
     roles = value["selected_roles"]
     if (not isinstance(roles, list) or len(roles) > 100
