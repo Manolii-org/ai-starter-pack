@@ -416,7 +416,7 @@ class GitShimTests(GateRepo):
     def install(self):
         return subprocess.run([sys.executable, str(self.root / "scripts/qa/finalise-gate.py"),
                                "--install-git-hook"], cwd=self.root, capture_output=True,
-                              text=True, env=clean_env())
+                              text=True, env=clean_env(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull))
 
     def test_installs_marked_shim_and_refreshes_it(self):
         self.assertEqual(self.install().returncode, 0)

@@ -2,6 +2,7 @@
 
 import base64
 import copy
+import errno
 import hashlib
 import io
 import json
@@ -87,6 +88,85 @@ def test_repo_pin_overrides_org_and_case_is_canonical(policy, monkeypatch):
         "example/special/.github/workflows/codex-review-worker.yml@refs/heads/main",
     )
     assert profiles.select("example/special", "security")["profile"] == "bob"
+
+
+def automation_grant(policy, monkeypatch):
+    data, consents = policy
+    workflow = "example/project/.github/workflows/codex-automation-worker.yml@refs/heads/main"
+    data["runner_access"]["workflows"].append(workflow)
+    grant = copy.deepcopy(consents["alice"])
+    grant["schema"] = "codex-automation-consent/v1"
+    grant["roles"] = sorted(profiles.AUTOMATION_ROLES)
+    del grant["lanes"]
+    original = profiles.protected_json
+
+    def protected(path):
+        if path.parent.name == "automation-consents":
+            return copy.deepcopy(grant)
+        return original(path)
+
+    monkeypatch.setattr(profiles, "protected_json", protected)
+    monkeypatch.setenv("GITHUB_WORKFLOW_REF", workflow)
+    return grant
+
+
+@pytest.mark.parametrize("role", sorted(profiles.AUTOMATION_ROLES))
+def test_automation_requires_explicit_role_and_exact_trusted_controller(policy, monkeypatch, role):
+    automation_grant(policy, monkeypatch)
+    result = profiles.select_automation("Example/Project", role)
+    assert result["account_sha256"] == ACCOUNT
+    assert result["role"] == role
+    assert result["controller_workflow"].endswith("codex-automation-worker.yml@refs/heads/main")
+    with pytest.raises(profiles.ProfileError, match="assignment_changed"):
+        profiles.select_automation("example/project", "judge" if role != "judge" else "critic", reserved=result)
+
+
+@pytest.mark.parametrize("role", sorted(profiles.AUTOMATION_ROLES))
+def test_legacy_review_consent_cannot_authorize_automation(policy, monkeypatch, role):
+    workflow = "example/project/.github/workflows/codex-automation-worker.yml@refs/heads/main"
+    policy[0]["runner_access"]["workflows"].append(workflow)
+    monkeypatch.setenv("GITHUB_WORKFLOW_REF", workflow)
+    with pytest.raises(profiles.ProfileError, match="consent_unavailable"):
+        profiles.select_automation("example/project", role)
+
+
+@pytest.mark.parametrize("change", ["missing_role", "revoked", "credits", "wrong_schema", "scope", "wrong_workflow"])
+def test_automation_grant_never_broadens_other_controls(policy, monkeypatch, change):
+    grant = automation_grant(policy, monkeypatch)
+    if change == "missing_role":
+        grant["roles"].remove("assessment")
+    elif change == "revoked":
+        grant["revoked"] = True
+    elif change == "credits":
+        grant["automatic_purchases_disabled"] = False
+    elif change == "wrong_schema":
+        grant["schema"] = "codex-review-consent/v1"
+    elif change == "scope":
+        grant["repositories"] = ["other/project"]
+    else:
+        monkeypatch.setenv("GITHUB_WORKFLOW_REF", "example/project/.github/workflows/codex-review-worker.yml@refs/heads/main")
+    with pytest.raises(profiles.ProfileError):
+        profiles.select_automation("example/project", "assessment")
+
+
+def test_review_and_automation_share_the_same_actual_os_account_lock(policy, monkeypatch, tmp_path):
+    automation_grant(policy, monkeypatch)
+    monkeypatch.setenv("GITHUB_WORKFLOW_REF", "example/project/.github/workflows/codex-review-worker.yml@refs/heads/main")
+    review = profiles.select("example/project", "code")
+    payload = base64.urlsafe_b64encode(json.dumps({"exp": int(time.time()) + 3600}).encode()).decode().rstrip("=")
+    synthetic = {"tokens": {"access_token": "fixture." + payload + ".signature"}}
+    monkeypatch.setattr(profiles, "private_home", lambda account: tmp_path)
+    monkeypatch.setattr(profiles, "read_auth", lambda *a: copy.deepcopy(synthetic))
+    monkeypatch.setattr(profiles, "account_probe", lambda *a: ({"account": {"type": "chatgpt"}}, limits()))
+    with profiles.session(review, "example/project", "code", wait_seconds=0):
+        monkeypatch.setenv("GITHUB_WORKFLOW_REF", "example/project/.github/workflows/codex-automation-worker.yml@refs/heads/main")
+        automation = profiles.select_automation("example/project", "assessment")
+        with pytest.raises(profiles.ProfileError, match="session_busy"):
+            with profiles.automation_session(automation, "example/project", "assessment", wait_seconds=0):
+                pytest.fail("automation started a competing refresh/session stream")
+    with profiles.automation_session(automation, "example/project", "assessment", wait_seconds=0) as (auth, snapshot):
+        assert auth == synthetic and snapshot["windows"]["primary"]["used_percent"] == 10
+    assert (tmp_path / "review.lock").exists()
 
 
 def test_unassigned_org_cannot_borrow_another_account(policy):
@@ -382,6 +462,17 @@ def test_protected_script_launcher_is_refused_before_auth(tmp_path, monkeypatch)
         profiles.account_probe(tmp_path)
 
 
+def _native_auth_writer_stopped(status):
+    # A Linux task can disappear after procfs opens status but before read().
+    # Only disappearance is proof of exit; permission and other I/O errors fail.
+    try:
+        return "State:\tZ" in status.read_text()
+    except OSError as error:
+        if error.errno not in {errno.ENOENT, errno.ESRCH}:
+            raise
+        return True
+
+
 def test_parent_death_stops_the_native_auth_writer(tmp_path):
     (tmp_path / "app-server").write_text("""import os,time
 from pathlib import Path
@@ -413,7 +504,7 @@ p.account_probe(Path(sys.argv[2]))
             deadline = time.monotonic() + 5
             while time.monotonic() < deadline:
                 status = Path(f"/proc/{child}/status")
-                if not status.exists() or "State:\tZ" in status.read_text():
+                if _native_auth_writer_stopped(status):
                     break
                 time.sleep(0.02)
             else:
@@ -422,3 +513,73 @@ p.account_probe(Path(sys.argv[2]))
             if controller.poll() is None:
                 controller.kill()
                 controller.wait(timeout=5)
+
+
+
+def _status_read_fixture(monkeypatch, status, *, text="", error=None, exists=True):
+    observed = {"opened": 0, "closed": 0}
+    original_open, original_exists = Path.open, Path.exists
+
+    class Stream:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            observed["closed"] += 1
+
+        def read(self):
+            if error is not None:
+                raise error
+            return text
+
+    def opened(path, *args, **kwargs):
+        if path == status:
+            observed["opened"] += 1
+            return Stream()
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", opened)
+    monkeypatch.setattr(Path, "exists", lambda path: exists if path == status else original_exists(path))
+    return observed
+
+
+@pytest.mark.parametrize("number", [errno.ENOENT, errno.ESRCH])
+def test_native_auth_writer_observation_handles_disappearance_after_open(tmp_path, monkeypatch, number):
+    status = tmp_path / "synthetic-status"
+    observed = _status_read_fixture(monkeypatch, status, error=OSError(number, "synthetic vanished process"))
+    assert _native_auth_writer_stopped(status) is True
+    assert observed == {"opened": 1, "closed": 1}
+
+
+@pytest.mark.parametrize("number", [errno.EACCES, errno.EPERM, errno.EIO, errno.EBADF,
+                                    errno.ENOTDIR, errno.EINVAL])
+def test_native_auth_writer_observation_propagates_other_io_failures(tmp_path, monkeypatch, number):
+    status = tmp_path / "synthetic-status"
+    error = OSError(number, "synthetic non-disappearance failure")
+    observed = _status_read_fixture(monkeypatch, status, error=error)
+    with pytest.raises(OSError) as raised:
+        _native_auth_writer_stopped(status)
+    assert raised.value is error
+    assert observed == {"opened": 1, "closed": 1}
+
+
+@pytest.mark.parametrize("state,stopped", [("State:\tS (sleeping)\n", False),
+                                           ("State:\tR (running)\n", False),
+                                           ("State:\tD (disk sleep)\n", False),
+                                           ("State:\tT (stopped)\n", False),
+                                           ("", False), ("State:\tZ (zombie)\n", True)])
+def test_native_auth_writer_observation_preserves_live_and_zombie_assertions(tmp_path, monkeypatch, state, stopped):
+    status = tmp_path / "synthetic-status"
+    observed = _status_read_fixture(monkeypatch, status, text=state)
+    assert _native_auth_writer_stopped(status) is stopped
+    assert observed == {"opened": 1, "closed": 1}
+
+
+def test_native_auth_writer_observation_does_not_mask_read_failure_with_exists(tmp_path, monkeypatch):
+    status = tmp_path / "synthetic-status"
+    error = PermissionError(errno.EACCES, "synthetic denied read")
+    observed = _status_read_fixture(monkeypatch, status, error=error, exists=False)
+    with pytest.raises(PermissionError) as raised:
+        _native_auth_writer_stopped(status)
+    assert raised.value is error
+    assert observed == {"opened": 1, "closed": 1}

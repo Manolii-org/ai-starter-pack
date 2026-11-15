@@ -1,0 +1,86 @@
+name: Source qualification candidate
+# Parallel candidate only. Existing required contexts and model workers remain untouched.
+# Owning callers supply immutable event inputs and automatically reconcile review/check events.
+on:
+  workflow_call:
+    inputs:
+      pr:
+        type: number
+        required: true
+      head_sha:
+        type: string
+        required: true
+      base_sha:
+        type: string
+        required: true
+      pack_ref:
+        type: string
+        required: true
+        description: Reviewed immutable source commit; never a moving alias.
+      policy_path:
+        type: string
+        default: config/source-qualification.json
+    outputs:
+      source_qualified:
+        value: ${{ jobs.qualification.outputs.source_qualified }}
+permissions:
+  contents: read
+  checks: read
+  pull-requests: read
+  actions: read
+jobs:
+  qualification:
+    name: Source qualification candidate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      source_qualified: ${{ steps.qualification.outputs.source_qualified }}
+    steps:
+      - name: Require an immutable portable source
+        env:
+          PACK_REF: ${{ inputs.pack_ref }}
+        run: |
+          [[ "$PACK_REF" =~ ^[0-9a-f]{40}$ ]] && [[ "$PACK_REF" != 0000000000000000000000000000000000000000 ]]
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          repository: Manolii-org/ai-starter-pack
+          ref: ${{ inputs.pack_ref }}
+          path: .source-qualification-pack
+          sparse-checkout: |
+            scripts/ci/source_qualification.py
+            scripts/ci/review_evidence.py
+            scripts/ci/codex_clean_pass.py
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: '3.12'
+      - name: Read native source qualification without model or deployment credentials
+        id: qualification
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          PR: ${{ inputs.pr }}
+          HEAD_SHA: ${{ inputs.head_sha }}
+          BASE_SHA: ${{ inputs.base_sha }}
+          POLICY_PATH: ${{ inputs.policy_path }}
+        run: |
+          set -euo pipefail
+          collector_status=0
+          python3 .source-qualification-pack/scripts/ci/source_qualification.py --repository "$REPOSITORY" --pr "$PR" --head "$HEAD_SHA" --base "$BASE_SHA" --policy-path "$POLICY_PATH" > "$RUNNER_TEMP/source-qualification-result.json" || collector_status=$?
+          cat "$RUNNER_TEMP/source-qualification-result.json"
+          if [[ "$collector_status" -ne 0 ]]; then
+            exit "$collector_status"
+          fi
+          python3 -I - "$RUNNER_TEMP/source-qualification-result.json" <<'PY'
+          import json, os, sys
+          with open(sys.argv[1], encoding='utf-8') as stream:
+              result = json.load(stream)
+          if (result.get('schema') != 'source-qualification/v1'
+                  or result.get('source_qualified') is not True
+                  or result.get('admission_authorized') is not False
+                  or result.get('head_sha') != os.environ['HEAD_SHA']
+                  or result.get('base_sha') != os.environ['BASE_SHA']):
+              raise SystemExit('Source qualification did not produce an exact passing candidate result')
+          PY
+          echo 'source_qualified=true' >> "$GITHUB_OUTPUT"

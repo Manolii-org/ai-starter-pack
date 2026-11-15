@@ -75,6 +75,7 @@ def policy_hash():
         "codex_review_receipt.py",
         "codex_review_profiles.py",
         "codex_review_models.py",
+        "codex_text_response.py",
         "codex-review-runtime/Dockerfile",
         "codex-review-runtime/container.py",
         "codex-review-runtime/seccomp.json",

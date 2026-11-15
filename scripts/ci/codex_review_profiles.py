@@ -30,6 +30,7 @@ CODEX = "/opt/codex-review/bin/codex"
 SLUG = re.compile(r"[a-z0-9][a-z0-9_.-]{0,63}\Z")
 REPO = re.compile(r"[a-z0-9_.-]+/[a-z0-9_.-]+\Z")
 HASH = re.compile(r"[a-f0-9]{64}\Z")
+AUTOMATION_ROLES = frozenset({"assessment", "triage", "critic", "judge", "implementation", "autofix"})
 
 
 class ProfileError(ValueError):
@@ -103,9 +104,25 @@ def registry():
 
 
 def select(repository, lane, *, reserved=None):
+    return _select(repository, lane, reserved=reserved, automation=False)
+
+
+def select_automation(repository, role, *, reserved=None):
+    """New roles require their own protected grant and exact controller access.
+
+    They reuse the registry's one account/session; review-only consent cannot
+    grant automation privileges and a queued role cannot become another role.
+    """
+    if not isinstance(repository, str) or not isinstance(role, str):
+        raise ProfileError("profile_scope_invalid")
+    return _select(repository, role, reserved=reserved, automation=True)
+
+
+def _select(repository, lane, *, reserved, automation):
     data = registry()
     repository = repository.lower()
-    if not REPO.fullmatch(repository) or lane not in {"code", "security"}:
+    allowed_lanes = AUTOMATION_ROLES if automation else {"code", "security"}
+    if not REPO.fullmatch(repository) or lane not in allowed_lanes:
         raise ProfileError("profile_scope_invalid")
     access = data.get("runner_access")
     if not isinstance(access, dict):
@@ -114,6 +131,7 @@ def select(repository, lane, *, reserved=None):
     pieces = workflow.split("/", 2)
     if len(pieces) == 3:
         workflow = pieces[0].lower() + "/" + pieces[1].lower() + "/" + pieces[2]
+    controller = "codex-automation-worker.yml" if automation else "codex-review-worker.yml"
     if (
         access.get("mode") != "selected_trusted_workflows"
         or not valid(HASH, access.get("verification_sha256"))
@@ -122,7 +140,7 @@ def select(repository, lane, *, reserved=None):
         or not isinstance(access.get("workflows"), list)
         or workflow not in access["workflows"]
         or not workflow.startswith(
-            repository + "/.github/workflows/codex-review-worker.yml@refs/heads/"
+            repository + "/.github/workflows/" + controller + "@refs/heads/"
         )
     ):
         raise ProfileError("profile_host_access_unverified")
@@ -133,13 +151,16 @@ def select(repository, lane, *, reserved=None):
     if name not in data["profiles"]:
         raise ProfileError("profile_not_nominated")
     profile = data["profiles"][name]
-    consent = protected_json(REGISTRY.parent / "consents" / (name + ".json"))
-    if not isinstance(consent, dict) or not isinstance(consent.get("lanes"), list):
+    directory = "automation-consents" if automation else "consents"
+    grant_field = "roles" if automation else "lanes"
+    schema = "codex-automation-consent/v1" if automation else "codex-review-consent/v1"
+    consent = protected_json(REGISTRY.parent / directory / (name + ".json"))
+    if not isinstance(consent, dict) or not isinstance(consent.get(grant_field), list):
         raise ProfileError("profile_consent_unavailable")
     now = int(time.time())
     allowed = consent.get("repositories")
     if (
-        consent.get("schema") != "codex-review-consent/v1"
+        consent.get("schema") != schema
         or consent.get("profile") != name
         or consent.get("owner") != profile["owner"]
         or consent.get("account_sha256") != profile["account_sha256"]
@@ -149,7 +170,7 @@ def select(repository, lane, *, reserved=None):
         or consent["expires_at"] <= now
         or not isinstance(allowed, list)
         or repository not in allowed
-        or lane not in consent.get("lanes", [])
+        or lane not in consent.get(grant_field, [])
         or consent.get("purchased_credits_disabled") is not True
         or consent.get("automatic_purchases_disabled") is not True
     ):
@@ -164,6 +185,8 @@ def select(repository, lane, *, reserved=None):
         "generation": profile["generation"],
         "consent_sha256": digest(consent),
     }
+    if automation:
+        assignment.update(role=lane, controller_workflow=workflow)
     assignment["assignment_sha256"] = digest(assignment)
     if reserved is not None and assignment != reserved:
         raise ProfileError("profile_assignment_changed")
@@ -371,14 +394,14 @@ def capacity(account, limits, assignment):
 
 
 @contextmanager
-def session(assignment, repository, lane, *, wait_seconds=1250):
-    """One quota owner, one refresh writer, all code/security/repo jobs.
+def _session(assignment, repository, lane, *, wait_seconds, selector):
+    """One quota owner, one refresh writer, all admitted roles/repositories.
 
     Jobs queue in GitHub's dedicated runner queue. A busy account yields an
     explicit incomplete result rather than jumping to another person's account.
     No cancellation, account rotation or inferred extra quota is authorised here.
     """
-    select(repository, lane, reserved=assignment)
+    selector(repository, lane, reserved=assignment)
     home = private_home(assignment["account_sha256"])
     path = home / "review.lock"
     fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
@@ -399,7 +422,7 @@ def session(assignment, repository, lane, *, wait_seconds=1250):
                 if time.monotonic() >= deadline:
                     raise ProfileError("profile_session_busy") from exc
                 time.sleep(min(0.1, max(0, deadline - time.monotonic())))
-        select(repository, lane, reserved=assignment)
+        selector(repository, lane, reserved=assignment)
         read_auth(home, assignment)
         account, limits = account_probe(home)
         snapshot = capacity(account, limits, assignment)
@@ -415,7 +438,15 @@ def session(assignment, repository, lane, *, wait_seconds=1250):
                 raise ValueError("short token")
         except (ValueError, IndexError, KeyError) as exc:
             raise ProfileError("profile_session_expiry_unverified") from exc
-        select(repository, lane, reserved=assignment)
+        selector(repository, lane, reserved=assignment)
         yield auth, snapshot
     finally:
         os.close(fd)
+
+
+def session(assignment, repository, lane, *, wait_seconds=1250):
+    return _session(assignment, repository, lane, wait_seconds=wait_seconds, selector=select)
+
+
+def automation_session(assignment, repository, role, *, wait_seconds=1250):
+    return _session(assignment, repository, role, wait_seconds=wait_seconds, selector=select_automation)

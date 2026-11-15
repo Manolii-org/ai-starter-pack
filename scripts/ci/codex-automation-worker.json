@@ -1,0 +1,18 @@
+{
+  "schema": "codex-automation-worker/v1",
+  "allowed_bases": ["main", "master"],
+  "hold_labels": ["human-merge", "security-remediation", "skip-ai-review"],
+  "roster": [
+    "architecture-impact",
+    "config-completeness",
+    "docs-fact-check",
+    "migration-safety",
+    "scope-adherence",
+    "systems-consistency",
+    "test-adequacy"
+  ],
+  "data_sensitivity": "internal",
+  "reasoning_effort": "medium",
+  "max_requests": 32,
+  "max_seconds": 1500
+}

@@ -13,7 +13,9 @@ def test_optional_license_is_promoted_before_step_conditions():
     text = WORKFLOW.read_text(encoding="utf-8")
     assert "GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}" in text
     assert "if: ${{ secrets.GITLEAKS_LICENSE" not in text
-    assert text.count("if: ${{ env.GITLEAKS_LICENSE") == 3
+    # The three gitleaks steps branch on the promoted env value (and, since the
+    # engine input, on engine == 'gitleaks').
+    assert text.count("if: ${{ inputs.engine == 'gitleaks' && env.GITLEAKS_LICENSE") == 3
 
 
 def test_oss_install_runs_on_ubuntu_slim_without_sudo():

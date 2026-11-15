@@ -194,6 +194,11 @@ _exclude:
   - .github/workflows/codex-review-isolation-proof.yml
   - tests/codex_review_isolation_probe.py
   - tests/test_codex_review_isolation_probe.py
+  - tests/test_codex_automation_adapter.py
+  - tests/test_codex_automation_guest.py
+  - tests/test_codex_automation_patch.py
+  - tests/test_codex_automation_receipts.py
+  - tests/test_codex_automation_worker.py
   # The pack's own leaf context manifest (master context governance); a rendered
   # instance must author its own, never inherit the template's identity.
   - /.ai/repo-context.yaml
@@ -329,8 +334,26 @@ _exclude:
   - tests/test_registry.py
   - tests/_registry_cases_*.py
   - tests/test_native_guidance.py
+  - tests/test_delivery_component_distribution.py
   - tests/test_session_terminal_callers.py
   - scripts/tests/test_agent_validation_layout.py
+  # Source-scope control qualification and the non-executing projection
+  # foundation are Pack-owned; portable consumers keep their existing recipe.
+  - scripts/tests/test_source_scope_boundary.py
+  - scripts/tests/test_source_projection.py
+  - scripts/lib/source_projection.py
+  # The reviewed source executor is an additive Linux Pack qualification only.
+  # Portable installations do not contain its OS/runtime adapter or tests.
+  - scripts/lib/source_executor.py
+  - scripts/tests/test_source_executor.py
+  - scripts/source-adapter-probe.py
+  - scripts/tests/test_source_adapter_probe.py
+  - docs/source-only-execution.md
+  # Native owner transport remains local to the public Pack.
+  - scripts/ci/native_owner_recipe.py
+  - .github/workflows/native-owner-recipe.yml
+  - docs/native-owner-recipe.md
+  - tests/test_native_owner_recipe.py
   # Release capability consumers use the portable action and their own product
   # qualification. These suites require the Pack-only registry/build machinery.
   - scripts/tests/test_release_manifest.py
@@ -351,8 +374,15 @@ _exclude:
   # and the test that asserts on them. Consumers adopt via a caller of
   # workflow-security-reusable.yml and generate their own baseline.
   - .github/workflows/workflow-security.yml
+  # Pack-only source scan of distributed skills (scan once at the source);
+  # consumers fetch the gate at a pinned pack_ref when they need it. The
+  # matching test asserts on the excluded workflow and gate script, so a
+  # rendered consumer would fail at collection without excluding it too.
+  - .github/workflows/skill-scan.yml
+  - scripts/skill-scan-gate.py
   - config/zizmor-baseline.json
   - tests/test_workflow_security.py
+  - tests/test_security_assurance_reusables.py
   # Template-internal master content — present only in the master's
   # distribution copy (templates/ai-starter-pack/), declared TEMPLATE_ONLY in
   # scripts/check-pack-mirror-drift.py. Excluded so a render of the template
@@ -388,6 +418,10 @@ _exclude:
   - "{% if not codex_review %}.github/workflows/codex-security-diff-scan.yml{% endif %}"
   - "{% if not codex_review %}.github/workflows/codex-review-worker.yml{% endif %}"
   - "{% if not codex_review %}.github/workflows/codex-review-recovery.yml{% endif %}"
+  - "{% if not codex_review %}.github/workflows/codex-automation-request.yml{% endif %}"
+  - "{% if not codex_review %}.github/workflows/codex-automation-worker.yml{% endif %}"
+  - "{% if not codex_review %}scripts/ci/codex-automation-worker.json{% endif %}"
+  - "{% if not codex_review %}scripts/ci/codex-automation-runtime{% endif %}"
   - "{% if not codex_review %}tests/test_codex_review_workflows.py{% endif %}"
   # isolation_profile=strict: the maintainer's Doppler / LiteLLM / fleet-coupled files.
   - "{% if isolation_profile == 'strict' %}.github/workflows/setup-env-secret.yml{% endif %}"
@@ -411,6 +445,7 @@ _exclude:
 # `copier update` (report §4 Lever A / ADR-0023 Decision 1).
 _skip_if_exists:
   - scripts/ci/codex-review-worker.json
+  - scripts/ci/codex-automation-worker.json
   - CLAUDE.md
   - config/agent-checks.json
   # QA framework owner config + host hook files a consumer may already own

@@ -275,22 +275,22 @@ def test_cost_profile_lean_omits_measured_waste_callers(default_render):
     ("flags", "expected"),
     [
         ({}, {"Hooks": 5, "Commands": 51, "Skills": 41, "Agents": 27,
-              "Scripts": 63, "Husky": 3, "CI": 40, "Docs": 41}),
+              "Scripts": 63, "Husky": 3, "CI": 44, "Docs": 43}),
         ({flag: "true" for flag in FEATURE_FLAGS},
          {"Hooks": 5, "Commands": 54, "Skills": 45, "Agents": 28,
-              "Scripts": 63, "Husky": 3, "CI": 40, "Docs": 43}),
+              "Scripts": 63, "Husky": 3, "CI": 44, "Docs": 45}),
         ({"cost_profile": "lean"},
          {"Hooks": 5, "Commands": 51, "Skills": 41, "Agents": 27,
-              "Scripts": 63, "Husky": 3, "CI": 39, "Docs": 41}),
+              "Scripts": 63, "Husky": 3, "CI": 43, "Docs": 43}),
         ({"codex_review": "false"},
          {"Hooks": 5, "Commands": 51, "Skills": 41, "Agents": 27,
-              "Scripts": 63, "Husky": 3, "CI": 36, "Docs": 41}),
+              "Scripts": 63, "Husky": 3, "CI": 38, "Docs": 43}),
         ({"isolation_profile": "strict"},
          {"Hooks": 5, "Commands": 51, "Skills": 41, "Agents": 27,
-              "Scripts": 60, "Husky": 3, "CI": 32, "Docs": 41}),
+              "Scripts": 60, "Husky": 3, "CI": 34, "Docs": 43}),
         ({"isolation_profile": "strict", "cost_profile": "lean"},
          {"Hooks": 5, "Commands": 51, "Skills": 41, "Agents": 27,
-              "Scripts": 60, "Husky": 3, "CI": 32, "Docs": 41}),
+              "Scripts": 60, "Husky": 3, "CI": 34, "Docs": 43}),
     ],
 )
 def test_rendered_readme_counts_match_rendered_tree(flags, expected):
@@ -324,9 +324,88 @@ def test_validation_layout_distribution_boundary(default_render, branded_render)
         for rel in ("scripts/install-agent-validation.py", "docs/agent-validation-layout.md"):
             assert (rendered / rel).read_bytes() == (ROOT / rel).read_bytes()
         assert not (rendered / "scripts/tests/test_agent_validation_layout.py").exists()
+        for pack_only in ("scripts/tests/test_source_scope_boundary.py", "scripts/tests/test_source_projection.py",
+                          "scripts/lib/source_projection.py", "scripts/lib/source_executor.py",
+                          "scripts/tests/test_source_executor.py", "docs/source-only-execution.md",
+                          "scripts/source-adapter-probe.py", "scripts/tests/test_source_adapter_probe.py"):
+            assert not (rendered / pack_only).exists()
         assert not (rendered / "tests/test_assessment_sast_failure.py").exists()
         # The existing default validation bundle remains available to callers.
         assert (rendered / "scripts/tests/test_agent_check.py").is_file()
+
+
+def test_subscription_guest_distribution_boundary(default_render, branded_render):
+    """Ship the accepted guest closure, without its Pack-only test command."""
+    paths = (
+        "scripts/ci/codex_automation_adapter.py", "scripts/ci/codex_automation_context.py",
+        "scripts/ci/codex_subscription_text.py", "scripts/ci/codex_text_response.py",
+        "scripts/ci/codex_review_models.py", "scripts/lib/subscription_guest.py",
+        "scripts/lib/agent_capabilities.py", "scripts/run-pr-classifier.py",
+        "scripts/run-specialists.py", "scripts/run-broad-agents.py", "scripts/run-judge.py",
+    )
+    for rendered in (default_render, branded_render):
+        for relative in paths:
+            assert (rendered / relative).read_bytes() == (ROOT / relative).read_bytes()
+        assert not (rendered / "tests/test_codex_automation_adapter.py").exists()
+        config = json.loads((rendered / "config/agent-checks.json").read_text())
+        assert "subscription-automation-text-contract" not in {c["id"] for c in config["checks"]}
+
+def test_source_scope_distribution_holds_before_reads_and_preserves_legacy_failure(tmp_path, default_render, branded_render):
+    """Actual rendered code holds opaque bytes; absent scope still executes checks."""
+    for rendered in (default_render, branded_render):
+        for relative in ("scripts/agent-check.py", "scripts/install-agent-validation.py",
+                         "scripts/qa/finalise-gate.py", "schemas/source-scope-policy.v1.schema.json",
+                         "docs/source-scope-boundary.md"):
+            assert (rendered / relative).read_bytes() == (ROOT / relative).read_bytes()
+
+    owner = tmp_path / "synthetic-owner"
+    (owner / "src").mkdir(parents=True)
+    (owner / "config").mkdir()
+    (owner / ".ai").mkdir()
+    (owner / "opaque").mkdir()
+    (owner / "src/value.py").write_text("value = 1\n")
+    (owner / "opaque/sentinel.bin").write_bytes(b"synthetic opaque fixture\n")
+    (owner / ".gitignore").write_text(".ai/agent-checks/\n")
+    config = {"schema_version": 1, "base": "origin/main", "environments": [],
+              "checks": [{"id": "existing-failure", "paths": ["src/*"],
+                          "commands": [[sys.executable, "-c", "raise SystemExit(17)"]]}]}
+    (owner / "config/agent-checks.json").write_text(json.dumps(config))
+    # Only synthetic files enter this real Git repository. No ambient Git routes
+    # or credentials are needed for either the metadata probe or failing check.
+    env = {key: os.environ[key] for key in ("PATH", "HOME", "LANG") if key in os.environ}
+    env.update({"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
+                "GIT_TERMINAL_PROMPT": "0", "PYTHONDONTWRITEBYTECODE": "1"})
+    for args in (("init", "-q"), ("config", "user.name", "Synthetic Fixture"),
+                 ("config", "user.email", "fixture@example.invalid"), ("add", "."),
+                 ("-c", "commit.gpgsign=false", "commit", "-qm", "Synthetic source"),
+                 ("update-ref", "refs/remotes/origin/main", "HEAD")):
+        subprocess.run(["git", *args], cwd=owner, env=env, check=True, capture_output=True, timeout=30)
+    (owner / "src/value.py").write_text("value = 2\n")
+    runner = default_render / "scripts/agent-check.py"
+    legacy = subprocess.run([sys.executable, "-B", str(runner), "--repo-root", str(owner), "--no-cache"],
+                            cwd=owner, env=env, capture_output=True, text=True, timeout=30)
+    assert legacy.returncode == 1, legacy.stdout + legacy.stderr
+    receipt = json.loads((owner / ".ai/agent-checks/receipt.json").read_text())
+    assert receipt["outcome"] == "failed"
+    (owner / ".ai/source-scope-policy.json").write_text("deliberately unreadable as policy content")
+    wrapper = r"""
+import importlib.util,sys
+from pathlib import Path
+runner,root=map(Path,sys.argv[1:3])
+def audit(event,args):
+    if event == 'open' and isinstance(args[0],(str,bytes)):
+        if Path(args[0]).absolute().is_relative_to(root):
+            raise AssertionError('owner bytes opened before source-scope refusal')
+sys.addaudithook(audit)
+spec=importlib.util.spec_from_file_location('rendered_boundary_runner',runner)
+module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+raise SystemExit(module.main(['--repo-root',str(root),'--no-cache']))
+"""
+    held = subprocess.run([sys.executable, "-B", "-c", wrapper, str(runner), str(owner)],
+                          cwd=owner, env=env, capture_output=True, text=True, timeout=30)
+    assert held.returncode == 4, held.stdout + held.stderr
+    assert "AGENT-CHECK-SOURCE-SCOPE-HELD" in held.stderr
+    assert json.loads((owner / ".ai/agent-checks/receipt.json").read_text()) == receipt
 
 
 def test_release_capability_distribution_boundary(default_render, branded_render):
@@ -354,11 +433,14 @@ def test_release_capability_distribution_boundary(default_render, branded_render
         registry_cases = list((ROOT / "tests").glob("_registry_cases_*.py"))
         assert registry_cases, "the registry case inventory must not become vacuous"
         maintenance_paths += registry_cases
+        maintenance_paths += [ROOT / path for path in ("scripts/ci/native_owner_recipe.py",
+                              ".github/workflows/native-owner-recipe.yml", "docs/native-owner-recipe.md",
+                              "tests/test_native_owner_recipe.py")]
         assert maintenance_paths, "the pack maintenance inventory must not become vacuous"
         for path in maintenance_paths:
             assert not (rendered / path.relative_to(ROOT)).exists()
         config = json.loads((rendered / "config/agent-checks.json").read_text())
-        assert all(c["id"] not in {"release-manifest-contract", "feature-controls", "feature-controls-distribution", "assessment-sast-failure-contract", "registry-bootstrap-contract", "installer-layout-contract", "watch-continuity-contract"} for c in config["checks"])
+        assert all(c["id"] not in {"release-manifest-contract", "feature-controls", "feature-controls-distribution", "assessment-sast-failure-contract", "subscription-automation-text-contract", "registry-bootstrap-contract", "source-qualification-contract", "native-owner-recipe-contract", "installer-layout-contract", "watch-continuity-contract"} for c in config["checks"])
         assert all(e["id"] not in {"release-contract-python", "feature-controls-python"} for e in config["environments"])
         fixture = ROOT / "scripts/tests/fixtures/release-manifest.v1.json"
         release_id = json.loads(fixture.read_text())["release_id"]
@@ -485,8 +567,23 @@ def test_branded_attribution(branded_render, default_render):
 def test_agent_validation_base_uses_owner_ref(tmp_path, default_render, base_ref):
     """A real rendered CLI plans correctly with remote or local owner refs."""
     canonical = json.loads((ROOT / "config/agent-checks.json").read_text())
-    canonical["checks"] = [c for c in canonical["checks"] if c["id"] not in {"release-manifest-contract", "feature-controls", "feature-controls-distribution", "assessment-sast-failure-contract", "registry-bootstrap-contract", "installer-layout-contract", "watch-continuity-contract"}]
+    canonical["checks"] = [c for c in canonical["checks"] if c["id"] not in {"release-manifest-contract", "feature-controls", "feature-controls-distribution", "assessment-sast-failure-contract", "subscription-automation-text-contract", "registry-bootstrap-contract", "source-qualification-contract", "native-owner-recipe-contract", "installer-layout-contract", "watch-continuity-contract"}]
     canonical["environments"] = [e for e in canonical["environments"] if e["id"] not in {"release-contract-python", "feature-controls-python"}]
+    pack_only_paths = {"scripts/tests/test_source_scope_boundary.py", "scripts/tests/test_source_projection.py",
+                       "scripts/lib/source_projection.py", "scripts/lib/source_executor.py",
+                       "scripts/tests/test_source_executor.py", "docs/source-only-execution.md",
+                       ".github/workflows/plugin-eval-gate.yml", "scripts/source-adapter-probe.py",
+                       "scripts/tests/test_source_adapter_probe.py"}
+    pack_only_commands = [["python3", "-m", "unittest", "discover", "-s", "scripts/tests", "-p", name, "-v"]
+                          for name in ("test_source_scope_boundary.py", "test_source_projection.py", "test_source_executor.py",
+                                       "test_source_adapter_probe.py")]
+    owner_check = next(check for check in canonical["checks"] if check["id"] == "agent-validation-contract")
+    owner_check["paths"] = [path for path in owner_check["paths"] if path not in pack_only_paths]
+    owner_check["commands"] = [command for command in owner_check["commands"] if command not in pack_only_commands]
+    owner_check["tools"] = [tool for tool in owner_check["tools"] if tool not in {"bwrap", "cc"}]
+    assert owner_check["tools"] == ["python", "git"]
+    assert owner_check["commands"] == [["python3", "scripts/sync-agent-validation.py", "--check"],
+                                        ["python3", "-m", "unittest", "discover", "-s", "scripts/tests", "-p", "test_agent_check.py", "-v"]]
     assert json.loads((default_render / "config/agent-checks.json").read_text()) == canonical
     dst = tmp_path / "custom-integration"
     render(dst, agent_validation_base=base_ref)
@@ -522,7 +619,7 @@ def test_skip_if_exists_contract(has_native_lock):
     copier_config = yaml.safe_load((ROOT / "copier.yml").read_text())
     skip_if_exists = set(copier_config.get("_skip_if_exists", []))
 
-    expected = {"CLAUDE.md", ".claude/model-routing.json", ".claude/mcp.json", ".claude/hooks/session-start.sh", "ai-manifest.yaml", "config/agent-checks.json", "scripts/ci/codex-review-worker.json",
+    expected = {"CLAUDE.md", ".claude/model-routing.json", ".claude/mcp.json", ".claude/hooks/session-start.sh", "ai-manifest.yaml", "config/agent-checks.json", "scripts/ci/codex-review-worker.json", "scripts/ci/codex-automation-worker.json",
                 # QA framework owner config + host hook files (docs/qa-framework.md)
                 "config/qa.json", ".cursor/hooks.json", ".codex/hooks.json",
                 ".githooks/pre-push"}
@@ -955,6 +1052,10 @@ STRICT_EXCLUDED = {
     ".github/workflows/codex-security-diff-scan.yml",
     ".github/workflows/codex-review-worker.yml",
     ".github/workflows/codex-review-recovery.yml",
+    ".github/workflows/codex-automation-request.yml",
+    ".github/workflows/codex-automation-worker.yml",
+    "scripts/ci/codex-automation-worker.json",
+    "scripts/ci/codex-automation-runtime/Dockerfile",
     ".github/workflows/setup-env-secret.yml",
     ".github/workflows/dependabot-manual-automerge.yml",
     ".github/workflows/monitor-litellm.yml",
@@ -1066,6 +1167,9 @@ def test_standard_keeps_codex_review_unless_opted_out(default_render, tmp_path):
     codex = {".github/workflows/codex-pr-review.yml", ".github/workflows/codex-security-diff-scan.yml",
              ".github/workflows/codex-review-worker.yml", ".github/workflows/codex-review-recovery.yml"}
     codex.add("tests/test_codex_review_workflows.py")
+    # The subscription automation producer/controller depend on the review runtime.
+    codex |= {".github/workflows/codex-automation-request.yml", ".github/workflows/codex-automation-worker.yml",
+              "scripts/ci/codex-automation-worker.json", "scripts/ci/codex-automation-runtime/Dockerfile"}
     assert codex <= file_set(default_render)
     dst = tmp_path / "nocodex"
     dst.mkdir()
@@ -1078,6 +1182,179 @@ def test_standard_keeps_codex_review_unless_opted_out(default_render, tmp_path):
 def test_strict_refuses_manolii_hosted_services(tmp_path, flag):
     with pytest.raises(subprocess.CalledProcessError):
         render(tmp_path / "bad", isolation_profile="strict", **{flag: "true"})
+
+
+def test_executor_pack_recipe_renders_without_linux_consumer_dependencies():
+    """Plain Jinja smoke; separate Copier checks bind actual candidate bytes."""
+    from jinja2 import Environment, FileSystemLoader, StrictUndefined
+
+    environment = Environment(loader=FileSystemLoader(ROOT), undefined=StrictUndefined)
+    environment.filters["from_json"] = json.loads
+    template = environment.get_template("config/agent-checks.json.jinja")
+    owner = json.loads((ROOT / "config/agent-checks.json").read_text())
+    command = ["python3", "-m", "unittest", "discover", "-s", "scripts/tests", "-p", "test_source_executor.py", "-v"]
+    assert command in owner["checks"][0]["commands"]
+    assert owner["checks"][0]["tools"] == ["python", "git", "bwrap", "cc"]
+    # Fingerprint the actual fixed binaries used by the reviewed executor/tests,
+    # rather than a same-named executable earlier on an unrelated PATH.
+    runner = runpy.run_path(str(ROOT / "scripts/agent-check.py"))
+    assert runner["TOOLS"]["bwrap"] == ["/usr/bin/bwrap", "--version"]
+    assert runner["TOOLS"]["cc"] == ["/usr/bin/cc", "--version"]
+    # 11 accepted owner checks plus this train's pack-only subscription contract.
+    assert len(owner["checks"]) == 12
+    assert "subscription-automation-text-contract" in {check["id"] for check in owner["checks"]}
+    assert {"installer-layout-contract", "native-owner-recipe-contract", "source-qualification-contract"} <= {
+        check["id"] for check in owner["checks"]
+    }
+    assert len(owner["environments"]) == 3
+    for base in ("origin/trunk", "master"):
+        rendered = json.loads(template.render(agent_validation_base=base))
+        assert rendered["base"] == base
+        assert {"installer-layout-contract", "native-owner-recipe-contract", "source-qualification-contract"}.isdisjoint(
+            check["id"] for check in rendered["checks"]
+        )
+        assert "release-contract-python" not in {e["id"] for e in rendered["environments"]}
+        portable = rendered["checks"][0]
+        assert portable["id"] == "agent-validation-contract"
+        assert portable["tools"] == ["python", "git"]
+        assert portable["commands"] == [
+            ["python3", "scripts/sync-agent-validation.py", "--check"],
+            ["python3", "-m", "unittest", "discover", "-s", "scripts/tests", "-p", "test_agent_check.py", "-v"],
+        ]
+        assert not any("source_executor" in item or "source_projection" in item for item in portable["paths"])
+        assert "docs/source-only-execution.md" not in portable["paths"]
+        assert ".github/workflows/plugin-eval-gate.yml" not in portable["paths"]
+        assert all("bwrap" not in check.get("tools", []) and "cc" not in check.get("tools", [])
+                   for check in rendered["checks"])
+    copier = yaml.safe_load((ROOT / "copier.yml").read_text())
+    for path in ("scripts/lib/source_executor.py", "scripts/tests/test_source_executor.py",
+                 "docs/source-only-execution.md", "scripts/lib/source_projection.py",
+                 "scripts/tests/test_source_projection.py", "scripts/tests/test_release_validation_gate.py",
+                 "scripts/source-adapter-probe.py", "scripts/tests/test_source_adapter_probe.py"):
+        assert path in copier["_exclude"]
+
+
+def test_executor_native_linux_gate_declares_tools_and_preserves_qualification():
+    """Missing capability exits incomplete; the actual tests have no success waiver."""
+    workflow = yaml.safe_load((ROOT / ".github/workflows/plugin-eval-gate.yml").read_text())
+    assert workflow["permissions"] == {"contents": "read"}
+    job = workflow["jobs"]["eval-gate"]
+    assert job["runs-on"] == "ubuntu-latest"
+    assert job["timeout-minutes"] == 25  # measured 565-936 s; 15 cancelled healthy runs
+    steps = {step.get("name"): step for step in job["steps"]}
+    setup = steps["Install public Linux source-executor prerequisites"]
+    assert 'apt-cache policy bubblewrap' in setup["run"]
+    assert 'apt-cache policy build-essential' in setup["run"]
+    assert '"bubblewrap=$bubblewrap_version" "build-essential=$build_version"' in setup["run"]
+    assert "exit 2" in setup["run"]
+    capability = steps["Verify Linux source-executor capability"]
+    for token in ("--unshare-user", "--disable-userns", "--unshare-all", "--cap-drop ALL", "--clearenv", "exit 2"):
+        assert token in capability["run"]
+    execution = steps["Linux source-executor contracts"]
+    assert execution["run"] == "python3 -m unittest discover -s scripts/tests -p test_source_executor.py -v"
+    for step in (setup, capability, execution):
+        assert "if" not in step
+        assert "continue-on-error" not in step
+        assert "|| true" not in step["run"]
+    observation = steps["Observe public adapter subjects (not qualification)"]
+    assert observation["run"] == "python3 scripts/source-adapter-probe.py"
+    ordered = [step.get("name") for step in job["steps"]]
+    assert ordered.index(observation["name"]) < ordered.index(execution["name"])
+    assert "if" not in observation and "continue-on-error" not in observation
+    # The established portable contract is still called independently.
+    assert "test_agent_check.py" in steps["Local agent validation contract"]["run"]
+
+
+@pytest.mark.parametrize("case,package,expected,message", [
+    ("success", "", 0, ""),
+    ("large-policy", "", 0, ""),
+    ("update-fails", "", 2, "package metadata unavailable"),
+    ("install-fails", "", 2, "prerequisite installation failed"),
+] + [
+    (case, package, 2, message)
+    for case, message in (
+        ("producer-fails", "prerequisite metadata query failed"),
+        ("producer-fails-after-candidate", "prerequisite metadata query failed"),
+        ("missing-candidate", "prerequisite candidate unavailable"),
+        ("empty-candidate", "prerequisite candidate unavailable"),
+        ("none-candidate", "prerequisite candidate unavailable"),
+    )
+    for package in ("bubblewrap", "build-essential")
+])
+def test_executor_public_linux_setup_consumes_metadata_and_fails_closed(tmp_path, case, package, expected, message):
+    """Execute the real recipe with synthetic metadata; never run apt or sudo."""
+    config = json.loads((ROOT / "config/agent-checks.json").read_text())
+    release = next(check for check in config["checks"] if check["id"] == "release-manifest-contract")
+    assert any("test_executor_public_linux_setup_consumes_metadata_and_fails_closed" in command[-1]
+               for command in release["commands"] if "-k" in command)
+    workflow = yaml.safe_load((ROOT / ".github/workflows/plugin-eval-gate.yml").read_text())
+    setup = next(step["run"] for step in workflow["jobs"]["eval-gate"]["steps"]
+                 if step.get("name") == "Install public Linux source-executor prerequisites")
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    calls = tmp_path / "calls"
+    versions = {"bubblewrap": "0.12.0-1", "build-essential": "12.12"}
+    if case == "large-policy":
+        for name, version in versions.items():
+            # More than a pipe buffer, with a later candidate that must not win.
+            (tmp_path / name).write_text(
+                f"{name}:\n  Candidate: {version}\n" + "  synthetic version-table row\n" * 300000
+                + "  Candidate: 0.0-not-selected\n")
+    scripts = {
+        "sudo": r'''
+printf 'sudo %s\n' "$*" >> "$SYNTHETIC_CALLS"
+[ "$1" = -n ] && [ "$2" = apt-get ] || exit 41
+case "$3" in
+  update) [ "$SYNTHETIC_CASE" != update-fails ] ;;
+  install)
+    [ "$*" = '-n apt-get install --no-install-recommends -y bubblewrap=0.12.0-1 build-essential=12.12' ] || exit 42
+    [ "$SYNTHETIC_CASE" != install-fails ] ;;
+  *) exit 43 ;;
+esac
+''',
+        "apt-cache": r'''
+printf 'apt-cache %s\n' "$*" >> "$SYNTHETIC_CALLS"
+[ "$1" = policy ] || exit 44
+case "$2" in bubblewrap) version=0.12.0-1 ;; build-essential) version=12.12 ;; *) exit 45 ;; esac
+if [ "$2" = "$SYNTHETIC_PACKAGE" ]; then
+  case "$SYNTHETIC_CASE" in
+    producer-fails) exit 23 ;;
+    producer-fails-after-candidate) printf '  Candidate: %s\n' "$version"; exit 23 ;;
+    missing-candidate) printf '  Installed: (none)\n'; exit 0 ;;
+    empty-candidate) printf '  Candidate:\n'; exit 0 ;;
+    none-candidate) printf '  Candidate: (none)\n'; exit 0 ;;
+  esac
+fi
+if [ "$SYNTHETIC_CASE" = large-policy ]; then
+  exec /bin/cat "$SYNTHETIC_POLICY_DIR/$2"
+fi
+printf '  Candidate: %s\n' "$version"
+''',
+        "dpkg-query": r'''
+printf 'dpkg-query %s\n' "$*" >> "$SYNTHETIC_CALLS"
+[ "$*" = '--show bubblewrap build-essential' ] || exit 46
+''',
+    }
+    for name, program in scripts.items():
+        path = tools / name
+        path.write_text("#!/bin/sh\nset -eu\n" + program)
+        path.chmod(0o700)
+    environment = {key: os.environ[key] for key in ("HOME", "LANG") if key in os.environ}
+    environment.update(PATH=str(tools) + os.pathsep + os.defpath,
+                       SYNTHETIC_CASE=case, SYNTHETIC_PACKAGE=package,
+                       SYNTHETIC_POLICY_DIR=str(tmp_path), SYNTHETIC_CALLS=str(calls))
+    result = subprocess.run(["/bin/bash", "-c", setup], cwd=tmp_path, env=environment,
+                            capture_output=True, text=True, timeout=30)
+    assert result.returncode == expected, result.stdout + result.stderr
+    recorded = calls.read_text()
+    if expected == 0:
+        assert "INCOMPLETE" not in result.stderr
+        assert "sudo -n apt-get install --no-install-recommends -y bubblewrap=0.12.0-1 build-essential=12.12\n" in recorded
+        assert "dpkg-query --show bubblewrap build-essential\n" in recorded
+    else:
+        assert message in result.stderr
+        assert "dpkg-query" not in recorded
+        assert ("sudo -n apt-get install" in recorded) == (case == "install-fails")
 
 
 def test_watch_continuity_maintainer_fixture_never_ships(default_render, strict_render):
