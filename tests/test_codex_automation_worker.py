@@ -14,6 +14,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts/ci"))
 import codex_automation_worker as worker
 
+REAL_CLAIM = worker.custody.claim
+
 TARGET = {"repository": "example/automation", "pull_request": 7, "base_sha": "b" * 40,
           "head_sha": "a" * 40, "operation": "assessment", "request_run_id": 11,
           "request_run_attempt": 1, "request_workflow_id": 5, "request_artifact_id": 9,
@@ -473,3 +475,60 @@ def test_editor_admission_uses_the_accepted_custody_script(monkeypatch, tmp_path
         return subprocess.CompletedProcess(cmd, 0)
     monkeypatch.setattr(worker.subprocess, "run", held)
     assert worker.editor_admission(TARGET) == "editor_admission_held"
+
+
+
+class CustodyGitHub:
+    """Native-shaped reads for the real custody.claim (no mock of the claim)."""
+    repository = TARGET["repository"]
+    token = "fixture-token"
+
+    def __init__(self):
+        repo = {"id": 1, "full_name": self.repository}
+        controller = {"id": 31, "path": worker.custody.WORKFLOW, "workflow_id": 3, "event": "workflow_run",
+                      "head_sha": "c" * 40, "status": "in_progress", "conclusion": None,
+                      "repository": repo, "head_repository": repo}
+        producer = {"id": 11, "path": ".github/workflows/codex-automation-request.yml", "workflow_id": 9,
+                    "event": "pull_request", "head_sha": TARGET["head_sha"], "status": "completed",
+                    "conclusion": "success", "repository": repo, "head_repository": repo}
+        self.data = {"": repo, "/actions/runs/31": controller, "/actions/runs/11": producer,
+                     "/actions/workflows/codex-automation-worker.yml": {"id": 3, "path": worker.custody.WORKFLOW}}
+        self.rows = []
+
+    def json(self, route, *, method="GET", data=None):
+        if method == "GET":
+            return dict(self.data[route])
+        row = {**data, "id": 25 + len(self.rows), "creator": {"id": worker.custody.BOT_ID}}
+        self.rows.append(row)
+        return dict(row)
+
+    def pages(self, route):
+        return [dict(r) for r in self.rows]
+
+
+def test_real_custody_claim_authenticates_the_running_controller_not_the_producer(harness, monkeypatch, tmp_path):
+    """Codex review P1: custody must bind the running worker run (run_id), not the
+    completed request run; the worker suite previously mocked the claim."""
+    _, events, _, _ = harness
+    monkeypatch.setattr(worker.custody, "claim", REAL_CLAIM)
+    fake = CustodyGitHub()
+    result, _ = worker.execute(fake, dict(TARGET), tmp_path,
+                                  run_id=31, run_attempt=1, workflow_sha="c" * 40,
+                                  guest=lambda *a, **k: {"status": "held", "reason": "stop_after_claim"},
+                                  session=harness_session(events),
+                                  image_builder=lambda d: "sha256:" + "1" * 64,
+                                  source_loader=lambda d, t, token: (d / "source.git", ["policy.py"]))
+    assert result["reason"] == "stop_after_claim", result
+    assert [r["context"] for r in fake.rows] == ["codex-automation-execution/assessment/pr-7"]
+    assert fake.rows[0]["target_url"].endswith("/actions/runs/31")
+    with pytest.raises(worker.custody.CustodyHold, match="execution_controller_refused"):
+        REAL_CLAIM(CustodyGitHub(), {**TARGET, "operation": "assessment"}, producer_run_id=11,
+                   workflow_sha="c" * 40, enabled=True)
+
+
+def harness_session(events):
+    @contextmanager
+    def session(assignment, repo, role):
+        events.append(("session", role))
+        yield {}, {}
+    return session

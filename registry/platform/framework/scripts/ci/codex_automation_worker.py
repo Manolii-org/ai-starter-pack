@@ -213,7 +213,9 @@ def execute(github, target, directory, *, run_id, run_attempt, workflow_sha, gue
     except profiles.ProfileError as exc:
         return {"state": "blocked_credentials", "reason": str(exc)}, rows
     try:
-        custody.claim(github, {**target, "operation": "assessment"}, producer_run_id=target["request_run_id"],
+        # custody authenticates the running controller (this workflow_run job),
+        # not the completed producer run already authenticated by admission.
+        custody.claim(github, {**target, "operation": "assessment"}, producer_run_id=run_id,
                       workflow_sha=workflow_sha, enabled=True)
     except custody.CustodyHold as exc:
         return {"state": "held", "reason": str(exc)}, rows
@@ -329,7 +331,7 @@ def autofix_stage(github, target, directory, config, publication, image, source,
     except profiles.ProfileError as exc:
         return {"outcome": "blocked_credentials", "reason": str(exc)}
     try:
-        custody.claim(github, {**target, "operation": "autofix"}, producer_run_id=target["request_run_id"],
+        custody.claim(github, {**target, "operation": "autofix"}, producer_run_id=run_id,
                       workflow_sha=workflow_sha, enabled=True)
     except custody.CustodyHold as exc:
         return {"outcome": "held", "reason": str(exc)}
