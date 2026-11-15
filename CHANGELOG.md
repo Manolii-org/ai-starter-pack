@@ -4,6 +4,11 @@
 
 ### Fixed
 
+- `static-review` / `static-review-reusable`: on pull requests, Semgrep
+  baselines on the first parent of GitHub's test merge commit instead of
+  `pull_request.base.sha`, which goes stale when the base branch moves (findings
+  from later base commits were attributed to the PR). Also shipped on the 1.x
+  line as v1.27.2.
 - `static-review-reusable`: the Agent Routing Lint job no longer fails in a
   caller that ships agent/skill Markdown but has no model routing config. It
   runs only when both `scripts/lint-agent-routing.py` and
