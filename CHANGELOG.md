@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.27.1] — 2026-11-15
+
+### Fixed
+
+- `static-review-reusable`: the Agent Routing Lint job no longer fails in a
+  caller that ships agent/skill Markdown (for example the synced
+  `adaptable-development` policy) but has no model routing config. It now runs
+  only when both `scripts/lint-agent-routing.py` and `.claude/model-routing.json`
+  exist, and otherwise skips with a notice. Callers with a routing config are
+  linted exactly as before.
+
 ## [1.27.0] — 2026-11-15
 
 Security-only maintenance release: v1.26.0 plus the central Security Assurance

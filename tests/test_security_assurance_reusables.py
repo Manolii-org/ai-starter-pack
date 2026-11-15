@@ -160,3 +160,32 @@ def test_coderabbit_round1_regressions():
     assert "set +e" in skill and '"$rc" -ge 2' in skill
     # Pack-only tests are not rendered into consumers.
     assert "- tests/test_security_assurance_reusables.py" in (ROOT / "copier.yml").read_text(encoding="utf-8")
+
+
+def _routing_detect_script() -> str:
+    for step in _load("static-review-reusable.yml")["jobs"]["agent-routing-lint"]["steps"]:
+        if step.get("id") == "detect":
+            return step["run"]
+    raise AssertionError("detect step not found")
+
+
+def test_routing_lint_skips_callers_without_a_routing_config(tmp_path):
+    import subprocess
+
+    script = _routing_detect_script()
+
+    def found(*paths):
+        root = tmp_path / str(len(list(tmp_path.iterdir())))
+        root.mkdir()
+        for p in paths:
+            (root / p).parent.mkdir(parents=True, exist_ok=True)
+            (root / p).write_text("x")
+        out = root / "out"
+        subprocess.run(["bash", "-c", script], cwd=root, env={"GITHUB_OUTPUT": str(out), "PATH": "/usr/bin:/bin"}, check=True)
+        return out.read_text().strip()
+
+    assert found() == "found=false"
+    assert found(".claude/skills/a/SKILL.md") == "found=false"
+    assert found(".claude/skills/a/SKILL.md", "scripts/lint-agent-routing.py") == "found=false"
+    assert found(".claude/agents/x.md", "scripts/lint-agent-routing.py", ".claude/model-routing.json") == "found=true"
+    assert found(".claude/skills/a/SKILL.md", "scripts/lint-agent-routing.py", ".claude/model-routing.json") == "found=true"
