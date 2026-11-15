@@ -12,8 +12,8 @@ set -euo pipefail
 DEST="${1:?usage: install-workflow-scanners.sh <bin-dir>}"
 ZIZMOR_VERSION="1.31.1"
 ZIZMOR_WHEEL_SHA256="58e878eb2dbd2c6183c105e1ac28c14f7dd1eca44a783f1fe2a69647d012c410"
-ACTIONLINT_VERSION="1.7.7"
-ACTIONLINT_TGZ_SHA256="023070a287cd8cccd71515fedc843f1985bf96c436b7effaecce67290e7e0757"
+ACTIONLINT_VERSION="1.7.12"
+ACTIONLINT_TGZ_SHA256="8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8"
 
 if [[ "$(uname -s)-$(uname -m)" != "Linux-x86_64" ]]; then
   echo "install-workflow-scanners: Linux x86_64 only (got $(uname -s)-$(uname -m))" >&2
