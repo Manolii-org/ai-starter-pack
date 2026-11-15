@@ -311,3 +311,27 @@ def test_code_defect_cron_monitor_wrapper_is_still_suppressed():
     row = dict(issue(), issueType="monitor_check_in_failure", lifetime=SHORT)
     result = sweep_mod.sweep(MANIFEST, fake({"production": [row]}, {"42": event()}), now=NOW)
     assert result["candidates"] == [] and result["stats"]["filtered_transient"] == 1
+
+
+@pytest.mark.parametrize("classification", sorted(set(sweep_mod.SIGNATURES["classifications"])))
+def test_transient_rule_is_defined_over_the_whole_classification_enum(classification):
+    row = issue()
+    expected = classification in ("provider", "quota") or classification == "unknown"
+    assert sweep_mod.is_transient(row, classification, "APIError") is expected
+    # Cron-monitor wrappers are transient whatever their class.
+    assert sweep_mod.is_transient(dict(row, issueType="monitor_check_in_failure"), classification, None) is True
+
+
+@pytest.mark.parametrize("etype,message,expect", [
+    ("APIError", "no api key configured", "configuration"),
+    ("APIError", "column \"x\" does not exist", "migration"),
+])
+def test_affirmative_class_with_transient_type_is_admitted_when_short_lived(etype, message, expect):
+    row = dict(issue(), lifetime=SHORT)
+    result = sweep_mod.sweep(MANIFEST, fake({"production": [row]}, {"42": event(etype, message)}), now=NOW)
+    assert result["candidates"][0]["classification"] == expect
+    assert result["stats"]["filtered_transient"] == 0
+
+
+def test_security_class_with_transient_type_is_not_transient():
+    assert sweep_mod.is_transient(issue(), "security", "APIError") is False

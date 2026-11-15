@@ -27,11 +27,14 @@ credential.
 ## Admission
 
 A group is **transient** when its classification is `provider` or `quota`,
-it is not a `code_defect` and its exception type is one of `Timeout`, `BadGatewayError`,
-`ServiceUnavailableError`, `APIError`, `ProxyException` or `RateLimitError`,
-or it is a Sentry cron-monitor issue, whatever its classification. A cron-monitor issue has
+when it is `unknown` and its exception type is one of `Timeout`,
+`BadGatewayError`, `ServiceUnavailableError`, `APIError`, `ProxyException` or
+`RateLimitError`, or when it is a Sentry cron-monitor issue, whatever its
+classification. A cron-monitor issue has
 `issueType == "monitor_check_in_failure"`; a title starting with
-`Cron failure:` is the fallback.
+`Cron failure:` is the fallback. An affirmative `code_defect`, `migration`,
+`configuration` or `security` classification is never overridden by the
+exception type.
 
 A transient group becomes a candidate only when it is **sustained**: at
 least 100 events, with at least 7 days between its first and last event.
