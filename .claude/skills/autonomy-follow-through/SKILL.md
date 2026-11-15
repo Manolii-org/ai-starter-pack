@@ -1,6 +1,6 @@
 ---
 name: autonomy-follow-through
-version: 1.1.8
+version: 1.1.9
 description: "Shared termination + escalation loop for routine-native autonomy and /watch-pr. Stops on done/blocked_on_human/blocked_on_infra/superseded/gave_up; merges when safe."
 type: skill
 model: sonnet
@@ -148,7 +148,7 @@ Each round:
 
 | State | Trigger/action |
 |-------|----------------|
-| `done` | Every Merge-When-Safe rule below true, including review/vetoes; merge, preferring auto-merge. |
+| `done` | Every Merge-When-Safe rule below true, including review/vetoes; merge, preferring auto-merge; then complete any requested post-merge verification/cleanup with verified outcomes. Merge alone is not `done` while requested post-merge work remains; keep the owner active until it is verified. |
 | `blocked_on_human` | Concrete required human approval/authority/design/risk decision; notify once. Ordinary automated review stays monitored. |
 | `blocked_on_infra` | Shared PAT/config/proxy/Retry-After/Fly502 or unmatched transient: owning infra-incident recorder (`scripts/infra_incident.py` where shipped), label infra-incident, retain dependents. One cheap GET; attach evidence, never close. Open incidents suppress retries; otherwise infra_backoff_minutes. Code/test failures remain required-check failures. Never shorten hosted Retry-After to 30 seconds. |
 | `superseded` | New PR opened for the same scope, or empty L4 exception below; close seed only once its replacement PR exists, link Act PR. |
