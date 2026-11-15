@@ -40,7 +40,15 @@ DEADLINE = time.monotonic() + int(os.environ.get("CODEX_AUTOMATION_GUEST_SECONDS
 
 
 class GuestHold(RuntimeError):
-    """A stage cannot produce trustworthy output; never fall back."""
+    """A stage cannot produce trustworthy output; never fall back.
+
+    ``detail`` is a bounded stderr tail for the retained result artifact only;
+    the host never puts it into a PR comment.
+    """
+
+    def __init__(self, reason, detail=""):
+        super().__init__(reason)
+        self.detail = detail
 
 
 def _context():
@@ -106,7 +114,8 @@ def _run(script, args, value, work):
         [sys.executable, "-I", str(ROOT / "scripts" / script), *args],
         cwd=work, env=_stage_env(value), capture_output=True, timeout=_remaining(), check=False)
     if result.returncode:
-        raise GuestHold(f"stage_failed:{script}")
+        tail = result.stderr.decode("utf-8", "replace")[-600:]
+        raise GuestHold(f"stage_failed:{script}", tail)
 
 
 def _candidates(directory):
@@ -189,17 +198,97 @@ def judge(value, module=None):
     return {"pass": "judge", "returncode": code, "publication": captured}
 
 
+AUTOFIX_SYSTEM = (
+    "You repair a pull request. Return exactly one JSON object with keys \"summary\" "
+    "(one line, at most 100 characters, no trailing period) and \"patch\" (a unified Git diff "
+    "using 'diff --git a/PATH b/PATH' headers that only modifies existing files or adds new "
+    "regular files). Fix only the listed findings. Never touch CI workflows, agent or "
+    "instruction files, or delete or rename files. If you cannot fix them safely, return "
+    "{\"summary\": \"no safe fix\", \"patch\": \"\"}."
+)
+MAX_CONTEXT_BYTES = 120 * 1024
+MAX_BUNDLE_BYTES = 1024 * 1024
+
+
+def _load(name):
+    spec = importlib.util.spec_from_file_location("_guest_" + name, ROOT / "scripts/ci" / f"{name}.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _adapter():
+    """The accepted guest loader enforces required mode, no credentials and an
+    immutable context before returning the adapter (as the stage runners do)."""
+    path = ROOT / "scripts/lib/subscription_guest.py"
+    spec = importlib.util.spec_from_file_location("_guest_subscription_loader", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.runtime()
+
+
+def _show(value, path):
+    result = subprocess.run(
+        ["git", "--no-pager", "-C", str(REPO), "show", f"{value['head_sha']}:{path}"],
+        capture_output=True, timeout=30, check=False,
+        env={"PATH": "/usr/bin:/bin", "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull})
+    return result.stdout if result.returncode == 0 else b""
+
+
+def autofix(value, adapter=None, patcher=None):
+    """One tool-free proposal for the Judge's surviving findings; never retried."""
+    os.environ.update(_stage_env(value))
+    adapter = adapter or _adapter()
+    patcher = patcher or _load("codex_automation_patch")
+    findings = json.loads((CANDIDATES_IN / "autofix-findings.json").read_text(encoding="utf-8"))
+    if not isinstance(findings, list) or not findings or len(findings) > 20:
+        raise GuestHold("autofix_findings_invalid")
+    files, used = {}, 0
+    for finding in findings:
+        path = finding.get("file") if isinstance(finding, dict) else None
+        if not isinstance(path, str) or path in files:
+            continue
+        content = _show(value, path)
+        if used + len(content) > MAX_CONTEXT_BYTES:
+            raise GuestHold("autofix_context_over_budget")
+        used += len(content)
+        files[path] = content.decode("utf-8", "replace")
+    user = json.dumps({"findings": findings, "files_at_head": files}, sort_keys=True)
+    text = adapter.complete(AUTOFIX_SYSTEM, user, role="autofix",
+                            data_sensitivity=value["data_sensitivity"], max_tokens=8000)
+    proposal = patcher.parse_proposal(text) if json.loads(text).get("patch") else None
+    if proposal is None:
+        return {"pass": "autofix", "outcome": "no_safe_fix"}
+    work = STATE / "autofix"
+    if work.exists():
+        shutil.rmtree(work)
+    work.mkdir(parents=True)
+    candidate = patcher.build_candidate(REPO, work, value["head_sha"], proposal)
+    bundle = candidate["bundle"].read_bytes()
+    if len(bundle) > MAX_BUNDLE_BYTES:
+        raise GuestHold("autofix_bundle_over_budget")
+    import base64
+    return {"pass": "autofix", "outcome": "candidate", "candidate_sha": candidate["candidate_sha"],
+            "paths": candidate["paths"], "summary": proposal["summary"],
+            "bundle_b64": base64.b64encode(bundle).decode()}
+
+
 def main():
     try:
         value = _context()
-        result = {"assessment": assessment, "judge": judge}.get(value["role"])
+        result = {"assessment": assessment, "judge": judge, "autofix": autofix}.get(value["role"])
         if result is None:
             raise GuestHold("unsupported_guest_role")
         print(json.dumps({"status": "completed", **result(value)}, sort_keys=True))
         return 0
-    except (GuestHold, ValueError, OSError, subprocess.SubprocessError, json.JSONDecodeError) as exc:
-        reason = str(exc) if isinstance(exc, GuestHold) else type(exc).__name__
-        print(json.dumps({"status": "held", "reason": reason[:200]}))
+    except (GuestHold, ValueError, OSError, RuntimeError, ImportError, subprocess.SubprocessError,
+            json.JSONDecodeError) as exc:
+        coded = isinstance(exc, (GuestHold, RuntimeError)) or type(exc).__name__ == "PatchRefused"
+        reason = str(exc) if coded and str(exc) else type(exc).__name__
+        held = {"status": "held", "reason": reason[:200]}
+        if getattr(exc, "detail", ""):
+            held["detail"] = exc.detail[-600:]
+        print(json.dumps(held))
         return 3
 
 

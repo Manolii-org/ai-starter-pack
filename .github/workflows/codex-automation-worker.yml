@@ -30,6 +30,11 @@ jobs:
     runs-on: ${{ fromJSON(vars.CODEX_AUTOMATION_RUNNER || '"ubuntu-24.04"') }}
     timeout-minutes: 60
     continue-on-error: true
+    outputs:
+      packet: ${{ steps.worker.outputs.packet }}
+      pr_number: ${{ steps.worker.outputs.pr_number }}
+      expected_head: ${{ steps.worker.outputs.expected_head }}
+      head_ref: ${{ steps.worker.outputs.head_ref }}
     steps:
       - name: Check out trusted controller revision
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -65,9 +70,68 @@ jobs:
           path: ${{ runner.temp }}/codex-automation/result
           if-no-files-found: error
           retention-days: 30
+      - name: Retain inert autofix packet (no publication credential in this job)
+        if: steps.worker.outputs.packet != ''
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ${{ steps.worker.outputs.packet }}
+          path: ${{ runner.temp }}/codex-automation/packet
+          if-no-files-found: error
+          retention-days: 30
       - name: Publish advisory outcome after retention
         if: steps.worker.outputs.artifact != '' && success()
         env:
           GH_TOKEN: ${{ github.token }}
           CODEX_AUTOMATION_ENABLED: ${{ vars.CODEX_AUTOMATION_ENABLED }}
         run: python3 -I trusted/scripts/ci/codex_automation_worker.py publish
+
+  publish_fix:
+    name: Guarded autofix publication (separate credential)
+    needs: execute
+    # The editor never holds this credential. The accepted publisher re-checks
+    # ancestry, [autofix] subjects, instruction surfaces, native PR state,
+    # holds, owner registration and head protection, sends once and reads back.
+    if: >-
+      needs.execute.outputs.packet != '' &&
+      vars.CODEX_AUTOMATION_ENABLED == 'true' &&
+      vars.CODEX_AUTOMATION_PUBLISH == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      pull-requests: read
+      issues: write
+    steps:
+      - name: Check out trusted publisher revision
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: trusted
+          persist-credentials: false
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /scripts/ci/autofix-publish.py
+            /scripts/ci/autofix-custody.sh
+      - name: Download inert packet
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: ${{ needs.execute.outputs.packet }}
+          path: ${{ runner.temp }}/autofix-candidate-data
+      - name: Native custody and hold admission
+        id: custody
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ needs.execute.outputs.pr_number }}
+          EXPECTED_HEAD: ${{ needs.execute.outputs.expected_head }}
+        run: bash trusted/scripts/ci/autofix-custody.sh
+      - name: Publish once with the separate credential
+        env:
+          READ_TOKEN: ${{ github.token }}
+          PUBLISH_TOKEN: ${{ secrets.CODEX_AUTOMATION_PUBLISH_TOKEN }}
+          PUBLICATION_ADMITTED: ${{ steps.custody.outputs.skip == 'false' }}
+          AUTOFIX_PACKET_DIR: ${{ runner.temp }}/autofix-candidate-data
+          PR_NUMBER: ${{ needs.execute.outputs.pr_number }}
+          EXPECTED_HEAD: ${{ needs.execute.outputs.expected_head }}
+          HEAD_REF: ${{ needs.execute.outputs.head_ref }}
+        run: python3 -I trusted/scripts/ci/autofix-publish.py

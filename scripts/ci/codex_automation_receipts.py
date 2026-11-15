@@ -24,7 +24,7 @@ FIELDS = frozenset({
     "repository", "run_id", "run_attempt", "base_sha", "head_sha", "workflow_sha",
     "correlation_id", "logical_request_id", "attempt_id",
 })
-ROLES = frozenset({"assessment", "triage", "critic", "judge"})
+ROLES = frozenset({"assessment", "triage", "critic", "judge", "autofix"})
 SENSITIVITY = frozenset({"public", "internal"})
 ELIGIBLE_MAX_INPUT_CHARS = 180000
 SHA = re.compile(r"[a-f0-9]{40}\Z")

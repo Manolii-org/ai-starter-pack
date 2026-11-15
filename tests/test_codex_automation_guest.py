@@ -149,3 +149,86 @@ def test_stages_share_one_bounded_time_budget(sandbox, monkeypatch):
         guest._remaining()
     monkeypatch.setattr(guest, "DEADLINE", guest.time.monotonic() + 5000)
     assert guest._remaining() == guest.STAGE_SECONDS
+
+
+def test_stage_failure_returns_bounded_detail_for_the_artifact(sandbox, monkeypatch, capsys):
+    def boom(*a, **k):
+        raise guest.GuestHold("stage_failed:run-pr-classifier.py", "x" * 2000 + "TAIL")
+    monkeypatch.setattr(guest, "assessment", boom)
+    assert guest.main() == 3
+    held = json.loads(capsys.readouterr().out)
+    assert held["reason"] == "stage_failed:run-pr-classifier.py" and held["detail"].endswith("TAIL")
+    assert len(held["detail"]) == 600
+
+
+
+class FakeAdapter:
+    def __init__(self, text):
+        self.text, self.calls = text, []
+
+    def complete(self, system, user, **kwargs):
+        self.calls.append((system, user, kwargs))
+        return self.text
+
+
+AUTOFIX_PATCH = ("diff --git a/policy.py b/policy.py\n--- a/policy.py\n+++ b/policy.py\n@@ -1,3 +1,3 @@\n"
+                 " # null intentionally allowed\n def allowed(origin):\n-    return origin == 'null'\n"
+                 "+    return origin == 'null' and origin is not None\n")
+
+
+def autofix_inbox(sandbox):
+    value, write, _ = sandbox
+    value["role"] = "autofix"
+    value["selected_roles"] = []
+    write(value)
+    guest.CANDIDATES_IN.mkdir()
+    (guest.CANDIDATES_IN / "autofix-findings.json").write_text(json.dumps(
+        [{"file": "policy.py", "line": 3, "message": "tighten", "fix": "f"}]))
+    return value
+
+
+def test_autofix_pass_builds_one_bundled_candidate_from_a_valid_proposal(sandbox):
+    from ci import codex_automation_patch as patcher
+    value = autofix_inbox(sandbox)
+    fake = FakeAdapter(json.dumps({"summary": "Tighten origin check", "patch": AUTOFIX_PATCH}))
+    result = guest.autofix(guest._context(), adapter=fake, patcher=patcher)
+    assert result["outcome"] == "candidate" and result["paths"] == ["policy.py"]
+    assert fake.calls[0][2]["role"] == "autofix" and "policy.py" in fake.calls[0][1]
+    assert "def allowed" in json.loads(fake.calls[0][1])["files_at_head"]["policy.py"]
+    assert result["bundle_b64"] and len(result["candidate_sha"]) == 40
+    assert value["head_sha"] != result["candidate_sha"]
+
+
+def test_autofix_no_safe_fix_produces_no_candidate(sandbox):
+    from ci import codex_automation_patch as patcher
+    autofix_inbox(sandbox)
+    fake = FakeAdapter(json.dumps({"summary": "no safe fix", "patch": ""}))
+    assert guest.autofix(guest._context(), adapter=fake, patcher=patcher) == {"pass": "autofix", "outcome": "no_safe_fix"}
+
+
+@pytest.mark.parametrize("text", [
+    "not json",
+    json.dumps({"summary": "x", "patch": "diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml\n"}),
+    json.dumps({"summary": "x", "patch": AUTOFIX_PATCH.replace("origin == 'null'\n+", "origin == 'nul'\n+")}),
+])
+def test_autofix_refused_proposals_hold_through_main(sandbox, monkeypatch, capsys, text):
+    from ci import codex_automation_patch as patcher
+    autofix_inbox(sandbox)
+    monkeypatch.setattr(guest, "_adapter", lambda: FakeAdapter(text))
+    monkeypatch.setattr(guest, "_load", lambda name: patcher)
+    assert guest.main() == 3
+    assert json.loads(capsys.readouterr().out)["status"] == "held"
+
+
+
+def test_autofix_uses_the_accepted_guest_loader_and_holds_on_import_failure(sandbox, monkeypatch, capsys):
+    """Found by a real-container run: a bare file load of the adapter fails its
+    package-relative import and crashed the guest instead of holding."""
+    import inspect
+    assert "subscription_guest.py" in inspect.getsource(guest._adapter)
+    autofix_inbox(sandbox)
+    def broken():
+        raise ImportError("attempted relative import with no known parent package")
+    monkeypatch.setattr(guest, "_adapter", broken)
+    assert guest.main() == 3
+    assert json.loads(capsys.readouterr().out)["status"] == "held"

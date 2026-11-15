@@ -1,6 +1,7 @@
 """Trusted automation controller: ordering, holds, receipts and isolation."""
 
 import json
+import re
 import sys
 from contextlib import contextmanager
 from pathlib import Path
@@ -58,6 +59,7 @@ def harness(monkeypatch, tmp_path):
     monkeypatch.setattr(worker, "serve", serve)
     monkeypatch.setattr(worker, "Subscription", lambda auth: auth)
     outputs = {"assessment": {"status": "completed", "pass": "assessment",
+                              "ran": {"skills": ["scope-adherence"], "agents": []},
                               "candidates": {"scope-adherence.json": {"source": "scope-adherence", "findings": []}}},
                "judge": {"status": "completed", "pass": "judge",
                          "publication": [{"action": "review", "event": "COMMENT", "surviving": []}]}}
@@ -66,6 +68,7 @@ def harness(monkeypatch, tmp_path):
         events.append(("guest", value["role"]))
         assert oct(Path(context_file).stat().st_mode & 0o777) == "0o444"
         assert json.loads(Path(context_file).read_text())["role"] == value["role"]
+        events.append(("roster", value["role"], tuple(value["selected_roles"])))
         if value["role"] == "judge":
             assert (candidates / "scope-adherence.json").exists()
         return outputs[value["role"]]
@@ -192,7 +195,19 @@ def test_workflow_is_default_off_trusted_checkout_and_secret_free():
     assert "vars.CODEX_AUTOMATION_ENABLED == 'true'" in job["if"]
     checkout = job["steps"][0]["with"]
     assert checkout["ref"] == "${{ github.workflow_sha }}" and checkout["persist-credentials"] is False
-    assert "secrets." not in text and "id-token" not in flow["permissions"]
+    assert "id-token" not in flow["permissions"]
+    # The editor job never sees a secret; only the separate publisher holds one.
+    execute_text = yaml.safe_dump(flow["jobs"]["execute"])
+    assert "secrets." not in execute_text
+    publish = flow["jobs"]["publish_fix"]
+    assert publish["needs"] == "execute" and "vars.CODEX_AUTOMATION_PUBLISH == 'true'" in publish["if"]
+    assert set(re.findall(r"secrets\.([A-Z_]+)", text)) == {"CODEX_AUTOMATION_PUBLISH_TOKEN"}
+    assert publish["permissions"] == {"contents": "read", "pull-requests": "read", "issues": "write"}
+    steps = {step.get("name"): step for step in publish["steps"]}
+    run = steps["Publish once with the separate credential"]
+    assert run["env"]["PUBLICATION_ADMITTED"] == "${{ steps.custody.outputs.skip == 'false' }}"
+    assert run["run"] == "python3 -I trusted/scripts/ci/autofix-publish.py"
+    assert steps["Native custody and hold admission"]["run"] == "bash trusted/scripts/ci/autofix-custody.sh"
 
 
 def test_image_closure_includes_the_secret_shape_catalog_or_refuses(monkeypatch, tmp_path):
@@ -262,3 +277,125 @@ def test_publish_rechecks_head_and_dedupes_only_on_trusted_author(monkeypatch, t
     monkeypatch.setattr(worker, "GitHub", lambda repo, token: fake)
     assert worker.main(["x", "publish"]) == 0
     assert len(fake.posted) == posts
+
+
+def test_judge_context_expects_exactly_the_dispatched_roles(harness):
+    """Found by a real-container run: a judge roster wider than the dispatched
+    roles makes every undispatched role count as missing evidence."""
+    run, events, outputs, _ = harness
+    outputs["assessment"]["ran"] = {"skills": ["scope-adherence", "security-boundary-test"], "agents": ["systems-consistency"]}
+    result, _ = run()
+    rosters = {e[1]: e[2] for e in events if e[0] == "roster"}
+    assert result["state"] == "completed"
+    assert rosters["judge"] == ("scope-adherence", "security-boundary-test", "systems-consistency")
+    assert set(rosters["assessment"]) == set(worker.policy()["roster"])
+
+
+@pytest.mark.parametrize("ran", [{"skills": ["Bad Name"]}, {"agents": [1]}])
+def test_invalid_dispatched_roles_fail_closed_before_the_judge(harness, ran):
+    run, events, outputs, _ = harness
+    outputs["assessment"]["ran"] = ran
+    result, _ = run()
+    assert result["reason"] == "dispatched_roles_invalid" and ("guest", "judge") not in events
+
+
+def test_guest_image_closure_has_only_installed_third_party_imports():
+    """Found by a real-container run: the image lacked PyYAML. Every non-stdlib
+    import in the guest closure must be installed by the runtime Dockerfile."""
+    import ast
+    packages = {"yaml": "python3-yaml"}
+    closure = ["scripts/run-pr-classifier.py", "scripts/run-specialists.py", "scripts/run-broad-agents.py",
+               "scripts/run-judge.py", "scripts/ci/codex_automation_guest.py", "scripts/ci/codex_automation_adapter.py",
+               "scripts/ci/codex_automation_context.py", "scripts/ci/codex_subscription_text.py",
+               "scripts/ci/codex_text_response.py", "scripts/lib/subscription_guest.py",
+               "scripts/lib/agent_capabilities.py", "scripts/lib/sast_evidence.py"]
+    local = {p.stem for p in (ROOT / "scripts").rglob("*.py")} | {"lib", "ci"}
+    found = set()
+    for rel in closure:
+        for node in ast.walk(ast.parse((ROOT / rel).read_text(encoding="utf-8"))):
+            names = ([a.name for a in node.names] if isinstance(node, ast.Import)
+                     else [node.module] if isinstance(node, ast.ImportFrom) and node.module and node.level == 0 else [])
+            found |= {n.split(".")[0] for n in names}
+    third_party = found - set(sys.stdlib_module_names) - local
+    assert third_party <= set(packages), third_party
+    dockerfile = (ROOT / "scripts/ci/codex-automation-runtime/Dockerfile").read_text()
+    for name in third_party:
+        assert packages[name] in dockerfile
+    assert "https://deb.debian.org" in dockerfile and "ARG APT_PROXY=DIRECT" in dockerfile
+
+
+def test_held_detail_is_retained_but_never_published():
+    body = worker.comment_body(TARGET, {"state": "held", "reason": "stage_failed:run-pr-classifier.py",
+                                        "passes": {"assessment": {"detail": "SECRET-LIKE-STDERR"}}})
+    assert "SECRET-LIKE-STDERR" not in body
+
+
+
+def enable_autofix(monkeypatch, tmp_path):
+    path = tmp_path / "policy.json"
+    path.write_text(json.dumps({**json.loads(worker.CONFIG.read_text()), "autofix": True}))
+    monkeypatch.setattr(worker, "CONFIG", path)
+
+
+def test_autofix_is_off_by_default_and_never_claims_or_runs(harness):
+    run, events, outputs, _ = harness
+    outputs["judge"]["publication"] = [{"action": "review", "event": "COMMENT",
+                                        "surviving": [{"file": "p.py", "line": 1, "message": "m"}]}]
+    result, _ = run()
+    assert "autofix" not in result and not any(e[1:] == ("autofix",) for e in events if len(e) > 1)
+    assert worker.policy().get("autofix", False) is False
+
+
+def test_autofix_runs_after_judge_with_its_own_consent_custody_and_receipts(harness, monkeypatch, tmp_path):
+    run, events, outputs, _ = harness
+    enable_autofix(monkeypatch, tmp_path)
+    outputs["judge"]["publication"] = [{"action": "review", "event": "REQUEST_CHANGES", "surviving": [
+        {"file": "p.py", "line": 2, "message": "wildcard accepted", "fix": "reject", "severity": "ERROR",
+         "finding_id": "abc", "extra": "dropped"}]}]
+    claims = []
+    monkeypatch.setattr(worker.custody, "claim", lambda g, t, **k: claims.append(t["operation"]) or "ack")
+    outputs["autofix"] = {"status": "completed", "pass": "autofix", "outcome": "no_safe_fix"}
+    seen = {}
+
+    result, rows = run(guest=lambda image, source, b, c, cand, value, *, seconds: (
+        seen.setdefault(value["role"], json.loads((cand / "autofix-findings.json").read_text()) if value["role"] == "autofix" else None),
+        outputs[value["role"]])[1])
+    assert claims == ["assessment", "autofix"]
+    assert ("consent", "autofix") in events
+    assert seen["autofix"] == [{"file": "p.py", "line": 2, "severity": "ERROR", "message": "wildcard accepted",
+                                "fix": "reject", "finding_id": "abc"}]
+    assert result["autofix"] == {"outcome": "no_safe_fix"}
+    assert [r["role"] for r in rows] == ["assessment", "judge", "autofix"]
+
+
+def test_autofix_without_surviving_findings_spends_nothing(harness, monkeypatch, tmp_path):
+    run, events, _, _ = harness
+    enable_autofix(monkeypatch, tmp_path)
+    result, rows = run()
+    assert result["autofix"] == {"outcome": "nothing_to_fix"} and ("consent", "autofix") not in events
+    assert [r["role"] for r in rows] == ["assessment", "judge"]
+
+
+def test_autofix_consent_refusal_never_claims_custody(harness, monkeypatch, tmp_path):
+    run, _, outputs, _ = harness
+    enable_autofix(monkeypatch, tmp_path)
+    outputs["judge"]["publication"] = [{"action": "review", "event": "COMMENT",
+                                        "surviving": [{"file": "p.py", "line": 1, "message": "m"}]}]
+    claims = []
+    monkeypatch.setattr(worker.custody, "claim", lambda g, t, **k: claims.append(t["operation"]) or "ack")
+
+    def consent(repo, role):
+        if role == "autofix":
+            raise worker.profiles.ProfileError("automation_role_not_consented")
+        return {"role": role}
+    monkeypatch.setattr(worker.profiles, "select_automation", consent)
+    result, _ = run()
+    assert result["autofix"] == {"outcome": "blocked_credentials", "reason": "automation_role_not_consented"}
+    assert claims == ["assessment"]
+
+
+@pytest.mark.parametrize("event", ["APPROVE", "UNKNOWN"])
+def test_only_findings_from_a_blocking_or_comment_review_are_repairable(event):
+    assert worker.surviving_findings([{"action": "review", "event": event,
+                                       "surviving": [{"file": "p.py", "line": 1}]}]) == []
+    assert worker.surviving_findings([{"action": "advisory", "detail": "x"}]) == []

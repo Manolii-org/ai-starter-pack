@@ -525,6 +525,9 @@
         "tests/test_codex_automation_guest.py",
         "tests/test_codex_automation_receipts.py",
         "tests/test_codex_automation_worker.py",
+        "scripts/ci/codex_automation_patch.py",
+        "scripts/ci/autofix-publish.py",
+        "tests/test_codex_automation_patch.py",
         "config/agent-checks.json"
       ],
       "tools": [
@@ -545,7 +548,8 @@
           "tests/test_codex_subscription_text.py",
           "tests/test_codex_automation_guest.py",
           "tests/test_codex_automation_receipts.py",
-          "tests/test_codex_automation_worker.py"
+          "tests/test_codex_automation_worker.py",
+          "tests/test_codex_automation_patch.py"
         ]
       ],
       "ci_sources": [

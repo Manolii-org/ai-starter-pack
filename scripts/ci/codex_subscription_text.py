@@ -21,7 +21,7 @@ else:
 
 SOCKET = "/broker/model.sock"
 MAX_INPUT_CHARS = 180000
-ROLES = frozenset({"assessment", "triage", "critic", "judge"})
+ROLES = frozenset({"assessment", "triage", "critic", "judge", "autofix"})
 
 
 class SubscriptionTextError(RuntimeError):

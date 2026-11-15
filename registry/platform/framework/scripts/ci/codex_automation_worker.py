@@ -59,6 +59,7 @@ def policy():
             or any(not isinstance(v, str) or not re.fullmatch(r"[a-z0-9-]{1,64}", v) for v in roster)
             or value.get("data_sensitivity") not in receipts.SENSITIVITY
             or value.get("reasoning_effort") not in ("medium", "xhigh")
+            or type(value.get("autofix", False)) is not bool
             or any(type(value.get(k)) is not int or not 0 < value[k] <= limit
                    for k, limit in (("max_requests", 64), ("max_seconds", 1800)))):
         raise Incomplete("controller_policy_invalid")
@@ -90,7 +91,10 @@ def prepare(github, event):
     return target
 
 
-def context_document(target, config, role, run_id, run_attempt):
+def context_document(target, config, role, run_id, run_attempt, roles=None):
+    """`selected_roles` is the roster for assessment; for the judge it is exactly
+    the roles the assessment pass dispatched, which the Judge requires to be
+    present (an undispatched roster role would count as missing evidence)."""
     return {
         "schema": "codex-automation-context/v1",
         "repository": target["repository"],
@@ -102,7 +106,7 @@ def context_document(target, config, role, run_id, run_attempt):
         "reasoning_effort": config["reasoning_effort"],
         "controller_run_id": run_id,
         "controller_run_attempt": run_attempt,
-        "selected_roles": sorted(config["roster"]),
+        "selected_roles": sorted(config["roster"] if roles is None else roles),
     }
 
 
@@ -219,8 +223,9 @@ def execute(github, target, directory, *, run_id, run_attempt, workflow_sha, gue
             return {"state": "completed", "reason": "empty_diff", "publication": []}, rows
         image = image_builder(directory)
         candidates = None
+        dispatched = None
         for role in ("assessment", "judge"):
-            document = context_document(target, config, role, run_id, run_attempt)
+            document = context_document(target, config, role, run_id, run_attempt, roles=dispatched)
             context_file = write_context(directory, document)
             broker_dir = directory / f"broker-{role}"
             broker_dir.mkdir(mode=0o700)
@@ -251,15 +256,26 @@ def execute(github, target, directory, *, run_id, run_attempt, workflow_sha, gue
             if output["status"] != "completed":
                 return {"state": "held", "reason": output.get("reason", "guest_held"), "passes": passes}, rows
             if role == "assessment":
+                ran = output.get("ran") or {}
+                dispatched = sorted({name for kind in ("skills", "agents") for name in (ran.get(kind) or [])})
+                if any(not isinstance(n, str) or not re.fullmatch(r"[a-z][a-z0-9-]{0,63}", n) for n in dispatched) \
+                        or len(dispatched) > 100:
+                    return {"state": "failed", "reason": "dispatched_roles_invalid", "passes": passes}, rows
                 candidates = directory / "candidates"
                 candidates.mkdir(mode=0o700)
                 for name, body in output["candidates"].items():
                     if not re.fullmatch(r"[A-Za-z0-9_.-]{1,96}\.json", name):
                         return {"state": "failed", "reason": "candidate_name_invalid", "passes": passes}, rows
                     (candidates / name).write_text(json.dumps(body))
-        return {"state": "completed", "reason": "adjudicated", "passes": passes,
-                "unmeasured_requests": unmeasured,
-                "publication": passes["judge"].get("publication", [])}, rows
+        result = {"state": "completed", "reason": "adjudicated", "passes": passes,
+                  "unmeasured_requests": unmeasured,
+                  "publication": passes["judge"].get("publication", [])}
+        if config.get("autofix") is True:
+            result["autofix"] = autofix_stage(github, target, directory, config, result["publication"], image,
+                                              source, run_id=run_id, run_attempt=run_attempt,
+                                              workflow_sha=workflow_sha, guest=guest, session=session,
+                                              rows=rows, unmeasured=unmeasured)
+        return result, rows
     except profiles.ProfileError as exc:
         return {"state": "blocked_quota" if str(exc) in {"profile_capacity_exhausted", "profile_session_busy"}
                 else "blocked_credentials", "reason": str(exc), "passes": passes}, rows
@@ -272,6 +288,94 @@ def _safe(value, limit):
     """Neutralise Markdown and @mentions in model/PR-derived text (as the Judge does)."""
     text = " ".join(str(value).split())[:limit]
     return MD_UNSAFE.sub(r"\\\1", text).replace("@", "@\u200b")
+
+
+def surviving_findings(publication):
+    """Only a captured Judge review's surviving findings may be repaired."""
+    for item in publication or []:
+        if item.get("action") == "review" and item.get("event") in {"COMMENT", "REQUEST_CHANGES"}:
+            rows = [f for f in (item.get("surviving") or []) if isinstance(f, dict)
+                    and isinstance(f.get("file"), str) and type(f.get("line")) is int]
+            return [{k: f.get(k) for k in ("file", "line", "severity", "message", "fix", "finding_id")}
+                    for f in rows][:20]
+    return []
+
+
+def autofix_stage(github, target, directory, config, publication, image, source, *, run_id, run_attempt,
+                  workflow_sha, guest, session, rows, unmeasured):
+    """Editor half only: produce an inert publisher packet. No publication
+    credential exists in this job; `autofix-publish.py` decides separately."""
+    findings = surviving_findings(publication)
+    if not findings:
+        return {"outcome": "nothing_to_fix"}
+    try:
+        assignment = profiles.select_automation(target["repository"], "autofix")
+    except profiles.ProfileError as exc:
+        return {"outcome": "blocked_credentials", "reason": str(exc)}
+    try:
+        custody.claim(github, {**target, "operation": "autofix"}, producer_run_id=target["request_run_id"],
+                      workflow_sha=workflow_sha, enabled=True)
+    except custody.CustodyHold as exc:
+        return {"outcome": "held", "reason": str(exc)}
+    handoff = directory / "autofix-input"
+    handoff.mkdir(mode=0o700)
+    (handoff / "autofix-findings.json").write_text(json.dumps(findings))
+    document = context_document(target, config, "autofix", run_id, run_attempt, roles=[])
+    context_file = write_context(directory, document)
+    broker_dir = directory / "broker-autofix"
+    broker_dir.mkdir(mode=0o700)
+    audit, output = None, None
+    try:
+        with session(assignment, target["repository"], "autofix") as (auth, _snapshot), \
+                serve(broker_dir / "model.sock", Subscription(auth), text_only=True, max_requests=2,
+                      max_seconds=config["max_seconds"], expected_effort=config["reasoning_effort"]) as broker:
+            try:
+                output = guest(image, source, broker_dir, context_file, handoff, document,
+                               seconds=config["max_seconds"] - GUEST_MARGIN_SECONDS)
+            finally:
+                audit = broker.audit()
+    except (Incomplete, BrokerError, OSError, ValueError, subprocess.SubprocessError, profiles.ProfileError) as exc:
+        return {"outcome": "failed", "reason": str(exc)[:200] or type(exc).__name__}
+    finally:
+        if audit is not None:
+            unmeasured["autofix"] = max(0, audit.get("requests", 0) - len(audit.get("text_completions", [])))
+            rows += receipts.build(
+                audit.get("text_completions", []), repository=target["repository"], run_id=run_id,
+                run_attempt=run_attempt, base_sha=target["base_sha"], head_sha=target["head_sha"],
+                workflow_sha=workflow_sha, role="autofix", data_sensitivity=config["data_sensitivity"],
+                correlation_id=f"{target['repository']}#{target['pull_request']}@{target['head_sha']}/autofix")
+    if output.get("status") != "completed":
+        return {"outcome": "held", "reason": output.get("reason", "guest_held"), "detail": output.get("detail", "")}
+    if output.get("outcome") != "candidate":
+        return {"outcome": output.get("outcome", "no_safe_fix")}
+    return write_packet(target, directory, output)
+
+
+def write_packet(target, directory, output):
+    """Exactly the accepted publisher's packet: receipt.json + implementation.bundle."""
+    import base64
+    candidate = output.get("candidate_sha", "")
+    head_ref = target.get("head_ref", "")
+    if (not re.fullmatch(r"[0-9a-f]{40}", candidate) or candidate == target["head_sha"]
+            or not isinstance(head_ref, str) or not head_ref or head_ref in {"main", "master"}):
+        return {"outcome": "failed", "reason": "packet_identity_invalid"}
+    try:
+        bundle = base64.b64decode(output.get("bundle_b64", ""), validate=True)
+    except ValueError:
+        return {"outcome": "failed", "reason": "packet_bundle_invalid"}
+    packet = directory / "packet"
+    packet.mkdir(mode=0o700)
+    (packet / "implementation.bundle").write_bytes(bundle)
+    heads = subprocess.run(["git", "bundle", "list-heads", str(packet / "implementation.bundle")],
+                           capture_output=True, timeout=30, check=False,
+                           env={"PATH": "/usr/bin:/bin", "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull})
+    if heads.returncode or heads.stdout.decode().splitlines() != [candidate + " refs/heads/implementation"]:
+        return {"outcome": "failed", "reason": "packet_bundle_refs_invalid"}
+    (packet / "receipt.json").write_text(json.dumps({
+        "repository": target["repository"], "pr_number": str(target["pull_request"]),
+        "head_ref": head_ref, "base_sha": target["head_sha"], "candidate_sha": candidate}) + "\n")
+    return {"outcome": "packet", "candidate_sha": candidate, "paths": output.get("paths", []),
+            "summary": output.get("summary", ""), "packet_dir": str(packet)}
 
 
 def comment_body(target, result):
@@ -314,6 +418,11 @@ def main(argv):
             result, rows = execute(github, target, Path(tmp), run_id=int(os.environ["GITHUB_RUN_ID"]),
                                    run_attempt=int(os.environ["GITHUB_RUN_ATTEMPT"]),
                                    workflow_sha=os.environ["GITHUB_WORKFLOW_SHA"])
+            packet = (result.get("autofix") or {}).get("packet_dir")
+            if packet:
+                # Retain the inert packet before the temporary editor workspace is removed.
+                shutil.copytree(packet, state / "packet")
+                result["autofix"]["packet_dir"] = "packet"
         if result["state"] not in STATES:
             result = {"state": "failed", "reason": "unknown_state"}
         out = state / "result"
@@ -322,6 +431,10 @@ def main(argv):
         (out / "inference-receipts.jsonl").write_text(receipts.dumps(rows))
         _output(artifact=f"codex-automation-result-{target['pull_request']}-{target['head_sha']}",
                 state=result["state"])
+        if (state / "packet").is_dir():
+            _output(packet=f"codex-automation-packet-{target['pull_request']}-{target['head_sha']}",
+                    pr_number=str(int(target["pull_request"])), expected_head=target["head_sha"],
+                    head_ref=target["head_ref"])
         return 0
     if command == "publish":
         result = json.loads((state / "result/result.json").read_text(encoding="utf-8"))

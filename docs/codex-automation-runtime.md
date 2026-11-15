@@ -131,22 +131,33 @@ completion are reported as `unmeasured_requests` (never as receipts); guest
 stages share one budget below the host deadline; publication re-checks the
 current PR head and posts once per head (trusted-author marker).
 
-### Next: guarded mutation and publication (not implemented)
+### Guarded mutation and publication (`autofix`, default off)
 
-Implementation/autofix will reuse the accepted autofix primitives rather than a
-new publisher: an editor job (no publication credential) runs a guest
-`autofix` pass whose tool-free text output is a bounded unified diff, applied
-with `git apply --check` in a scratch clone of the exact head and committed
-without hooks; the commit becomes the `autofix-publish.py` packet (bundle plus
-receipt bound to repository/PR/head ref/expected head). A separate job holding
-the publication credential imports the packet, re-runs native state, head
-protection and instruction-surface checks, sends once, reads back and records
-the outcome marker. Prerequisites: an `autofix` role in the text transport and
-automation consent, a patch-output contract, and the orchestrating reader's
-`automation.inference/v2` role set (currently assessment/triage/critic/judge).
+Enabled only by `"autofix": true` in the instance-owned controller policy. After
+the Judge, only surviving findings from a captured `COMMENT`/`REQUEST_CHANGES`
+review are repairable. The controller then needs explicit `autofix` consent
+(a refusal claims nothing) and appends its own `autofix` custody claim before
+one guest pass. The guest makes a single tool-free `autofix` text call whose
+output must be `{"summary", "patch"}` (`codex_automation_patch.py`): a plain
+unified diff limited to modifications and new regular files, at most 20 paths,
+never deletions, renames, mode/binary/symlink changes, `.git`, traversal or the
+publisher's instruction surfaces (the same `INSTRUCTIONS` rule, test-enforced).
+It is applied with `git apply` to a hook-free clone of the exact head and
+committed once with an `[autofix]` subject; the result is bundled.
 
-Not covered by this controller: triage/critic/implementation/autofix roles,
-source mutation and publication, SAST execution inside the guest, and any live
+The editor job holds no publication credential. It writes exactly the accepted
+publisher's packet (`receipt.json` plus `implementation.bundle`; a test imports
+it with `autofix-publish.py`'s own `import_packet`). A separate `publish_fix`
+job, enabled only by `vars.CODEX_AUTOMATION_PUBLISH == 'true'`, runs the
+accepted `autofix-custody.sh` gate and then `autofix-publish.py` with
+`secrets.CODEX_AUTOMATION_PUBLISH_TOKEN`. The publisher re-checks ancestry,
+subjects, instruction surfaces, native PR state, holds, owner registration and
+head protection, sends once with an expected-ref lease, reads back and records
+its outcome marker; the pushed head then runs ordinary CI. Autofix completions
+are `automation.inference/v2` receipts with role `autofix`.
+
+Not covered by this controller: triage/critic/implementation roles, SAST
+execution inside the guest, and any live
 host, account or funding qualification. Security roles remain held.
 
 ## Completion of the train

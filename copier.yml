@@ -196,6 +196,7 @@ _exclude:
   - tests/test_codex_review_isolation_probe.py
   - tests/test_codex_automation_adapter.py
   - tests/test_codex_automation_guest.py
+  - tests/test_codex_automation_patch.py
   - tests/test_codex_automation_receipts.py
   - tests/test_codex_automation_worker.py
   # The pack's own leaf context manifest (master context governance); a rendered
