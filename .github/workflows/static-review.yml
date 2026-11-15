@@ -67,7 +67,14 @@ jobs:
           set -- scan --metrics=off --error --disable-version-check \
             --config p/default --config p/secrets --config p/owasp-top-ten
           # To add custom rules, add: --config .semgrep/rules
-          if [ -n "${PR_BASE_SHA:-}" ]; then set -- "$@" --baseline-commit "$PR_BASE_SHA"; fi
+          # The checkout is GitHub's test merge commit; its first parent is the
+          # base tip it was built on (pull_request.base.sha goes stale when the
+          # base branch moves).
+          if [ -n "${PR_BASE_SHA:-}" ]; then
+            base="$PR_BASE_SHA"
+            if git rev-parse -q --verify 'HEAD^2' >/dev/null; then base="$(git rev-parse 'HEAD^1')"; fi
+            set -- "$@" --baseline-commit "$base"
+          fi
           semgrep "$@"
 
   bandit:
