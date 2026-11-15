@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 import urllib.parse
 from datetime import datetime, timezone
 from pathlib import Path
@@ -28,6 +29,9 @@ END = '<https://sentry.io/>; rel="next"; results="false"; cursor="0:0:0"'
 def issue(i="42", project="11", level="error", short="API-1G"):
     return {"id": i, "project": {"id": project}, "shortId": short, "level": level,
             "title": "secret=private user@example.com", "metadata": {"value": "private"}}
+
+
+SUSTAINED = {"count": "1638", "firstSeen": "2026-08-31T13:50:00Z", "lastSeen": "2026-11-12T11:59:00Z", "userCount": 0}
 
 
 def fake(pages: dict[str, list], events: dict[str, object] | None = None, calls: list | None = None):
@@ -59,7 +63,8 @@ def test_classification_corpus_is_shared_parity_contract():
 
 
 def test_emits_schema_shaped_candidates_routed_by_project_and_environment():
-    result = sweep_mod.sweep(MANIFEST, fake({"production": [issue()], "scrape": [issue("7", short="API-2")]},
+    result = sweep_mod.sweep(MANIFEST, fake({"production": [issue()],
+                                             "scrape": [dict(issue("7", short="API-2"), lifetime=SUSTAINED)]},
                                             {"42": event(), "7": event("RateLimitError", "429")}), now=NOW)
     by_repo = {c["repo"]: c for c in result["candidates"]}
     api = by_repo["Example-org/api"]
@@ -208,3 +213,125 @@ def test_manifest_rejects_empty_or_incomplete_routes(tmp_path, bad):
     path.write_text(json.dumps(bad))
     with pytest.raises(sweep_mod.SweepError):
         sweep_mod.load_routes(path)
+
+
+def cron_issue(i, lifetime, title="Cron failure: nightly-check"):
+    return dict(issue(i), issueType="monitor_check_in_failure", title=title, lifetime=lifetime)
+
+
+def lt(count, first, last="2026-11-12T11:00:00Z"):
+    # Window-scoped top-level fields must be ignored; only `lifetime` counts.
+    return {"count": count, "firstSeen": first, "lastSeen": last, "userCount": 0, "stats": None}
+
+
+def test_transient_groups_are_admitted_only_when_sustained():
+    rows = [dict(issue("1"), lifetime=SUSTAINED),
+            dict(issue("2"), lifetime=lt("5", "2026-11-07T11:47:00Z")),
+            dict(issue("3"), count="5000", firstSeen="2026-01-01T00:00:00Z", lifetime=lt("500", "2026-11-10T00:00:00Z"))]
+    events = {"1": event("ServiceUnavailableError", "upstream 503", in_app=False),
+              "2": event("Timeout", "litellm.Timeout: Connection timed out", in_app=False),
+              "3": event("RateLimitError", "429")}
+    result = sweep_mod.sweep(MANIFEST, fake({"production": rows}, events), now=NOW)
+    assert [c["delivery_id"].split(":")[2] for c in result["candidates"]] == ["1"]
+    assert result["stats"]["filtered_transient"] == 2  # counted, never silently lost
+
+
+def test_cron_monitor_below_threshold_is_filtered_but_a_persistent_one_is_admitted():
+    rows = [cron_issue("5", lt("38", "2026-07-19T06:04:00Z")),
+            cron_issue("6", lt("318", "2026-10-01T02:06:00Z")),
+            dict(issue("8"), title="Cron failure: legacy title only", lifetime=lt("2", "2026-11-12T10:00:00Z"))]
+    result = sweep_mod.sweep(MANIFEST, fake({"production": rows}, {}), now=NOW)
+    assert [c["delivery_id"].split(":")[2] for c in result["candidates"]] == ["6"]
+    assert result["stats"]["filtered_transient"] == 2
+
+
+def test_admission_makes_no_extra_request_and_survives_the_enrichment_budget():
+    calls: list[str] = []
+    rows = [cron_issue(str(i), lt("2", "2026-11-12T10:00:00Z")) for i in range(1, 6)]
+    result = sweep_mod.sweep(MANIFEST, fake({"production": rows}, {}, calls=calls), now=NOW, max_enrichments=2)
+    detail = [u for u in calls if re.search(r"/issues/\d+/$", urllib.parse.urlparse(u).path)]
+    assert detail == []
+    # Deferred groups are still judged from the list row: the cron rule needs no enrichment.
+    assert result["stats"]["deferred"] == 3 and result["stats"]["filtered_transient"] == 5
+
+
+@pytest.mark.parametrize("lifetime", [None, "x", {}, {"count": "1e3", "firstSeen": "2026-01-01T00:00:00Z",
+                                       "lastSeen": "2026-11-12T00:00:00Z"},
+                                      {"count": "900", "firstSeen": "not-a-date", "lastSeen": "2026-11-12T00:00:00Z"}])
+def test_missing_or_malformed_lifetime_admits_rather_than_drops(lifetime):
+    row = dict(issue(), lifetime=lifetime) if lifetime is not None else issue()
+    result = sweep_mod.sweep(MANIFEST, fake({"production": [row]}, {"42": event("APIError", "x")}), now=NOW)
+    assert len(result["candidates"]) == 1
+    assert result["stats"]["admission_unreadable"] == 1
+    assert result["stats"]["filtered_transient"] == 0
+
+
+@pytest.mark.parametrize("count,expected", [("100", True), (100, True), ("99", False)])
+def test_sustained_requires_at_least_100_events(count, expected):
+    assert sweep_mod.is_sustained(lt(count, "2026-11-01T00:00:00Z", "2026-11-08T00:00:00Z")) is expected
+
+
+def test_sustained_requires_seven_days_between_first_and_last_seen():
+    assert sweep_mod.is_sustained(lt("5000", "2026-11-01T00:00:01Z", "2026-11-08T00:00:00Z")) is False
+    assert sweep_mod.is_sustained(lt("5000", "2026-11-01T00:00:00Z", "2026-11-08T00:00:00Z")) is True
+
+
+def test_mixed_timezone_lifetime_is_unreadable_and_admitted():
+    mixed = lt("900", "2026-01-01T00:00:00", "2026-11-12T00:00:00Z")  # naive vs aware
+    assert sweep_mod.is_sustained(mixed) is None
+    row = dict(issue(), lifetime=mixed)
+    result = sweep_mod.sweep(MANIFEST, fake({"production": [row]}, {"42": event("APIError", "x")}), now=NOW)
+    assert len(result["candidates"]) == 1 and result["stats"]["admission_unreadable"] == 1
+
+
+def test_generic_timeout_wording_does_not_make_a_code_defect_transient():
+    assert sweep_mod.classify("OperationalError", "database connection timed out", True, "a" * 40) == "code_defect"
+    assert sweep_mod.classify("Timeout", "litellm.Timeout: upstream", False, None) == "provider"
+
+
+SHORT = lt("3", "2026-11-12T10:00:00Z")
+
+
+def test_code_defect_proxy_exception_is_admitted_even_when_short_lived():
+    row = dict(issue(), lifetime=SHORT)
+    result = sweep_mod.sweep(MANIFEST, fake({"production": [row]},
+                                            {"42": event("ProxyException", "internal state", in_app=True)}), now=NOW)
+    assert result["candidates"][0]["classification"] == "code_defect"
+    assert result["stats"]["filtered_transient"] == 0
+
+
+def test_unknown_proxy_exception_is_suppressed_when_short_lived():
+    row = dict(issue(), lifetime=SHORT)
+    result = sweep_mod.sweep(MANIFEST, fake({"production": [row]},
+                                            {"42": event("ProxyException", "internal state", in_app=False)}), now=NOW)
+    assert result["candidates"] == [] and result["stats"]["filtered_transient"] == 1
+
+
+def test_code_defect_cron_monitor_wrapper_is_still_suppressed():
+    row = dict(issue(), issueType="monitor_check_in_failure", lifetime=SHORT)
+    result = sweep_mod.sweep(MANIFEST, fake({"production": [row]}, {"42": event()}), now=NOW)
+    assert result["candidates"] == [] and result["stats"]["filtered_transient"] == 1
+
+
+@pytest.mark.parametrize("classification", sorted(set(sweep_mod.SIGNATURES["classifications"])))
+def test_transient_rule_is_defined_over_the_whole_classification_enum(classification):
+    row = issue()
+    expected = classification in ("provider", "quota") or classification == "unknown"
+    assert sweep_mod.is_transient(row, classification, "APIError") is expected
+    # Cron-monitor wrappers are transient whatever their class.
+    assert sweep_mod.is_transient(dict(row, issueType="monitor_check_in_failure"), classification, None) is True
+
+
+@pytest.mark.parametrize("etype,message,expect", [
+    ("APIError", "no api key configured", "configuration"),
+    ("APIError", "column \"x\" does not exist", "migration"),
+])
+def test_affirmative_class_with_transient_type_is_admitted_when_short_lived(etype, message, expect):
+    row = dict(issue(), lifetime=SHORT)
+    result = sweep_mod.sweep(MANIFEST, fake({"production": [row]}, {"42": event(etype, message)}), now=NOW)
+    assert result["candidates"][0]["classification"] == expect
+    assert result["stats"]["filtered_transient"] == 0
+
+
+def test_security_class_with_transient_type_is_not_transient():
+    assert sweep_mod.is_transient(issue(), "security", "APIError") is False
