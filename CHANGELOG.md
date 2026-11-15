@@ -4,6 +4,11 @@
 
 ### Fixed
 
+- `static-review-reusable`: the Agent Routing Lint job no longer fails in a
+  caller that ships agent/skill Markdown but has no model routing config. It
+  runs only when both `scripts/lint-agent-routing.py` and
+  `.claude/model-routing.json` exist, and otherwise skips with a notice
+  (also shipped on the 1.x line as v1.27.1).
 - `static-review` / `static-review-reusable`: Semgrep no longer uses the
   archived `returntocorp/semgrep-action` (archived 2024-04-09). The job runs in
   Semgrep's own image pinned by tag and digest, fetches the same default

@@ -206,12 +206,19 @@ jobs:
           persist-credentials: false
       - name: Detect agent/skill docs
         id: detect
+        # The linter needs both its script and .claude/model-routing.json. A
+        # caller that ships skills (e.g. the synced adaptable-development policy)
+        # but routes no models has neither, so skip with a notice rather than
+        # fail on a missing file.
         run: |
-          if find .claude/agents -maxdepth 1 -name '*.md' 2>/dev/null | grep -q . \
-             || find .claude/skills -name '*.md' 2>/dev/null | grep -q .; then
-            echo "found=true" >> "$GITHUB_OUTPUT"
-          else
+          if ! find .claude/agents -maxdepth 1 -name '*.md' 2>/dev/null | grep -q . \
+             && ! find .claude/skills -name '*.md' 2>/dev/null | grep -q .; then
             echo "found=false" >> "$GITHUB_OUTPUT"
+          elif [ ! -f scripts/lint-agent-routing.py ] || [ ! -f .claude/model-routing.json ]; then
+            echo "::notice::Agent/skill docs present but no model routing config (scripts/lint-agent-routing.py + .claude/model-routing.json); skipping the routing lint"
+            echo "found=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "found=true" >> "$GITHUB_OUTPUT"
           fi
       - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
         if: steps.detect.outputs.found == 'true'
