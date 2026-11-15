@@ -166,7 +166,8 @@ def build_image(directory):
                           "--secret", "id=proxy_ca,src="
                           + os.environ.get("CODEX_PROXY_CERT", "/etc/ssl/certs/ca-certificates.crt"),
                           str(context))
-    result = subprocess.run(command, env=env, cwd=directory, capture_output=True, timeout=600, check=False)
+    # Argument list without a shell; CODEX_PROXY_CERT is the trusted job's own build-secret path.
+    result = subprocess.run(command, env=env, cwd=directory, capture_output=True, timeout=600, check=False)  # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-tainted-env-args.dangerous-subprocess-use-tainted-env-args
     image = (directory / "image.id").read_text().strip() if result.returncode == 0 else ""
     if not re.fullmatch(r"sha256:[0-9a-f]{64}", image):
         raise Incomplete("failed_install")

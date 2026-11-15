@@ -9,4 +9,6 @@ RUN --mount=type=secret,id=proxy_ca,required=true sed -i 's|http://deb.debian.or
 COPY --chmod=0555 opt/automation /opt/automation
 WORKDIR /state
 ENV HOME=/state PYTHONDONTWRITEBYTECODE=1
+# The controller also runs the guest with --user <runner uid:gid>; never root.
+USER 65534:65534
 ENTRYPOINT ["python3", "-I", "/opt/automation/scripts/ci/codex_automation_guest.py"]

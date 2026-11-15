@@ -263,7 +263,7 @@ def _subscription_runtime():
     if spec is None or spec.loader is None:
         raise RuntimeError("subscription_guest_runtime_unavailable")
     module = importlib.util.module_from_spec(spec)
-    exec(compile(path.read_bytes(), str(path), "exec"), module.__dict__)
+    exec(compile(path.read_bytes(), str(path), "exec"), module.__dict__)  # nosemgrep: python.lang.security.audit.exec-detected.exec-detected -- fixed trusted path in this tree, loaded from verified bytes without a bytecode cache
     return module.runtime()
 
 

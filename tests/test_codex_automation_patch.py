@@ -3,6 +3,7 @@
 import base64
 import importlib.util
 import os
+import ast
 import re
 import subprocess
 import sys
@@ -42,7 +43,7 @@ FIX = ("diff --git a/policy.py b/policy.py\n--- a/policy.py\n+++ b/policy.py\n@@
 def test_instruction_surface_rule_matches_the_accepted_publisher():
     source = (ROOT / "scripts/ci/autofix-publish.py").read_text()
     match = re.search(r'^INSTRUCTIONS = re\.compile\((r".*")\)$', source, re.MULTILINE)
-    assert match and eval(match.group(1)) == patch.INSTRUCTIONS.pattern
+    assert match and ast.literal_eval(match.group(1)) == patch.INSTRUCTIONS.pattern
 
 
 @pytest.mark.parametrize("text", [

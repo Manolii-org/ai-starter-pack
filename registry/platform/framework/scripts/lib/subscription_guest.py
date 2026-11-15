@@ -55,7 +55,7 @@ def runtime():
             source = path.read_bytes()
             if len(source) > 262144:
                 raise OSError("guest source exceeds bound")
-            exec(compile(source, str(path), "exec"), module.__dict__)
+            exec(compile(source, str(path), "exec"), module.__dict__)  # nosemgrep: python.lang.security.audit.exec-detected.exec-detected -- fixed trusted path in this tree, loaded from verified bytes without a bytecode cache
         return package.codex_automation_adapter
     except (OSError, ImportError, SyntaxError):
         raise RuntimeError("subscription_guest_runtime_unavailable") from None
