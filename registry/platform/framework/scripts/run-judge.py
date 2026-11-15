@@ -1218,7 +1218,7 @@ Only keep original IDs that pass all four gates. Never post to GitHub yourself."
                 "(ANTHROPIC_DIRECT_API_KEY); adjudication incomplete"
             )
             return None
-        if not subscription_required and not api_key:
+        if not api_key and not subscription_required:
             logger.error("Governed review route or router credential unavailable; cannot invoke judge agent")
             return None
 

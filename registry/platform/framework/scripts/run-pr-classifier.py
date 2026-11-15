@@ -732,7 +732,7 @@ def main() -> None:
     except (RuntimeError, ImportError):
         print("[classifier] required route unavailable; classification incomplete", file=sys.stderr)
         sys.exit(1)
-    if not subscription_required and not api_key:
+    if not api_key and not subscription_required:
         if os.environ.get("CLIENT_AI_POLICY"):
             print(
                 "[classifier] CLIENT_AI_POLICY set, no direct credential — "

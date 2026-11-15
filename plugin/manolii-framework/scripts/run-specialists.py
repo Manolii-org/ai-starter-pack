@@ -465,7 +465,7 @@ def _invoke_skill(skill_name: str, diff: str, output_dir: pathlib.Path) -> tuple
             _write_skipped_marker(skill_name, output_dir, reason)
             return skill_name, reason
 
-    if not subscription_required and not estate_requested and first_party and not api_key:
+    if not api_key and not subscription_required and not estate_requested and first_party:
         if proxied_preview:
             _write_skip_marker(skill_name, output_dir, "no_proxy_credential")
             print(f"[{skill_name}] governed review route or router credential unavailable — marker written")
@@ -478,7 +478,7 @@ def _invoke_skill(skill_name: str, diff: str, output_dir: pathlib.Path) -> tuple
         print(f"[{skill_name}] first_party skill needs ANTHROPIC_DIRECT_API_KEY — marker written to {output_dir / (skill_name + '.json')}")
         return skill_name, "skipped: no direct Anthropic credential"
 
-    if not subscription_required and not estate_requested and not first_party and not api_key:
+    if not api_key and not subscription_required and not estate_requested and not first_party:
         # Proxy configured but no shared credential (e.g. direct-only install):
         # the API call would raise immediately — record the marker up front so
         # the judge counts the missing coverage rather than a false clean.
