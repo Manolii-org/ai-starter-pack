@@ -220,12 +220,27 @@ def _seen(value: object) -> datetime | None:
         return None
 
 
-def is_sustained(issue: dict) -> bool:
-    """Lifetime volume and span: >=100 events across >=7 days."""
-    count = str(issue.get("count") or "")
-    events = int(count) if count.isdigit() else 0
-    first, last = _seen(issue.get("firstSeen")), _seen(issue.get("lastSeen"))
-    return bool(events >= SUSTAINED_MIN_EVENTS and first and last and last - first >= SUSTAINED_MIN_SPAN)
+def is_sustained(lifetime: object) -> bool | None:
+    """Lifetime volume and span: >=100 events across >=7 days.
+
+    `lifetime` is the issue-list row's lifetime object; the row's top-level
+    count/firstSeen cover only the query window. Returns None when the lifetime
+    data is missing or malformed: the caller admits such a group rather than
+    dropping it.
+    """
+    if not isinstance(lifetime, dict):
+        return None
+    count = lifetime.get("count")
+    if isinstance(count, int) and not isinstance(count, bool):
+        events = count
+    elif isinstance(count, str) and count.isdigit():
+        events = int(count)
+    else:
+        return None
+    first, last = _seen(lifetime.get("firstSeen")), _seen(lifetime.get("lastSeen"))
+    if first is None or last is None:
+        return None
+    return events >= SUSTAINED_MIN_EVENTS and last - first >= SUSTAINED_MIN_SPAN
 
 
 def sweep(manifest: dict, fetch: Fetch, *, now: datetime | None = None, lookback_minutes: int | None = None,
@@ -305,15 +320,12 @@ def sweep(manifest: dict, fetch: Fetch, *, now: datetime | None = None, lookback
         exception_type = facts["exception_type"]
         classification = classify(exception_type, facts["message"], facts["in_app"], sha)
         if is_transient(row, classification, exception_type):
-            # The issue list's count/firstSeen cover only the query window, so
-            # read lifetime figures from the issue itself. Unreadable: admit.
-            try:
-                lifetime, _ = fetch(f"{API}/organizations/{org['slug']}/issues/{issue_id}/")
-                sustained = is_sustained(lifetime if isinstance(lifetime, dict) else {})
-            except SweepError:
-                admission_unreadable += 1
-                sustained = True
-            if not sustained:
+            # Lifetime figures come with the list row: no extra request, so the
+            # enrichment budget and deadline are unaffected.
+            sustained = is_sustained(row.get("lifetime"))
+            if sustained is None:
+                admission_unreadable += 1  # invalid lifetime data: admit, never drop
+            elif not sustained:
                 filtered_transient += 1
                 continue
         candidates.append({

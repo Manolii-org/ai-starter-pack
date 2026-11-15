@@ -35,14 +35,19 @@ or it is a Sentry cron-monitor issue. A cron-monitor issue has
 
 A transient group becomes a candidate only when it is **sustained**: at
 least 100 events, with at least 7 days between its first and last event.
-Those lifetime figures come from the issue itself, because the issue list's
-`count` and `firstSeen` cover only the query window. `count` is a string, and
-a non-numeric value counts as 0.
+The figures come from the issue-list row's `lifetime` object, so no extra
+request is made and the enrichment budget and deadline are unaffected. The
+row's top-level `count` and `firstSeen` cover only the query window, so they
+are never used. `count` arrives as a string.
 
 A transient group that is not sustained is not emitted. It is counted in the
-stats as `filtered_transient`, so coverage stays visible. If the lifetime
-read fails, the group is admitted rather than dropped, and counted as
-`admission_unreadable`. Every other group is admitted as before.
+stats as `filtered_transient`, so coverage stays visible. If its lifetime
+data is missing or malformed (no `lifetime`, a non-numeric `count`, or an
+unparseable timestamp), the group is admitted rather than dropped, and
+counted as `admission_unreadable`. For a producer of incident candidates,
+admitting on unreadable data is the safer failure: a spurious candidate costs
+one triage, but a dropped one hides an incident. Every other group is
+admitted as before.
 
 Why: one-off upstream failures and alerts from flapping cron monitors were
 most of the non-incidents in the first labelled shadow sample. Sustained
