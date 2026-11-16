@@ -190,8 +190,23 @@ def build_image(directory):
     result = subprocess.run(command, env=env, cwd=directory, capture_output=True, timeout=600, check=False)  # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-tainted-env-args.dangerous-subprocess-use-tainted-env-args
     image = (directory / "image.id").read_text().strip() if result.returncode == 0 else ""
     if not re.fullmatch(r"sha256:[0-9a-f]{64}", image):
+        _report_build_failure(result)
         raise Incomplete("failed_install")
     return image
+
+
+def _report_build_failure(result, limit=40):
+    """Leave the guest-image build failure in the trusted job log.
+
+    The build context is the accepted closure only (no candidate source and no
+    credential), so its output is safe to show; without it ``failed_install``
+    names no cause.
+    """
+    text = (result.stderr or b"").decode("utf-8", "replace") + (result.stdout or b"").decode("utf-8", "replace")
+    tail = [line for line in text.splitlines() if line.strip()][-limit:]
+    print(f"guest image build failed (exit {result.returncode}):", file=sys.stderr)
+    for line in tail:
+        print("  " + line[:400], file=sys.stderr)
 
 
 def guest_args(image, name, source, broker_directory, context_file, candidates, value):

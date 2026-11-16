@@ -301,7 +301,7 @@ jobs:
     permissions:
       contents: read
       actions: read
-      pull-requests: read
+      pull-requests: write
       issues: write
       statuses: write
     uses: Manolii-org/ai-starter-pack/.github/workflows/codex-automation-worker-reusable.yml@<PACK_SHA>
