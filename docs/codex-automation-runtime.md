@@ -314,6 +314,16 @@ jobs:
       CODEX_AUTOMATION_PUBLISH_TOKEN: ${{ secrets.CODEX_AUTOMATION_PUBLISH_TOKEN }}
 ```
 
+> **Migration note.** A called workflow cannot receive more permissions than
+> its caller grants. The worker `execute` and `publish_fix` jobs now request
+> `pull-requests: write`. Consumers that copied an earlier version of this
+> example granted the caller `pull-requests: read`; if you update only the
+> pinned `<PACK_SHA>` on the `uses:` line, the called jobs cannot run with the
+> requested permission and the PR comment will fail to post. Update the
+> caller's `permissions:` block to `pull-requests: write` (and keep
+> `contents: read`, `actions: read`, `issues: write`, `statuses: write`) on
+> the worker job BEFORE bumping the pin.
+
 `.github/codex-automation.json` holds the controller policy fields of
 `scripts/ci/codex-automation-worker.json` plus:
 
