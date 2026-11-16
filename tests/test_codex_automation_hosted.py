@@ -129,8 +129,9 @@ def test_session_probes_the_account_then_persists_the_refresh(monkeypatch, tmp_p
     fake = FakeDoppler(login("a"))
     monkeypatch.setattr(hosted, "_request", fake)
     home = tmp_path / "home"
-    hosted.configure(policy(), home, "dp.st.fixture")
-    assignment = hosted.select(REPO, "assessment", policy())
+    value = policy()
+    hosted.configure(value, home, "dp.st.fixture")
+    assignment = hosted.select(REPO, "assessment", value)
 
     def probe(path, refresh=True):
         assert path == home
@@ -151,9 +152,10 @@ def test_a_login_for_another_account_is_refused(monkeypatch, tmp_path, controlle
     other["tokens"]["account_id"] = "someone-else"
     monkeypatch.setattr(hosted, "_request", FakeDoppler(other))
     home = tmp_path / "home"
-    hosted.configure(policy(), home, "dp.st.fixture")
+    value = policy()
+    hosted.configure(value, home, "dp.st.fixture")
     with pytest.raises(profiles.ProfileError, match="account_mismatch"):
-        with hosted.session(hosted.select(REPO, "assessment", policy()), REPO, "assessment"):
+        with hosted.session(hosted.select(REPO, "assessment", value), REPO, "assessment"):
             pass
 
 
@@ -218,7 +220,8 @@ def test_a_rotated_login_is_saved_even_when_a_later_check_refuses_the_run(monkey
     fake = FakeDoppler(login("a", exp=int(time.time()) + 60))
     monkeypatch.setattr(hosted, "_request", fake)
     home = tmp_path / "home"
-    hosted.configure(policy(), home, "dp.st.fixture")
+    value = policy()
+    hosted.configure(value, home, "dp.st.fixture")
     seen = {}
 
     def probe(path, refresh=True):
@@ -231,7 +234,7 @@ def test_a_rotated_login_is_saved_even_when_a_later_check_refuses_the_run(monkey
     monkeypatch.setattr(profiles, "account_probe", probe)
     monkeypatch.setattr(profiles, "capacity", exhausted)
     with pytest.raises(profiles.ProfileError, match="capacity_exhausted"):
-        with hosted.session(hosted.select(REPO, "assessment", policy()), REPO, "assessment"):
+        with hosted.session(hosted.select(REPO, "assessment", value), REPO, "assessment"):
             pass
     assert seen["refresh"] is True and len(fake.writes) == 1
     assert json.loads(fake.stored)["tokens"]["refresh_token"] == "rb"
@@ -240,10 +243,28 @@ def test_a_rotated_login_is_saved_even_when_a_later_check_refuses_the_run(monkey
 def test_a_fresh_login_is_not_refreshed(monkeypatch, tmp_path, controller):
     monkeypatch.setattr(hosted, "_request", FakeDoppler(login("a")))
     home = tmp_path / "home"
-    hosted.configure(policy(), home, "dp.st.fixture")
+    value = policy()
+    hosted.configure(value, home, "dp.st.fixture")
     seen = {}
     monkeypatch.setattr(profiles, "account_probe", lambda path, refresh=True: seen.update(refresh=refresh) or ({}, {}))
     monkeypatch.setattr(profiles, "capacity", lambda a, l, s: {"windows": {}})
-    with hosted.session(hosted.select(REPO, "assessment", policy()), REPO, "assessment") as (_, snapshot):
+    with hosted.session(hosted.select(REPO, "assessment", value), REPO, "assessment") as (_, snapshot):
         assert snapshot["credential"] == "unchanged"
     assert seen["refresh"] is False
+
+
+def test_consent_is_rechecked_before_each_session(monkeypatch, tmp_path, controller):
+    monkeypatch.setattr(hosted, "_request", FakeDoppler(login("a")))
+    home = tmp_path / "home"
+    value = policy()
+    hosted.configure(value, home, "dp.st.fixture")
+    assignment = hosted.select(REPO, "assessment", value)
+    monkeypatch.setattr(profiles, "account_probe", lambda *a, **k: pytest.fail("no probe after consent lapsed"))
+    value["consent"]["expires_at"] = int(time.time()) - 1
+    with pytest.raises(profiles.ProfileError, match="consent_unavailable"):
+        with hosted.session(assignment, REPO, "assessment"):
+            pass
+    value["consent"]["expires_at"] = int(time.time()) + 7200
+    with pytest.raises(profiles.ProfileError, match="assignment_changed"):
+        with hosted.session(assignment, REPO, "assessment"):
+            pass

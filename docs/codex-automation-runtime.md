@@ -261,7 +261,7 @@ root-owned consent files are needed. What changes, and what does not:
 | Whose account | Host registry `account_sha256` | Policy `consent.account_sha256`; the Doppler login must match it |
 | Owner consent | Root-owned `/etc/codex-review/automation-consents/` | `consent` in the consumer's default-branch policy (lands only through that repo's review) |
 | Trusted controller | Selected-workflow runner group | The caller `codex-automation-worker.yml` on the default branch, pinned to a pack SHA; controller code comes from that pack commit |
-| One refresh writer | Host flock + one session directory | The CLI refreshes in-run; a rotated login is written back only while Doppler still holds the login the run started from (lineage guard), and is read back |
+| One refresh writer | Host flock + one session directory | The CLI refreshes in-run, only near expiry; a rotated login is written back only while Doppler still holds the login the run started from (best-effort lineage guard: the read and write are not atomic), and is read back |
 | Funding | Consent flags + live capacity probe | Unchanged |
 | PR source | Credential-free networkless container | Unchanged |
 
@@ -344,17 +344,23 @@ A read/write token makes the run the refresh writer under the lineage guard; a
 read-only token works too, using the refreshed copy in memory and writing
 nothing back (the same behaviour as the existing advisory review). Committing
 the caller files activates the controller; setting the repository variable
-`CODEX_AUTOMATION_ENABLED=false` stops both jobs immediately. Add `"autofix"`
-to `roles` and set `CODEX_AUTOMATION_PUBLISH=true` only when guarded repair is
-wanted.
+`CODEX_AUTOMATION_ENABLED=false` stops later invocations of both jobs. It does
+not cancel a worker run that has already started (that run keeps its own
+`enabled` input); cancel the run in Actions to stop it. Guarded repair needs all
+three of: `"autofix"` in `consent.roles`, top-level `"autofix": true` in
+`.github/codex-automation.json`, and `CODEX_AUTOMATION_PUBLISH=true`. Repair is
+skipped unless the top-level `"autofix"` is `true`.
 
 Hosted-mode limits (accepted):
 
 - Logins are refreshed only within an hour of expiry, about once per token
   lifetime, and a rotated login is written back even if a later check refuses
   the run. Two runs that refresh the same login in the same minute can still
-  race; the lineage guard keeps the newer stored login, and a run whose
-  refresh lost the race holds rather than guessing.
+  race. The lineage guard is best-effort: it skips the write when Doppler
+  already holds a different login (recorded as `superseded`; that run continues
+  on its own refreshed copy), but because the read and the write are separate
+  requests, two writers that both read the original login can still both
+  write, and the slower one wins. Refresh near expiry keeps that window rare.
 - Several consumers may read one Doppler login (for example, an account that
   funds more than one repository). Only a read/write token writes back.
 - The trusted controller is the caller `codex-automation-worker.yml` run by

@@ -10,10 +10,11 @@ the same guarantees with different custody of the same facts:
 * **Consent**: the owner's grant is the ``consent`` object in that policy file,
   which only lands through the repository's own review on the default branch.
   The controller runs from that default branch, so PR source cannot grant it.
-* **One refresh writer**: the official CLI refreshes the login inside the run;
-  with a read/write token a rotated login is written back to the same Doppler
-  secret only while the stored login is still the one this run started from
-  (lineage guard). A run never restores an older login over a newer one. With
+* **One refresh writer**: the official CLI refreshes the login inside the run,
+  only near expiry; with a read/write token a rotated login is written back to
+  the same Doppler secret only while the stored login is still the one this run
+  started from (best-effort lineage guard; the read and the write are separate
+  requests, so it narrows rather than eliminates a concurrent-writer race). With
   a read-only token the run uses its refreshed copy and writes nothing.
 * **Funding**: purchased credits and automatic purchases must be disabled in
   the consent, and the CLI's live capacity probe must confirm included usage
@@ -134,7 +135,7 @@ def configure(policy: dict, home: Path, token: str) -> None:
     descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
     with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
         stream.write(raw)
-    _state.update(home=home, coords=coords, token=token, start=fingerprint(auth))
+    _state.update(home=home, coords=coords, token=token, start=fingerprint(auth), policy=policy)
 
 
 def select(repository: str, role: str, policy: dict) -> dict:
@@ -215,6 +216,11 @@ def session(assignment, repository, role, *, wait_seconds=0):
     if home is None or assignment.get("mode") != "hosted":
         raise ProfileError("hosted_credential_unavailable")
     if repository.lower() != assignment["repository"] or role != assignment["role"]:
+        raise ProfileError("profile_assignment_changed")
+    # Consent can expire (or the grant change) between selection and this
+    # session; re-check it immediately before the login is probed or used.
+    current = select(repository, role, _state.get("policy") or {})
+    if current["assignment_sha256"] != assignment.get("assignment_sha256"):
         raise ProfileError("profile_assignment_changed")
     initial = profiles.read_auth(home, assignment)
     # Refresh only when the stored access token is near expiry. Every
