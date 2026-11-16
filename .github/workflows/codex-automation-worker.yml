@@ -89,6 +89,15 @@ jobs:
           CODEX_AUTOMATION_ENABLED: ${{ vars.CODEX_AUTOMATION_ENABLED }}
         run: python3 -I trusted/scripts/ci/codex_automation_worker.py publish
 
+      - name: Release the advisory claim when no result was produced
+        # The controller is advisory: a crashed run must not leave the PR's
+        # execution status pending (unstable), which blocks native auto-merge.
+        if: always() && steps.prepare.outputs.needed == 'true' && steps.worker.outputs.artifact == ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CODEX_AUTOMATION_ENABLED: ${{ vars.CODEX_AUTOMATION_ENABLED }}
+        run: python3 -I trusted/scripts/ci/codex_automation_worker.py release
+
   publish_fix:
     name: Guarded autofix publication (separate credential)
     needs: execute

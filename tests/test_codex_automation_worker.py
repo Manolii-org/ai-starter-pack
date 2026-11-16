@@ -256,11 +256,12 @@ def test_comment_neutralises_markdown_mentions_and_unknown_events():
 
 class PublishGitHub(FakeGitHub):
     def __init__(self, head, comments):
-        self.head, self.comments, self.posted = head, comments, []
+        self.head, self.comments, self.posted, self.statuses = head, comments, [], []
+        self.repository = TARGET["repository"]
 
     def json(self, route, method="GET", data=None):
         if method == "POST":
-            self.posted.append(data)
+            (self.statuses if route.startswith("/statuses/") else self.posted).append(data)
             return {}
         return {"state": "open", "head": {"sha": self.head}}
 
@@ -285,6 +286,9 @@ def test_publish_rechecks_head_and_dedupes_only_on_trusted_author(monkeypatch, t
     monkeypatch.setattr(worker, "GitHub", lambda repo, token: fake)
     assert worker.main(["x", "publish"]) == 0
     assert len(fake.posted) == posts
+    # The advisory claim is always released, posted or not, so the PR is not left unstable.
+    assert len(fake.statuses) == 1 and fake.statuses[0]["state"] == "success"
+    assert fake.statuses[0]["context"].startswith("codex-automation-execution/")
 
 
 def test_judge_context_expects_exactly_the_dispatched_roles(harness):
@@ -726,3 +730,27 @@ def test_worker_count_probe_failure_does_not_crash_the_stage(monkeypatch):
     for name in ("run-specialists.py", "run-broad-agents.py"):
         source = (ROOT / "scripts" / name).read_text()
         assert "subscription = _subscription_required()\n    except (OSError, RuntimeError, ImportError):" in source
+
+
+def test_release_closes_the_claim_without_a_result(monkeypatch, tmp_path):
+    monkeypatch.setenv("RUNNER_TEMP", str(tmp_path))
+    monkeypatch.setenv("GITHUB_REPOSITORY", TARGET["repository"])
+    state = tmp_path / "codex-automation"
+    state.mkdir(parents=True)
+    (state / "target.json").write_text(json.dumps(TARGET))
+    fake = PublishGitHub(TARGET["head_sha"], [])
+    monkeypatch.setattr(worker, "GitHub", lambda repo, token: fake)
+    assert worker.main(["x", "release"]) == 0
+    assert fake.posted == [] and len(fake.statuses) == 1
+    assert fake.statuses[0]["state"] == "success" and "Not a review verdict" in fake.statuses[0]["description"]
+
+
+def test_a_released_claim_still_fences_re_execution():
+    class Rows:
+        repository = TARGET["repository"]
+
+        def pages(self, route):
+            return [{"context": f"codex-automation-execution/{TARGET['operation']}/pr-{TARGET['pull_request']}",
+                     "state": "success"}]
+    with pytest.raises(worker.custody.CustodyHold, match="execution_already_claimed"):
+        worker.custody.claim(Rows(), TARGET, producer_run_id=1, workflow_sha="a" * 40, enabled=True)

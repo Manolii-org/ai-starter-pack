@@ -82,6 +82,23 @@ def _controller(github, producer_run_id, workflow_sha):
     return f"https://github.com/{github.repository}/actions/runs/{producer_run_id}"
 
 
+def release(github, target, outcome):
+    """Close the advisory claim once its outcome is published.
+
+    The claim stays durable: ``claim`` holds on any existing row for the context,
+    so a released (success) row still fences re-execution of this head. Leaving
+    the row pending made every pull request "unstable" and blocked native
+    auto-merge, although the controller is advisory and never a merge gate.
+    """
+    context = _identity(github, target)
+    description = f"Advisory automation {outcome}; outcome published. Not a review verdict."[:140]
+    github.json(
+        f"/statuses/{target['head_sha']}",
+        method="POST",
+        data={"context": context, "state": "success", "description": description},
+    )
+
+
 def claim(github, target, *, producer_run_id, workflow_sha, enabled: bool):
     """Check all native history, then append/verify one pending claim.
 

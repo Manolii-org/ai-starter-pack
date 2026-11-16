@@ -84,9 +84,13 @@ Any prior claim for the operation/head holds automatic re-execution. A purported
 success, another source policy, artifact expiry, cancellation, missing response,
 or rollback cannot clear custody. Completed-result reuse and terminal publication
 require their own authenticated proof; this helper supplies neither a clean
-review nor permission to rerun. It writes no automatic success or release. This
-keeps the execution fence durable while the full controller and reconciler are
-being implemented. A lost acknowledgement or competing claim never admits work.
+review nor permission to rerun. After the advisory outcome is published (or when
+a run ends without a result), the worker sets the same status to `success` with
+the description "Advisory automation <state>; outcome published. Not a review
+verdict." A pending row would mark the pull request unstable and block native
+auto-merge, although this controller is never a merge gate. The released row
+stays durable: any existing row for the context still holds re-execution, so the
+fence is unchanged. A lost acknowledgement or competing claim never admits work.
 
 ## Trusted assessment controller
 

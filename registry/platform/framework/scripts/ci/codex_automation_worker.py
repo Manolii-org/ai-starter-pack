@@ -577,6 +577,22 @@ def comment_body(target, result):
     return "\n".join(lines)
 
 
+def _publish(github, target, result):
+    number = int(target["pull_request"])
+    pr = github.json(f"/pulls/{number}")
+    if not isinstance(pr, dict) or pr.get("state") != "open" or (pr.get("head") or {}).get("sha") != target["head_sha"]:
+        print("superseded: PR head changed or closed; advisory not posted")
+        return 0
+    head_marker = f"<!-- head={target['head_sha']} -->"
+    existing = github.pages(f"/issues/{number}/comments")
+    if any(isinstance(c, dict) and (c.get("user") or {}).get("id") == custody.BOT_ID
+           and MARKER in (c.get("body") or "") and head_marker in (c.get("body") or "") for c in existing):
+        print("already published for this head")
+        return 0
+    github.json(f"/issues/{number}/comments", method="POST", data={"body": comment_body(target, result)})
+    return 0
+
+
 def main(argv):
     command = argv[1] if len(argv) > 1 else ""
     repository = os.environ.get("GITHUB_REPOSITORY", "")
@@ -631,22 +647,19 @@ def main(argv):
                     pr_number=str(int(target["pull_request"])), expected_head=target["head_sha"],
                     head_ref=target["head_ref"])
         return 0
+    if command == "release":
+        # The run produced no result to publish; still close the advisory claim.
+        custody.release(github, target, "ended without a result")
+        return 0
     if command == "publish":
         result = json.loads((state / "result/result.json").read_text(encoding="utf-8"))
-        number = int(target["pull_request"])
-        pr = github.json(f"/pulls/{number}")
-        if not isinstance(pr, dict) or pr.get("state") != "open" or (pr.get("head") or {}).get("sha") != target["head_sha"]:
-            print("superseded: PR head changed or closed; advisory not posted")
-            return 0
-        head_marker = f"<!-- head={target['head_sha']} -->"
-        existing = github.pages(f"/issues/{number}/comments")
-        if any(isinstance(c, dict) and (c.get("user") or {}).get("id") == custody.BOT_ID
-               and MARKER in (c.get("body") or "") and head_marker in (c.get("body") or "") for c in existing):
-            print("already published for this head")
-            return 0
-        github.json(f"/issues/{number}/comments", method="POST", data={"body": comment_body(target, result)})
-        return 0
-    raise SystemExit("usage: codex_automation_worker.py prepare|run|publish")
+        try:
+            return _publish(github, target, result)
+        finally:
+            # Advisory only: never leave the execution claim pending, which
+            # would mark the pull request unstable and block native auto-merge.
+            custody.release(github, target, str(result.get("state") or "finished"))
+    raise SystemExit("usage: codex_automation_worker.py prepare|run|publish|release")
 
 
 if __name__ == "__main__":
