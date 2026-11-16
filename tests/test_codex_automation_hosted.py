@@ -301,3 +301,12 @@ def test_a_failed_guest_image_build_reports_its_cause(capsys):
     import codex_automation_worker as worker
     worker._report_build_failure(subprocess.CompletedProcess([], 1, stdout=b"", stderr=b"step 3: apt failed\n"))
     assert "apt failed" in capsys.readouterr().err
+
+
+def test_apt_can_read_the_build_ca_secret():
+    """apt fetches as the unprivileged _apt user; a root-only secret mount breaks every download."""
+    root = Path(__file__).resolve().parents[1] / "scripts" / "ci"
+    for name in ("codex-automation-runtime", "codex-review-runtime"):
+        for line in (root / name / "Dockerfile").read_text().splitlines():
+            if line.startswith("RUN --mount=type=secret") and "apt-get" in line:
+                assert "mode=0444" in line.split()[1], f"{name}: apt RUN must mount proxy_ca world-readable"
