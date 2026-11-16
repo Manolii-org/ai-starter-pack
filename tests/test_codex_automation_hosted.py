@@ -285,3 +285,19 @@ def test_consent_that_lapses_during_the_probe_is_refused_before_use(monkeypatch,
     with pytest.raises(profiles.ProfileError, match="consent_unavailable"):
         with hosted.session(assignment, REPO, "assessment"):
             pytest.fail("login handed over after consent lapsed")
+
+
+def test_hosted_worker_can_post_its_pull_request_comment():
+    import yaml
+    flow = yaml.safe_load((Path(__file__).resolve().parents[1]
+                           / ".github/workflows/codex-automation-worker-reusable.yml").read_text())
+    # Commenting on a pull request needs pull-requests: write; issues: write alone is refused (403).
+    assert flow["jobs"]["execute"]["permissions"]["pull-requests"] == "write"
+    assert flow["jobs"]["publish_fix"]["permissions"]["pull-requests"] == "write"
+
+
+def test_a_failed_guest_image_build_reports_its_cause(capsys):
+    import subprocess
+    import codex_automation_worker as worker
+    worker._report_build_failure(subprocess.CompletedProcess([], 1, stdout=b"", stderr=b"step 3: apt failed\n"))
+    assert "apt failed" in capsys.readouterr().err

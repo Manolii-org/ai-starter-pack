@@ -203,14 +203,14 @@ def test_workflow_is_default_off_trusted_checkout_and_secret_free():
     # Least privilege (zizmor excessive-permissions): nothing at workflow level.
     assert flow["permissions"] == {}
     assert flow["jobs"]["execute"]["permissions"] == {
-        "contents": "read", "actions": "read", "pull-requests": "read", "issues": "write", "statuses": "write"}
+        "contents": "read", "actions": "read", "pull-requests": "write", "issues": "write", "statuses": "write"}
     # The editor job never sees a secret; only the separate publisher holds one.
     execute_text = yaml.safe_dump(flow["jobs"]["execute"])
     assert "secrets." not in execute_text
     publish = flow["jobs"]["publish_fix"]
     assert publish["needs"] == "execute" and "vars.CODEX_AUTOMATION_PUBLISH == 'true'" in publish["if"]
     assert set(re.findall(r"secrets\.([A-Z_]+)", text)) == {"CODEX_AUTOMATION_PUBLISH_TOKEN"}
-    assert publish["permissions"] == {"contents": "read", "pull-requests": "read", "issues": "write"}
+    assert publish["permissions"] == {"contents": "read", "pull-requests": "write", "issues": "write"}
     steps = {step.get("name"): step for step in publish["steps"]}
     run = steps["Publish once with the separate credential"]
     assert run["env"]["PUBLICATION_ADMITTED"] == "${{ steps.custody.outputs.skip == 'false' }}"
