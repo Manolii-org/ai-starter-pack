@@ -105,6 +105,27 @@ def _state_dir():
     return path
 
 
+CLAIMS = "claims.json"
+
+
+def _record_claim(operation):
+    """Append an operation this run claimed, before any model work for it."""
+    path = _state_dir() / CLAIMS
+    claimed = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else []
+    if operation not in claimed:
+        claimed.append(operation)
+    path.write_text(json.dumps(claimed), encoding="utf-8")
+
+
+def _claimed():
+    path = _state_dir() / CLAIMS
+    try:
+        value = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else []
+    except ValueError:
+        return []
+    return [op for op in value if isinstance(op, str) and op in profiles.AUTOMATION_ROLES] if isinstance(value, list) else []
+
+
 def prepare(github, event):
     config = policy()
     if not enabled():
@@ -329,6 +350,7 @@ def execute(github, target, directory, *, run_id, run_attempt, workflow_sha, gue
                       workflow_sha=workflow_sha, enabled=True)
     except custody.CustodyHold as exc:
         return {"state": "held", "reason": str(exc)}, rows
+    _record_claim("assessment")
     unmeasured = {}
     deadline = time.monotonic() + EXECUTE_SECONDS if deadline is None else deadline
     result = _passes(github, target, directory, config, rows, unmeasured, assignments, run_id=run_id,
@@ -462,6 +484,7 @@ def autofix_stage(github, target, directory, config, publication, image, source,
                       workflow_sha=workflow_sha, enabled=True)
     except custody.CustodyHold as exc:
         return {"outcome": "held", "reason": str(exc)}
+    _record_claim("autofix")
     handoff = directory / "autofix-input"
     handoff.mkdir(mode=0o700)
     (handoff / "autofix-findings.json").write_text(json.dumps(findings))
@@ -648,17 +671,27 @@ def main(argv):
                     head_ref=target["head_ref"])
         return 0
     if command == "release":
-        # The run produced no result to publish; still close the advisory claim.
-        custody.release(github, target, "ended without a result")
+        # Advisory only: close every claim this run recorded, so no pending
+        # status leaves the pull request unstable. Claims this run did not make
+        # are never touched; with no recorded claim this is a no-op.
+        result_path = state / "result/result.json"
+        try:
+            outcome = str(json.loads(result_path.read_text(encoding="utf-8")).get("state") or "unknown")
+        except (OSError, ValueError):
+            outcome = "no result"
+        failed = []
+        for operation in _claimed():
+            try:
+                custody.release(github, {**target, "operation": operation}, outcome)
+            except Exception as exc:  # report every claim; never mask the others
+                failed.append(f"{operation}: {type(exc).__name__}")
+        if failed:
+            print("claim release failed: " + "; ".join(failed), file=sys.stderr)
+            return 1
         return 0
     if command == "publish":
         result = json.loads((state / "result/result.json").read_text(encoding="utf-8"))
-        try:
-            return _publish(github, target, result)
-        finally:
-            # Advisory only: never leave the execution claim pending, which
-            # would mark the pull request unstable and block native auto-merge.
-            custody.release(github, target, str(result.get("state") or "finished"))
+        return _publish(github, target, result)
     raise SystemExit("usage: codex_automation_worker.py prepare|run|publish|release")
 
 

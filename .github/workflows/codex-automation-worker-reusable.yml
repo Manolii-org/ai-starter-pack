@@ -151,10 +151,11 @@ jobs:
           CODEX_AUTOMATION_POLICY: ${{ github.workspace }}/consumer/${{ inputs.policy_path }}
         run: python3 -I trusted/scripts/ci/codex_automation_worker.py publish
 
-      - name: Release the advisory claim when no result was produced
-        # The controller is advisory: a crashed run must not leave the PR's
-        # execution status pending (unstable), which blocks native auto-merge.
-        if: always() && steps.prepare.outputs.needed == 'true' && steps.worker.outputs.artifact == ''
+      - name: Release this run's advisory claims
+        # The controller is advisory: whatever happened above (including a
+        # crash), close the claims this run recorded so no pending status
+        # leaves the PR unstable and blocks native auto-merge.
+        if: always() && steps.prepare.outputs.needed == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           CODEX_AUTOMATION_ENABLED: "true"

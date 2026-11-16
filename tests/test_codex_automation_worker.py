@@ -17,6 +17,12 @@ import codex_automation_worker as worker
 
 REAL_CLAIM = worker.custody.claim
 
+@pytest.fixture(autouse=True)
+def _runner_temp(monkeypatch, tmp_path_factory):
+    """Actions always sets RUNNER_TEMP; the claim ledger lives under it."""
+    monkeypatch.setenv("RUNNER_TEMP", str(tmp_path_factory.mktemp("runner-temp")))
+
+
 TARGET = {"repository": "example/automation", "pull_request": 7, "base_sha": "b" * 40,
           "head_sha": "a" * 40, "operation": "assessment", "request_run_id": 11,
           "request_run_attempt": 1, "request_workflow_id": 5, "request_artifact_id": 9,
@@ -286,9 +292,8 @@ def test_publish_rechecks_head_and_dedupes_only_on_trusted_author(monkeypatch, t
     monkeypatch.setattr(worker, "GitHub", lambda repo, token: fake)
     assert worker.main(["x", "publish"]) == 0
     assert len(fake.posted) == posts
-    # The advisory claim is always released, posted or not, so the PR is not left unstable.
-    assert len(fake.statuses) == 1 and fake.statuses[0]["state"] == "success"
-    assert fake.statuses[0]["context"].startswith("codex-automation-execution/")
+    # Publishing never touches the execution claim; the separate release step does.
+    assert fake.statuses == []
 
 
 def test_judge_context_expects_exactly_the_dispatched_roles(harness):
@@ -732,17 +737,48 @@ def test_worker_count_probe_failure_does_not_crash_the_stage(monkeypatch):
         assert "subscription = _subscription_required()\n    except (OSError, RuntimeError, ImportError):" in source
 
 
-def test_release_closes_the_claim_without_a_result(monkeypatch, tmp_path):
+def _release(monkeypatch, tmp_path, claims, result=None):
     monkeypatch.setenv("RUNNER_TEMP", str(tmp_path))
     monkeypatch.setenv("GITHUB_REPOSITORY", TARGET["repository"])
     state = tmp_path / "codex-automation"
     state.mkdir(parents=True)
     (state / "target.json").write_text(json.dumps(TARGET))
+    if claims is not None:
+        (state / "claims.json").write_text(json.dumps(claims))
+    if result is not None:
+        (state / "result").mkdir()
+        (state / "result/result.json").write_text(json.dumps(result))
     fake = PublishGitHub(TARGET["head_sha"], [])
     monkeypatch.setattr(worker, "GitHub", lambda repo, token: fake)
-    assert worker.main(["x", "release"]) == 0
-    assert fake.posted == [] and len(fake.statuses) == 1
-    assert fake.statuses[0]["state"] == "success" and "Not a review verdict" in fake.statuses[0]["description"]
+    return worker.main(["x", "release"]), fake
+
+
+def test_release_closes_only_the_claims_this_run_made(monkeypatch, tmp_path):
+    code, fake = _release(monkeypatch, tmp_path, ["assessment", "autofix"], {"state": "completed"})
+    assert code == 0 and fake.posted == []
+    contexts = sorted(s["context"] for s in fake.statuses)
+    assert contexts == [f"codex-automation-execution/{op}/pr-{TARGET['pull_request']}" for op in ("assessment", "autofix")]
+    assert all(s["state"] == "success" and "(completed)" in s["description"]
+               and "Not a review verdict" in s["description"] for s in fake.statuses)
+
+
+@pytest.mark.parametrize("claims", [None, [], ["bogus"]])
+def test_release_without_a_recorded_claim_writes_nothing(monkeypatch, tmp_path, claims):
+    """A held or blocked run made no claim; releasing would permanently fence an unrun head."""
+    code, fake = _release(monkeypatch, tmp_path, claims, {"state": "held"})
+    assert code == 0 and fake.statuses == []
+
+
+def test_release_after_a_crash_reports_no_result(monkeypatch, tmp_path):
+    code, fake = _release(monkeypatch, tmp_path, ["assessment"])
+    assert code == 0 and len(fake.statuses) == 1 and "(no result)" in fake.statuses[0]["description"]
+
+
+def test_a_claim_is_recorded_only_after_it_is_acknowledged(monkeypatch, tmp_path):
+    monkeypatch.setenv("RUNNER_TEMP", str(tmp_path))
+    worker._record_claim("assessment")
+    worker._record_claim("assessment")
+    assert worker._claimed() == ["assessment"]
 
 
 def test_a_released_claim_still_fences_re_execution():
@@ -754,3 +790,18 @@ def test_a_released_claim_still_fences_re_execution():
                      "state": "success"}]
     with pytest.raises(worker.custody.CustodyHold, match="execution_already_claimed"):
         worker.custody.claim(Rows(), TARGET, producer_run_id=1, workflow_sha="a" * 40, enabled=True)
+
+
+def test_an_acknowledged_claim_is_recorded_for_release(harness):
+    run, *_ = harness
+    run()
+    assert worker._claimed() == ["assessment"]
+
+
+def test_a_held_claim_is_not_recorded(harness, monkeypatch):
+    run, *_ = harness
+    def hold(*a, **k):
+        raise worker.custody.CustodyHold("execution_already_claimed")
+    monkeypatch.setattr(worker.custody, "claim", hold)
+    result, _ = run()
+    assert result["state"] == "held" and worker._claimed() == []
