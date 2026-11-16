@@ -209,6 +209,12 @@ def persist() -> str:
     return "persisted"
 
 
+def _recheck(assignment: dict, repository: str, role: str) -> None:
+    current = select(repository, role, _state.get("policy") or {})
+    if current["assignment_sha256"] != assignment.get("assignment_sha256"):
+        raise ProfileError("profile_assignment_changed")
+
+
 @contextmanager
 def session(assignment, repository, role, *, wait_seconds=0):
     """Same account checks as host mode, against this run's private copy."""
@@ -218,10 +224,9 @@ def session(assignment, repository, role, *, wait_seconds=0):
     if repository.lower() != assignment["repository"] or role != assignment["role"]:
         raise ProfileError("profile_assignment_changed")
     # Consent can expire (or the grant change) between selection and this
-    # session; re-check it immediately before the login is probed or used.
-    current = select(repository, role, _state.get("policy") or {})
-    if current["assignment_sha256"] != assignment.get("assignment_sha256"):
-        raise ProfileError("profile_assignment_changed")
+    # session; re-check it before the login is probed and again before it is
+    # handed to the caller.
+    _recheck(assignment, repository, role)
     initial = profiles.read_auth(home, assignment)
     # Refresh only when the stored access token is near expiry. Every
     # consumer of a login reads the same stored copy, so refreshing on every
@@ -243,4 +248,5 @@ def session(assignment, repository, role, *, wait_seconds=0):
         except ProfileError:
             outcome = "writeback_failed"
     snapshot["credential"] = outcome
+    _recheck(assignment, repository, role)
     yield auth, snapshot

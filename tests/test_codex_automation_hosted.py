@@ -268,3 +268,20 @@ def test_consent_is_rechecked_before_each_session(monkeypatch, tmp_path, control
     with pytest.raises(profiles.ProfileError, match="assignment_changed"):
         with hosted.session(assignment, REPO, "assessment"):
             pass
+
+
+def test_consent_that_lapses_during_the_probe_is_refused_before_use(monkeypatch, tmp_path, controller):
+    monkeypatch.setattr(hosted, "_request", FakeDoppler(login("a")))
+    home = tmp_path / "home"
+    value = policy()
+    hosted.configure(value, home, "dp.st.fixture")
+    assignment = hosted.select(REPO, "assessment", value)
+
+    def probe(path, refresh=True):
+        value["consent"]["expires_at"] = int(time.time()) - 1
+        return {}, {}
+    monkeypatch.setattr(profiles, "account_probe", probe)
+    monkeypatch.setattr(profiles, "capacity", lambda a, l, s: {"windows": {}})
+    with pytest.raises(profiles.ProfileError, match="consent_unavailable"):
+        with hosted.session(assignment, REPO, "assessment"):
+            pytest.fail("login handed over after consent lapsed")
