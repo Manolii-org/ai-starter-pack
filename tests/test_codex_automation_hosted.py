@@ -307,6 +307,24 @@ def test_apt_can_read_the_build_ca_secret():
     """apt fetches as the unprivileged _apt user; a root-only secret mount breaks every download."""
     root = Path(__file__).resolve().parents[1] / "scripts" / "ci"
     for name in ("codex-automation-runtime", "codex-review-runtime"):
-        for line in (root / name / "Dockerfile").read_text().splitlines():
-            if line.startswith("RUN --mount=type=secret") and "apt-get" in line:
-                assert "mode=0444" in line.split()[1], f"{name}: apt RUN must mount proxy_ca world-readable"
+        text = (root / name / "Dockerfile").read_text()
+        # Fold Dockerfile line-continuations so each RUN instruction is one string.
+        runs, pending = [], []
+        for raw in text.splitlines():
+            pending.append(raw)
+            if raw.rstrip().endswith("\\"):
+                continue
+            runs.append(" ".join(pending))
+            pending = []
+        checked = 0
+        for run in runs:
+            if not (run.startswith("RUN --mount=type=secret") and "apt-get" in run):
+                continue
+            mounts = [tok for tok in run.split() if tok.startswith("--mount=")]
+            proxy_ca = [m for m in mounts if "id=proxy_ca" in m]
+            assert proxy_ca, f"{name}: apt RUN must mount proxy_ca"
+            assert "mode=0444" in proxy_ca[0], (
+                f"{name}: proxy_ca mount in every apt RUN must be mode=0444"
+            )
+            checked += 1
+        assert checked, f"{name}: no apt RUN with proxy_ca mount was checked"
