@@ -1,0 +1,200 @@
+name: Codex Automation Worker (reusable)
+# Trusted controller for consumers on GitHub-hosted runners. The caller must be
+# `.github/workflows/codex-automation-worker.yml` (custody authenticates that
+# path) triggered by `workflow_run` of "Codex Automation Request", and must pin
+# this reusable workflow and `pack_sha` to the same reviewed pack commit.
+#
+# The account login is read from the consumer entity's own Doppler secret named
+# in the consumer's reviewed default-branch policy, never from PR source. The
+# guest (PR source) runs credential-free and networkless; the controller source
+# and agent definitions come from the pinned pack commit, not the consumer.
+on:
+  workflow_call:
+    inputs:
+      pack_sha:
+        description: "Full commit SHA of the pack release this caller pins (same as the uses: ref)"
+        required: true
+        type: string
+      policy_path:
+        description: "Consumer policy file on the default branch"
+        required: false
+        type: string
+        default: .github/codex-automation.json
+      enabled:
+        description: "Caller passes vars.CODEX_AUTOMATION_ENABLED == 'true'"
+        required: true
+        type: boolean
+      publish:
+        description: "Caller passes vars.CODEX_AUTOMATION_PUBLISH == 'true'"
+        required: false
+        type: boolean
+        default: false
+    secrets:
+      CODEX_AUTOMATION_DOPPLER_TOKEN:
+        description: "Doppler service token (read/write) scoped to the config holding the login"
+        required: true
+      CODEX_AUTOMATION_PUBLISH_TOKEN:
+        description: "Optional CI-triggering token used only by the separate autofix publisher"
+        required: false
+
+permissions: {}
+
+jobs:
+  execute:
+    name: Trusted subscription automation (advisory)
+    if: >-
+      inputs.enabled &&
+      github.event_name == 'workflow_run' &&
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+      issues: write
+      statuses: write
+    continue-on-error: true
+    outputs:
+      packet: ${{ steps.worker.outputs.packet }}
+      pr_number: ${{ steps.worker.outputs.pr_number }}
+      expected_head: ${{ steps.worker.outputs.expected_head }}
+      head_ref: ${{ steps.worker.outputs.head_ref }}
+    steps:
+      - name: Validate pinned pack revision
+        env:
+          PACK_SHA: ${{ inputs.pack_sha }}
+          POLICY_PATH: ${{ inputs.policy_path }}
+        run: |
+          set -euo pipefail
+          [[ "$PACK_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "pack_sha must be a full commit SHA" >&2; exit 1; }
+          [[ "$POLICY_PATH" =~ ^\.github/[A-Za-z0-9_.-]+\.json$ ]] || { echo "policy_path must be a .github/*.json file" >&2; exit 1; }
+      - name: Check out trusted pack controller revision
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          repository: Manolii-org/ai-starter-pack
+          ref: ${{ inputs.pack_sha }}
+          path: trusted
+          persist-credentials: false
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /scripts/
+            /.claude/agents/
+            /.claude/skills/
+            /.ai/security/token-shapes.json
+            /data/token-shapes.json
+      - name: Check out the consumer's default-branch policy only
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: consumer
+          persist-credentials: false
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /${{ inputs.policy_path }}
+      - name: Install the pinned native Codex CLI (root-owned)
+        # Exact pinned version from the public registry with scripts disabled;
+        # only its verified native ELF is installed (same as codex-review-isolation-proof).
+        run: | # zizmor: ignore[adhoc-packages]
+          set -euo pipefail
+          install -d -m 700 "$RUNNER_TEMP/codex-npm"
+          cd "$RUNNER_TEMP/codex-npm"
+          npm install --no-save --ignore-scripts --registry https://registry.npmjs.org/ \
+            --userconfig /dev/null @openai/codex@0.163.0 >/dev/null
+          binary="$RUNNER_TEMP/codex-npm/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex"
+          test "$(head -c4 "$binary" | od -An -c | tr -d ' ')" = '177ELF'
+          sudo install -d -o root -g root -m 0755 /opt/codex-review /opt/codex-review/bin
+          sudo install -o root -g root -m 0755 "$binary" /opt/codex-review/bin/codex
+          /opt/codex-review/bin/codex --version
+      - name: Admit exact request
+        id: prepare
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CODEX_AUTOMATION_ENABLED: "true"
+          CODEX_AUTOMATION_HOSTED: "1"
+          CODEX_AUTOMATION_POLICY: ${{ github.workspace }}/consumer/${{ inputs.policy_path }}
+        run: python3 -I trusted/scripts/ci/codex_automation_worker.py prepare
+      - name: Run consented, custody-fenced guest passes
+        id: worker
+        if: steps.prepare.outputs.needed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CODEX_AUTOMATION_ENABLED: "true"
+          CODEX_AUTOMATION_PUBLISH: ${{ inputs.publish && 'true' || 'false' }}
+          CODEX_AUTOMATION_HOSTED: "1"
+          CODEX_AUTOMATION_POLICY: ${{ github.workspace }}/consumer/${{ inputs.policy_path }}
+          CODEX_AUTOMATION_DOPPLER_TOKEN: ${{ secrets.CODEX_AUTOMATION_DOPPLER_TOKEN }}
+        run: python3 -I trusted/scripts/ci/codex_automation_worker.py run
+      - name: Retain result and inference receipts
+        if: always() && steps.worker.outputs.artifact != ''
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ${{ steps.worker.outputs.artifact }}
+          path: ${{ runner.temp }}/codex-automation/result
+          if-no-files-found: error
+          retention-days: 30
+      - name: Retain inert autofix packet (no publication credential in this job)
+        if: steps.worker.outputs.packet != ''
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ${{ steps.worker.outputs.packet }}
+          path: ${{ runner.temp }}/codex-automation/packet
+          if-no-files-found: error
+          retention-days: 30
+      - name: Publish advisory outcome after retention
+        if: steps.worker.outputs.artifact != '' && success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CODEX_AUTOMATION_ENABLED: "true"
+          CODEX_AUTOMATION_HOSTED: "1"
+          CODEX_AUTOMATION_POLICY: ${{ github.workspace }}/consumer/${{ inputs.policy_path }}
+        run: python3 -I trusted/scripts/ci/codex_automation_worker.py publish
+
+  publish_fix:
+    name: Guarded autofix publication (separate credential)
+    needs: execute
+    if: >-
+      needs.execute.outputs.packet != '' &&
+      inputs.enabled && inputs.publish
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      pull-requests: read
+      issues: write
+    steps:
+      - name: Check out trusted publisher revision
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          repository: Manolii-org/ai-starter-pack
+          ref: ${{ inputs.pack_sha }}
+          path: trusted
+          persist-credentials: false
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /scripts/ci/autofix-publish.py
+            /scripts/ci/autofix-custody.sh
+      - name: Download inert packet
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: ${{ needs.execute.outputs.packet }}
+          path: ${{ runner.temp }}/autofix-candidate-data
+      - name: Native custody and hold admission
+        id: custody
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ needs.execute.outputs.pr_number }}
+          EXPECTED_HEAD: ${{ needs.execute.outputs.expected_head }}
+        run: bash trusted/scripts/ci/autofix-custody.sh
+      - name: Publish once with the separate credential
+        env:
+          READ_TOKEN: ${{ github.token }}
+          PUBLISH_TOKEN: ${{ secrets.CODEX_AUTOMATION_PUBLISH_TOKEN }}
+          PUBLICATION_ADMITTED: ${{ steps.custody.outputs.skip == 'false' }}
+          AUTOFIX_PACKET_DIR: ${{ runner.temp }}/autofix-candidate-data
+          PR_NUMBER: ${{ needs.execute.outputs.pr_number }}
+          EXPECTED_HEAD: ${{ needs.execute.outputs.expected_head }}
+          HEAD_REF: ${{ needs.execute.outputs.head_ref }}
+        run: python3 -I trusted/scripts/ci/autofix-publish.py

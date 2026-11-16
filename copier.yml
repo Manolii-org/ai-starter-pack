@@ -199,6 +199,10 @@ _exclude:
   - tests/test_codex_automation_patch.py
   - tests/test_codex_automation_receipts.py
   - tests/test_codex_automation_worker.py
+  - tests/test_codex_automation_hosted.py
+  # Pack-only: consumers call these reusables by pinned SHA, never a local copy.
+  - .github/workflows/codex-automation-request-reusable.yml
+  - .github/workflows/codex-automation-worker-reusable.yml
   # The pack's own leaf context manifest (master context governance); a rendered
   # instance must author its own, never inherit the template's identity.
   - /.ai/repo-context.yaml

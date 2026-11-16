@@ -592,6 +592,10 @@
         "scripts/ci/codex_automation_custody.py",
         "tests/test_codex_automation_request.py",
         "tests/test_codex_automation_custody.py",
+        ".github/workflows/codex-automation-request-reusable.yml",
+        ".github/workflows/codex-automation-worker-reusable.yml",
+        "tests/test_codex_automation_hosted.py",
+        "scripts/ci/codex_automation_hosted.py",
         "config/agent-checks.json"
       ],
       "tools": [
@@ -615,7 +619,8 @@
           "tests/test_codex_automation_worker.py",
           "tests/test_codex_automation_patch.py",
           "tests/test_codex_automation_request.py",
-          "tests/test_codex_automation_custody.py"
+          "tests/test_codex_automation_custody.py",
+          "tests/test_codex_automation_hosted.py"
         ]
       ],
       "ci_sources": [
