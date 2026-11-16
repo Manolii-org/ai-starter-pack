@@ -104,8 +104,16 @@ jobs:
             --userconfig /dev/null @openai/codex@0.163.0 >/dev/null
           binary="$RUNNER_TEMP/codex-npm/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex"
           test "$(head -c4 "$binary" | od -An -c | tr -d ' ')" = '177ELF'
+          # The controller refuses a CLI with any ancestor that is not root-owned
+          # or is group/world-writable (profile_cli_unprotected). Hosted images
+          # do not guarantee that for /opt, so pin the chain on this ephemeral
+          # runner (tool caches below /opt keep their own owners) and show it.
+          stat -c '%U:%G %a %n' / /opt || true
+          sudo chown root:root /opt
+          sudo chmod go-w / /opt
           sudo install -d -o root -g root -m 0755 /opt/codex-review /opt/codex-review/bin
           sudo install -o root -g root -m 0755 "$binary" /opt/codex-review/bin/codex
+          stat -c '%U:%G %a %n' / /opt /opt/codex-review /opt/codex-review/bin /opt/codex-review/bin/codex
           /opt/codex-review/bin/codex --version
       - name: Admit exact request
         id: prepare
