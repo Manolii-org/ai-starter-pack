@@ -328,3 +328,14 @@ def test_apt_can_read_the_build_ca_secret():
             )
             checked += 1
         assert checked, f"{name}: no apt RUN with proxy_ca mount was checked"
+
+
+def test_hosted_install_pins_a_root_owned_cli_path():
+    """account_probe refuses a CLI whose ancestors are not root-owned and write-protected."""
+    import yaml
+    flow = yaml.safe_load((Path(__file__).resolve().parents[1]
+                           / ".github/workflows/codex-automation-worker-reusable.yml").read_text())
+    steps = {s.get("name"): s for s in flow["jobs"]["execute"]["steps"]}
+    run = steps["Install the pinned native Codex CLI (root-owned)"]["run"]
+    assert "sudo chown root:root /opt" in run and "sudo chmod go-w / /opt" in run
+    assert run.index("chmod go-w") < run.index("/opt/codex-review/bin/codex --version")
