@@ -257,7 +257,7 @@ def cli_environment(home):
     }
 
 
-def account_probe(home, *, seconds=30):
+def account_probe(home, *, seconds=30, refresh=True):
     """Official CLI handles account read/refresh; no model turn is started."""
     installed = Path(CODEX).resolve(strict=True)
     for path in (Path(CODEX), *Path(CODEX).parents, installed, *installed.parents):
@@ -287,7 +287,7 @@ def account_probe(home, *, seconds=30):
             "params": {"clientInfo": {"name": "trusted_review", "version": "1"}},
         },
         {"method": "initialized"},
-        {"id": 2, "method": "account/read", "params": {"refreshToken": True}},
+        {"id": 2, "method": "account/read", "params": {"refreshToken": bool(refresh)}},
         {"id": 3, "method": "account/rateLimits/read"},
     ]
     replies = {}
@@ -393,6 +393,25 @@ def capacity(account, limits, assignment):
     return snapshot
 
 
+def access_expiry(auth):
+    """Expiry (epoch seconds) of the login's access token, or None if unreadable."""
+    try:
+        payload = auth["tokens"]["access_token"].split(".")[1]
+        expiry = json.loads(
+            base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4))
+        ).get("exp")
+    except (ValueError, IndexError, KeyError, TypeError, AttributeError):
+        return None
+    return expiry if type(expiry) is int else None
+
+
+def require_session_lifetime(auth):
+    """The refreshed access token must outlive one bounded run (25 minutes)."""
+    expiry = access_expiry(auth)
+    if expiry is None or expiry < int(time.time()) + 1500:
+        raise ProfileError("profile_session_expiry_unverified")
+
+
 @contextmanager
 def _session(assignment, repository, lane, *, wait_seconds, selector):
     """One quota owner, one refresh writer, all admitted roles/repositories.
@@ -429,15 +448,7 @@ def _session(assignment, repository, lane, *, wait_seconds, selector):
         # Read the refreshed file; never restore the initial seed or write to
         # the managed-executor/canary secret. Its session is independent.
         auth = read_auth(home, assignment)
-        try:
-            payload = auth["tokens"]["access_token"].split(".")[1]
-            expiry = json.loads(
-                base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4))
-            ).get("exp")
-            if type(expiry) is not int or expiry < int(time.time()) + 1500:
-                raise ValueError("short token")
-        except (ValueError, IndexError, KeyError) as exc:
-            raise ProfileError("profile_session_expiry_unverified") from exc
+        require_session_lifetime(auth)
         selector(repository, lane, reserved=assignment)
         yield auth, snapshot
     finally:

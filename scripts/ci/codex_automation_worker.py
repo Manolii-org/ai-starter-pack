@@ -34,6 +34,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
 import codex_automation_custody as custody
+import codex_automation_hosted as hosted
 import codex_automation_receipts as receipts
 import codex_automation_request as requests_
 import codex_review_profiles as profiles
@@ -56,8 +57,20 @@ MAX_PR_TITLE_BYTES = 1024
 MAX_PR_BODY_BYTES = 64 * 1024
 
 
+def _policy_path():
+    """Hosted consumers keep their policy in their own reviewed default branch;
+    the reusable controller passes that trusted checkout's path."""
+    override = os.environ.get("CODEX_AUTOMATION_POLICY", "")
+    if hosted.enabled() and override:
+        path = Path(override)
+        if not path.is_absolute() or path.is_symlink() or not path.is_file():
+            raise Incomplete("controller_policy_invalid")
+        return path
+    return CONFIG
+
+
 def policy():
-    value = json.loads(CONFIG.read_text(encoding="utf-8"))
+    value = json.loads(_policy_path().read_text(encoding="utf-8"))
     roster = value.get("roster")
     if (value.get("schema") != "codex-automation-worker/v1"
             or not isinstance(value.get("allowed_bases"), list) or not value["allowed_bases"]
@@ -241,8 +254,12 @@ def write_context(directory, document):
 def consent(target, roles):
     """Read-only consent/runner admission for every role before any claim."""
     assignments = {}
+    config = policy() if hosted.enabled() else None
     for role in roles:
-        assignments[role] = profiles.select_automation(target["repository"], role)
+        if config is not None:
+            assignments[role] = hosted.select(target["repository"], role, config)
+        else:
+            assignments[role] = profiles.select_automation(target["repository"], role)
     return assignments
 
 
@@ -279,10 +296,12 @@ def write_pr_meta(directory, meta):
 
 
 def execute(github, target, directory, *, run_id, run_attempt, workflow_sha, guest=run_guest,
-            session=profiles.automation_session, image_builder=build_image, source_loader=git_input,
+            session=None, image_builder=build_image, source_loader=git_input,
             pr_meta=None, deadline=None, checkpoint=None):
     """Return (result, receipt_rows). Never retries and never clears custody."""
     config = policy()
+    if session is None:
+        session = hosted.session if hosted.enabled() else profiles.automation_session
     rows = []
     try:
         assignments = consent(target, ("assessment", "judge"))
@@ -420,7 +439,7 @@ def autofix_stage(github, target, directory, config, publication, image, source,
     if admitted is not True:
         return {"outcome": "held", "reason": admitted}
     try:
-        assignment = profiles.select_automation(target["repository"], "autofix")
+        assignment = consent(target, ("autofix",))["autofix"]
     except profiles.ProfileError as exc:
         return {"outcome": "blocked_credentials", "reason": str(exc)}
     try:
@@ -567,9 +586,17 @@ def main(argv):
         _output(artifact=f"codex-automation-result-{target['pull_request']}-{target['head_sha']}")
         # Never an empty retained directory, even if execution fails before a pass.
         _checkpoint(out / "inference-receipts.jsonl", [])
+        credential = os.environ.pop("CODEX_AUTOMATION_DOPPLER_TOKEN", "")
         with tempfile.TemporaryDirectory(dir=state) as tmp:
             meta = state / "pr-meta.json"
-            result, rows = execute(github, target, Path(tmp), run_id=int(os.environ["GITHUB_RUN_ID"]),
+            if hosted.enabled():
+                try:
+                    hosted.configure(policy(), Path(tmp) / "codex-home", credential)
+                except profiles.ProfileError as exc:
+                    result, rows = {"state": "blocked_credentials", "reason": str(exc)}, []
+                    credential = None
+            if credential is not None:
+                result, rows = execute(github, target, Path(tmp), run_id=int(os.environ["GITHUB_RUN_ID"]),
                                    run_attempt=int(os.environ["GITHUB_RUN_ATTEMPT"]),
                                    workflow_sha=os.environ["GITHUB_WORKFLOW_SHA"],
                                    pr_meta=json.loads(meta.read_text(encoding="utf-8")) if meta.is_file() else None,

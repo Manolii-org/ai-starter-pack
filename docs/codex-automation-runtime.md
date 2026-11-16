@@ -248,3 +248,115 @@ The generic pack contains no consumer account or infrastructure bindings. Each
 consumer owns reviewed adoption and its private policy/customizations. Rollback
 retains all existing execution custody and never enables an alternate provider
 for a consumer whose policy forbids it.
+
+## GitHub-hosted mode (no dedicated host)
+
+Consumers can run the controller on GitHub-hosted runners by calling the pack's
+reusable workflows pinned to one reviewed pack commit. The account login stays in
+the consumer entity's own Doppler, so no self-hosted runner, host registry or
+root-owned consent files are needed. What changes, and what does not:
+
+| Guarantee | Host mode | Hosted mode |
+|---|---|---|
+| Whose account | Host registry `account_sha256` | Policy `consent.account_sha256`; the Doppler login must match it |
+| Owner consent | Root-owned `/etc/codex-review/automation-consents/` | `consent` in the consumer's default-branch policy (lands only through that repo's review) |
+| Trusted controller | Selected-workflow runner group | The caller `codex-automation-worker.yml` on the default branch, pinned to a pack SHA; controller code comes from that pack commit |
+| One refresh writer | Host flock + one session directory | The CLI refreshes in-run; a rotated login is written back only while Doppler still holds the login the run started from (lineage guard), and is read back |
+| Funding | Consent flags + live capacity probe | Unchanged |
+| PR source | Credential-free networkless container | Unchanged |
+
+Consumer files (replace `<PACK_SHA>` with the full SHA of the pinned release):
+
+```yaml
+# .github/workflows/codex-automation-request.yml
+name: Codex Automation Request
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+permissions:
+  contents: read
+concurrency:
+  group: codex-automation-request-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+jobs:
+  request:
+    if: vars.CODEX_AUTOMATION_ENABLED != 'false'
+    uses: Manolii-org/ai-starter-pack/.github/workflows/codex-automation-request-reusable.yml@<PACK_SHA>
+```
+
+```yaml
+# .github/workflows/codex-automation-worker.yml
+name: Codex Automation Worker
+on:
+  workflow_run: # zizmor: ignore[dangerous-triggers]
+    workflows: ["Codex Automation Request"]
+    types: [completed]
+permissions: {}
+concurrency:
+  group: codex-automation-${{ github.event.workflow_run.pull_requests[0].number || github.event.workflow_run.id }}-${{ github.event.workflow_run.head_sha }}
+  cancel-in-progress: false
+jobs:
+  worker:
+    if: vars.CODEX_AUTOMATION_ENABLED != 'false'
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+      issues: write
+      statuses: write
+    uses: Manolii-org/ai-starter-pack/.github/workflows/codex-automation-worker-reusable.yml@<PACK_SHA>
+    with:
+      pack_sha: <PACK_SHA>
+      enabled: ${{ vars.CODEX_AUTOMATION_ENABLED != 'false' }}
+      publish: ${{ vars.CODEX_AUTOMATION_PUBLISH == 'true' }}
+    secrets:
+      CODEX_AUTOMATION_DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN_CODEX }}
+      CODEX_AUTOMATION_PUBLISH_TOKEN: ${{ secrets.CODEX_AUTOMATION_PUBLISH_TOKEN }}
+```
+
+`.github/codex-automation.json` holds the controller policy fields of
+`scripts/ci/codex-automation-worker.json` plus:
+
+```json
+{
+  "consent": {
+    "schema": "codex-automation-hosted-consent/v1",
+    "owner": "<account owner>",
+    "account_sha256": "<sha256 of tokens.account_id>",
+    "roles": ["assessment", "judge"],
+    "repositories": ["<owner>/<repo>"],
+    "expires_at": 1798761600,
+    "revoked": false,
+    "purchased_credits_disabled": true,
+    "automatic_purchases_disabled": true
+  },
+  "credential": {
+    "doppler_project": "<project>",
+    "doppler_config": "<config>",
+    "secret": "CODEX_SUBSCRIPTION_AUTH_JSON"
+  }
+}
+```
+
+`CODEX_AUTOMATION_DOPPLER_TOKEN` is a Doppler service token scoped to exactly
+that config (the example reuses the consumer's existing `DOPPLER_TOKEN_CODEX`).
+A read/write token makes the run the refresh writer under the lineage guard; a
+read-only token works too, using the refreshed copy in memory and writing
+nothing back (the same behaviour as the existing advisory review). Committing
+the caller files activates the controller; setting the repository variable
+`CODEX_AUTOMATION_ENABLED=false` stops both jobs immediately. Add `"autofix"`
+to `roles` and set `CODEX_AUTOMATION_PUBLISH=true` only when guarded repair is
+wanted.
+
+Hosted-mode limits (accepted):
+
+- Logins are refreshed only within an hour of expiry, about once per token
+  lifetime, and a rotated login is written back even if a later check refuses
+  the run. Two runs that refresh the same login in the same minute can still
+  race; the lineage guard keeps the newer stored login, and a run whose
+  refresh lost the race holds rather than guessing.
+- Several consumers may read one Doppler login (for example, an account that
+  funds more than one repository). Only a read/write token writes back.
+- The trusted controller is the caller `codex-automation-worker.yml` run by
+  `workflow_run`, which GitHub always resolves on the default branch; custody
+  re-authenticates that run. Keep `pack_sha` equal to the `uses:` SHA.
