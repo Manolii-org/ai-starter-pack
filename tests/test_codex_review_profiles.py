@@ -356,6 +356,15 @@ def test_a_credit_balance_never_carries_a_run_past_included_usage(policy, raw):
         profiles.capacity({"account": {"type": "chatgpt"}}, credit_balance(**raw), bound)
 
 
+@pytest.mark.parametrize("value", [0, 1, 0.0, 1.0, "false", None])
+def test_a_non_boolean_credit_state_is_never_admitted(policy, value):
+    data = limits()
+    data["rateLimits"]["credits"]["hasCredits"] = value
+    bound = {**profiles.select("example/project", "code"), "credit_balance_allowed": True}
+    with pytest.raises(profiles.ProfileError, match="funding_unverified"):
+        profiles.capacity({"account": {"type": "chatgpt"}}, data, bound)
+
+
 def test_a_credit_balance_still_stops_below_the_window_ceiling(policy):
     bound = {**profiles.select("example/project", "code"), "credit_balance_allowed": True}
     data = credit_balance()

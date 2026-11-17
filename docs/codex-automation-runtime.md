@@ -364,8 +364,12 @@ same reason, nothing else may read and refresh the same stored login.
 
 An account that holds purchased credits is refused (`profile_funding_unverified`)
 unless the consent adds `"credit_balance_allowed": true`. With that grant a run
-still stays on included usage: it stops below 80% of the usage window and as
-soon as the provider reports a reached limit or spend control. A plan that
+is admitted only while included usage remains: it is refused when a usage
+window is at 80% or more, or when the provider reports a reached limit or spend
+control. These are admission-time checks, not per-turn enforcement; a run that
+starts below the ceiling is bounded by `max_requests`/`max_seconds`, and keeping
+the balance untouched beyond that margin relies on the owner's provider-side
+spend settings. A plan that
 reports no secondary (weekly) window is treated as having none. Committing
 the caller files activates the controller; setting the repository variable
 `CODEX_AUTOMATION_ENABLED=false` stops later invocations of both jobs. It does

@@ -373,13 +373,16 @@ def capacity(account, limits, assignment):
     # zero balance does not verify auto-purchase settings: owner controls above
     # remain required, and receipts do not claim provider-side spend enforcement.
     has_credits = credits.get("hasCredits")
-    if has_credits not in (True, False) or credits.get("unlimited") is not False:
+    if type(has_credits) is not bool or credits.get("unlimited") is not False:
         raise ProfileError("profile_funding_unverified")
     if has_credits:
         # A purchased balance is admitted only when the owner's consent says so.
-        # Runs then stay on included usage: they stop below the window ceiling
-        # below, and at once if the provider reports a reached limit or spend
-        # control, so the balance is never what a run draws on.
+        # This is an admission-time check, not per-turn enforcement: a run is
+        # refused when the provider already reports a reached limit or spend
+        # control, or (below) when a usage window is at 80% or more. A run that
+        # starts below that ceiling is bounded by max_requests/max_seconds, not
+        # re-checked; keeping the balance untouched beyond that margin relies on
+        # the owner's provider-side spend settings.
         if assignment.get("credit_balance_allowed") is not True:
             raise ProfileError("profile_funding_unverified")
         if raw.get("spendControlReached") is not False or raw.get("rateLimitReachedType") is not None:
