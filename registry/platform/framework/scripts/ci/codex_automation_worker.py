@@ -348,6 +348,11 @@ def execute(github, target, directory, *, run_id, run_attempt, workflow_sha, gue
         # not the completed producer run already authenticated by admission.
         custody.claim(github, {**target, "operation": "assessment"}, producer_run_id=run_id,
                       workflow_sha=workflow_sha, enabled=True)
+    except custody.ClaimUnconfirmed as exc:
+        # This run wrote a pending row it could not confirm: hold, but record
+        # it so the always-run release step does not leave it pending.
+        _record_claim("assessment")
+        return {"state": "held", "reason": str(exc)}, rows
     except custody.CustodyHold as exc:
         return {"state": "held", "reason": str(exc)}, rows
     _record_claim("assessment")
@@ -482,6 +487,11 @@ def autofix_stage(github, target, directory, config, publication, image, source,
     try:
         custody.claim(github, {**target, "operation": "autofix"}, producer_run_id=run_id,
                       workflow_sha=workflow_sha, enabled=True)
+    except custody.ClaimUnconfirmed as exc:
+        # This run wrote a pending row it could not confirm: hold, but record
+        # it so the always-run release step does not leave it pending.
+        _record_claim("autofix")
+        return {"outcome": "held", "reason": str(exc)}
     except custody.CustodyHold as exc:
         return {"outcome": "held", "reason": str(exc)}
     _record_claim("autofix")
