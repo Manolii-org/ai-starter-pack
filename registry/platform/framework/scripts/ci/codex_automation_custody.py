@@ -10,6 +10,7 @@ This helper is not a distributed CAS or a lease and never expires a claim.
 from __future__ import annotations
 
 import re
+import time
 
 from codex_review_profiles import AUTOMATION_ROLES
 
@@ -20,6 +21,20 @@ BOT_ID = 41898282
 
 class CustodyHold(ValueError):
     """A fixed category; missing or unknown state never permits replay."""
+
+
+class ClaimUnconfirmed(CustodyHold):
+    """The claim write was acknowledged with an ID but could not be confirmed.
+
+    The run still holds (no model work), but it did write a pending row, so the
+    caller must record the claim for release instead of leaving it pending.
+    """
+
+
+# GitHub's status list can lag a just-acknowledged write; re-read briefly before
+# treating the claim as unconfirmed. Module-level so tests can avoid sleeping.
+READBACK_DELAYS = (1, 2, 3, 5)
+_sleep = time.sleep
 
 
 def _integer(value):
@@ -135,20 +150,29 @@ def claim(github, target, *, producer_run_id, workflow_sha, enabled: bool):
     identity = result["id"]
     # Read back the durable row. A lost response or unreadable follow-up holds;
     # no in-memory flag or expiring artifact substitutes for native custody.
-    recorded = github.pages(f"/commits/{target['head_sha']}/statuses")
-    if not isinstance(recorded, list):
-        raise CustodyHold("execution_claim_ack_unknown")
+    # The list can lag the acknowledged write, so re-read briefly before holding.
+    for delay in (0, *READBACK_DELAYS):
+        if delay:
+            _sleep(delay)
+        recorded = github.pages(f"/commits/{target['head_sha']}/statuses")
+        if not isinstance(recorded, list):
+            continue
+        found = [
+            row
+            for row in recorded
+            if isinstance(row, dict)
+            and type(row.get("id")) is int
+            and row["id"] == identity
+        ]
+        if found:
+            break
+    else:
+        # This run wrote the pending row; it holds, and must release it.
+        raise ClaimUnconfirmed("execution_claim_ack_unknown")
     relevant = [
         row
         for row in recorded
         if isinstance(row, dict) and row.get("context") == context
-    ]
-    found = [
-        row
-        for row in recorded
-        if isinstance(row, dict)
-        and type(row.get("id")) is int
-        and row["id"] == identity
     ]
     if (
         len(found) != 1
@@ -156,7 +180,7 @@ def claim(github, target, *, producer_run_id, workflow_sha, enabled: bool):
         or any(found[0].get(k) != v for k, v in payload.items())
         or _mapping(found[0].get("creator")).get("id") != BOT_ID
     ):
-        raise CustodyHold("execution_claim_ack_unknown")
+        raise ClaimUnconfirmed("execution_claim_ack_unknown")
     return {
         "status_id": identity,
         "context": context,

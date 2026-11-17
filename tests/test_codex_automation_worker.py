@@ -124,6 +124,26 @@ def test_prior_custody_holds_without_session_or_guest(harness, monkeypatch):
     assert result["state"] == "held" and not any(e[0] in {"session", "guest"} for e in events)
 
 
+def test_an_unconfirmed_claim_holds_but_is_recorded_for_release(harness, monkeypatch, tmp_path):
+    run, events, _, _ = harness
+    def unconfirmed(*a, **k):
+        raise worker.custody.ClaimUnconfirmed("execution_claim_ack_unknown")
+    monkeypatch.setattr(worker.custody, "claim", unconfirmed)
+    result, rows = run()
+    assert result == {"state": "held", "reason": "execution_claim_ack_unknown"} and rows == []
+    assert not any(e[0] in {"session", "guest"} for e in events)
+    assert worker._claimed() == ["assessment"]
+
+
+def test_a_plain_custody_hold_records_no_claim(harness, monkeypatch):
+    run, _, _, _ = harness
+    def held(*a, **k):
+        raise worker.custody.CustodyHold("execution_already_claimed")
+    monkeypatch.setattr(worker.custody, "claim", held)
+    run()
+    assert worker._claimed() == []
+
+
 def test_held_assessment_never_runs_the_judge(harness):
     run, events, outputs, _ = harness
     outputs["assessment"] = {"status": "held", "reason": "stage_failed:run-specialists.py"}

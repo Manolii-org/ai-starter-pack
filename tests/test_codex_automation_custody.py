@@ -64,6 +64,13 @@ class GitHub:
         return [] if self.lose_readback and self.writes else copy.deepcopy(self.rows)
 
 
+@pytest.fixture(autouse=True)
+def no_sleep(monkeypatch):
+    slept = []
+    monkeypatch.setattr(custody, "_sleep", slept.append)
+    return slept
+
+
 def claim(github, *, enabled=True):
     return custody.claim(
         github, target(), producer_run_id=10, workflow_sha=SOURCE, enabled=enabled
@@ -111,6 +118,39 @@ def test_disabled_new_execution_preserves_existing_history_check_but_makes_no_cl
     github = GitHub()
     assert claim(github, enabled=False) is None
     assert not github.writes
+
+
+def test_a_lagging_status_list_is_re_read_before_holding(no_sleep):
+    github = GitHub()
+    lagging = {"reads": 0}
+    pages = github.pages
+
+    def lagged(route):
+        lagging["reads"] += 1
+        # The first two reads after the write do not yet show the new row.
+        return [] if github.writes and lagging["reads"] <= 3 else pages(route)
+
+    github.pages = lagged
+    result = claim(github)
+    assert result["status_id"] == 25 and len(github.writes) == 1
+    assert no_sleep == list(custody.READBACK_DELAYS[:2])
+
+
+@pytest.mark.parametrize("lost", ["lose_readback", "race"])
+def test_an_acknowledged_but_unconfirmed_claim_is_marked_for_release(lost, no_sleep):
+    github = GitHub()
+    setattr(github, lost, True)
+    with pytest.raises(custody.ClaimUnconfirmed, match="ack_unknown"):
+        claim(github)
+    assert len(github.writes) == 1
+
+
+def test_an_unacknowledged_write_is_not_marked_for_release():
+    github = GitHub()
+    github.lose_ack = True
+    with pytest.raises(custody.CustodyHold, match="ack_unknown") as raised:
+        claim(github)
+    assert type(raised.value) is custody.CustodyHold
 
 
 @pytest.mark.parametrize("lost", ["lose_ack", "lose_readback", "race"])
