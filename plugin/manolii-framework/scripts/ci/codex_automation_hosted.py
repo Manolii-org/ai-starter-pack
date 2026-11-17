@@ -165,6 +165,7 @@ def select(repository: str, role: str, policy: dict) -> dict:
         or repository not in [r.lower() for r in consent["repositories"] if isinstance(r, str)]
         or consent.get("purchased_credits_disabled") is not True
         or consent.get("automatic_purchases_disabled") is not True
+        or consent.get("credit_balance_allowed", False) not in (True, False)
     ):
         raise ProfileError("profile_consent_unavailable")
     assignment = {
@@ -177,6 +178,10 @@ def select(repository: str, role: str, policy: dict) -> dict:
         "controller_workflow": workflow,
         "credential": coordinates(policy),
     }
+    if consent.get("credit_balance_allowed") is True:
+        # The owner admits an account that holds purchased credits; capacity()
+        # still keeps every run on included usage.
+        assignment["credit_balance_allowed"] = True
     assignment["assignment_sha256"] = profiles.digest(assignment)
     return assignment
 
