@@ -154,7 +154,12 @@ def claim(github, target, *, producer_run_id, workflow_sha, enabled: bool):
     for delay in (0, *READBACK_DELAYS):
         if delay:
             _sleep(delay)
-        recorded = github.pages(f"/commits/{target['head_sha']}/statuses")
+        try:
+            recorded = github.pages(f"/commits/{target['head_sha']}/statuses")
+        except Exception:  # noqa: BLE001 - any read failure after an acknowledged write
+            # The write was acknowledged; an unreadable follow-up must still end
+            # in ClaimUnconfirmed so the worker records the claim for release.
+            continue
         if not isinstance(recorded, list):
             continue
         found = [
