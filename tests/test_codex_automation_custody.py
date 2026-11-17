@@ -145,6 +145,36 @@ def test_an_acknowledged_but_unconfirmed_claim_is_marked_for_release(lost, no_sl
     assert len(github.writes) == 1
 
 
+def test_a_read_back_error_after_an_acknowledged_write_is_marked_for_release(no_sleep):
+    github = GitHub()
+    pages = github.pages
+
+    def failing(route):
+        if github.writes:
+            raise RuntimeError("status list read failed")
+        return pages(route)
+
+    github.pages = failing
+    with pytest.raises(custody.ClaimUnconfirmed, match="ack_unknown"):
+        claim(github)
+    assert len(github.writes) == 1 and no_sleep == list(custody.READBACK_DELAYS)
+
+
+def test_a_read_back_error_that_clears_still_confirms_the_claim(no_sleep):
+    github = GitHub()
+    pages, calls = github.pages, {"n": 0}
+
+    def flaky(route):
+        if github.writes:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("transient")
+        return pages(route)
+
+    github.pages = flaky
+    assert claim(github)["status_id"] == 25
+
+
 def test_an_unacknowledged_write_is_not_marked_for_release():
     github = GitHub()
     github.lose_ack = True
