@@ -372,11 +372,25 @@ def capacity(account, limits, assignment):
     # Unknown credit state is not evidence of included-only funding. Even a
     # zero balance does not verify auto-purchase settings: owner controls above
     # remain required, and receipts do not claim provider-side spend enforcement.
-    if credits.get("hasCredits") is not False or credits.get("unlimited") is not False:
+    has_credits = credits.get("hasCredits")
+    if has_credits not in (True, False) or credits.get("unlimited") is not False:
         raise ProfileError("profile_funding_unverified")
+    if has_credits:
+        # A purchased balance is admitted only when the owner's consent says so.
+        # Runs then stay on included usage: they stop below the window ceiling
+        # below, and at once if the provider reports a reached limit or spend
+        # control, so the balance is never what a run draws on.
+        if assignment.get("credit_balance_allowed") is not True:
+            raise ProfileError("profile_funding_unverified")
+        if raw.get("spendControlReached") is not False or raw.get("rateLimitReachedType") is not None:
+            raise ProfileError("profile_capacity_exhausted")
     snapshot = {"observed_at": int(time.time()), "windows": {}}
     for key in ("primary", "secondary"):
         window = raw.get(key)
+        if key == "secondary" and window is None:
+            # Some plans report no secondary (weekly) window; that is absence of
+            # a limit, not an exhausted one. The primary window stays required.
+            continue
         if not isinstance(window, dict):
             raise ProfileError("profile_capacity_unknown")
         used = window.get("usedPercent")

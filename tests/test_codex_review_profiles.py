@@ -314,13 +314,54 @@ def test_quota_and_funding_fail_closed(policy, change, reason):
     if change == "reset":
         data["rateLimits"]["secondary"]["resetsAt"] = 0
     if change == "missing":
-        del data["rateLimits"]["secondary"]
+        del data["rateLimits"]["primary"]
     if change == "permission":
         data["ordinaryUsageAllowed"] = False
     if change == "api_key":
         account["account"]["type"] = "apiKey"
     with pytest.raises(profiles.ProfileError, match=reason):
         profiles.capacity(account, data, profiles.select("example/project", "code"))
+
+
+def test_a_plan_without_a_secondary_window_is_not_exhausted(policy):
+    data = limits()
+    data["rateLimits"]["secondary"] = None
+    snapshot = profiles.capacity({"account": {"type": "chatgpt"}}, data, profiles.select("example/project", "code"))
+    assert set(snapshot["windows"]) == {"primary"}
+
+
+def credit_balance(**raw):
+    data = limits()
+    data["rateLimits"]["credits"] = {"hasCredits": True, "unlimited": False, "balance": "12.5"}
+    data["rateLimits"].update({"spendControlReached": False, "rateLimitReachedType": None}, **raw)
+    return data
+
+
+def test_a_credit_balance_runs_on_included_usage_only_with_owner_consent(policy):
+    account = {"account": {"type": "chatgpt"}}
+    bound = profiles.select("example/project", "code")
+    with pytest.raises(profiles.ProfileError, match="funding_unverified"):
+        profiles.capacity(account, credit_balance(), bound)
+    snapshot = profiles.capacity(account, credit_balance(), {**bound, "credit_balance_allowed": True})
+    assert snapshot["windows"]["primary"]["used_percent"] == 10
+
+
+@pytest.mark.parametrize("raw", [
+    {"spendControlReached": True}, {"spendControlReached": None},
+    {"rateLimitReachedType": "primary"},
+])
+def test_a_credit_balance_never_carries_a_run_past_included_usage(policy, raw):
+    bound = {**profiles.select("example/project", "code"), "credit_balance_allowed": True}
+    with pytest.raises(profiles.ProfileError, match="capacity_exhausted"):
+        profiles.capacity({"account": {"type": "chatgpt"}}, credit_balance(**raw), bound)
+
+
+def test_a_credit_balance_still_stops_below_the_window_ceiling(policy):
+    bound = {**profiles.select("example/project", "code"), "credit_balance_allowed": True}
+    data = credit_balance()
+    data["rateLimits"]["primary"]["usedPercent"] = 80
+    with pytest.raises(profiles.ProfileError, match="capacity_exhausted"):
+        profiles.capacity({"account": {"type": "chatgpt"}}, data, bound)
 
 
 def test_real_cross_process_lock_survives_profile_aliases_and_releases(

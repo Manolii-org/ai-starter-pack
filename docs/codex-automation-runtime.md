@@ -354,11 +354,19 @@ jobs:
 }
 ```
 
-`CODEX_AUTOMATION_DOPPLER_TOKEN` is a Doppler service token scoped to exactly
-that config (the example reuses the consumer's existing `DOPPLER_TOKEN_CODEX`).
-A read/write token makes the run the refresh writer under the lineage guard; a
-read-only token works too, using the refreshed copy in memory and writing
-nothing back (the same behaviour as the existing advisory review). Committing
+`CODEX_AUTOMATION_DOPPLER_TOKEN` is a read/write Doppler service token scoped
+to exactly that config, which should hold only the login (not a branch of a
+config holding other secrets: a branch inherits them all). It makes the run the
+refresh writer under the lineage guard. Do not use a read-only token: a run
+that refreshes spends the stored refresh token and cannot save its replacement,
+so the stored login dies at the next refresh (`refresh_token_reused`). For the
+same reason, nothing else may read and refresh the same stored login.
+
+An account that holds purchased credits is refused (`profile_funding_unverified`)
+unless the consent adds `"credit_balance_allowed": true`. With that grant a run
+still stays on included usage: it stops below 80% of the usage window and as
+soon as the provider reports a reached limit or spend control. A plan that
+reports no secondary (weekly) window is treated as having none. Committing
 the caller files activates the controller; setting the repository variable
 `CODEX_AUTOMATION_ENABLED=false` stops later invocations of both jobs. It does
 not cancel a worker run that has already started (that run keeps its own

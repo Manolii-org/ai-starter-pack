@@ -54,11 +54,20 @@ def test_owner_consent_in_the_default_branch_policy_admits_the_role(controller):
 @pytest.mark.parametrize("change", [
     {"expires_at": 1}, {"revoked": True}, {"roles": ["judge"]}, {"repositories": ["other/repo"]},
     {"purchased_credits_disabled": False}, {"automatic_purchases_disabled": None},
-    {"account_sha256": "x"}, {"schema": "other"}, {"owner": " "},
+    {"account_sha256": "x"}, {"schema": "other"}, {"owner": " "}, {"credit_balance_allowed": "yes"},
 ])
 def test_missing_or_weakened_consent_is_refused(controller, change):
     with pytest.raises(profiles.ProfileError, match="consent_unavailable"):
         hosted.select(REPO, "assessment", policy(**change))
+
+
+def test_credit_balance_admission_is_carried_only_when_the_owner_grants_it(controller):
+    assert "credit_balance_allowed" not in hosted.select(REPO, "assessment", policy())
+    assert "credit_balance_allowed" not in hosted.select(REPO, "assessment", policy(credit_balance_allowed=False))
+    granted = hosted.select(REPO, "assessment", policy(credit_balance_allowed=True))
+    assert granted["credit_balance_allowed"] is True
+    # The grant is part of the bound assignment, not a side channel.
+    assert granted["assignment_sha256"] != hosted.select(REPO, "assessment", policy())["assignment_sha256"]
 
 
 def test_only_the_default_branch_worker_controller_is_admitted(monkeypatch):
