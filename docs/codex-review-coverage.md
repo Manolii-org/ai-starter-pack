@@ -189,7 +189,10 @@ existing deployment/promotion/merge controls and entity isolation.
 ## Subscription protocol compatibility
 
 Both pinned executables explicitly use `gpt-6.2-sol`; the trusted broker rejects
-other model names and the tool receipt records the model. The subscription
+other model names and the tool receipt records the model. The container gives the
+embedded Security SDK that model's bundled profile from the pinned standalone CLI.
+The profile is read locally with refresh disabled. This keeps the embedded SDK on
+the code-mode tool protocol already enforced by the broker. The subscription
 service may label a completed Responses SSE body `text/plain`. The broker
 normalizes that label only after validating a completed Responses event stream;
 arbitrary text, HTML and partial/error streams do not qualify. Provider retries
