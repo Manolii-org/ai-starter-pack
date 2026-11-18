@@ -177,8 +177,8 @@ def main():
     relay = http.server.HTTPServer(("127.0.0.1", 8123), Relay)
     threading.Thread(target=relay.serve_forever, daemon=True).start()
     config = [
-        'model="gpt-6.1-sol"',
-        'review_model="gpt-6.1-sol"',
+        'model="gpt-6.2-sol"',
+        'review_model="gpt-6.2-sol"',
         'model_reasoning_effort="' + reasoning + '"',
         'model_provider="review"',
         'model_providers.review={name="review",base_url="http://127.0.0.1:8123/v1",wire_api="responses",requires_openai_auth=false,supports_websockets=false,request_max_retries=0,stream_max_retries=0}',

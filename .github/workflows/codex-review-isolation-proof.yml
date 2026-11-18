@@ -30,7 +30,7 @@ jobs:
       - name: Install pinned CLI without lifecycle scripts
         run: >- # zizmor: ignore[adhoc-packages]
           npm install --prefix "$RUNNER_TEMP/isolation-cli" --no-save --ignore-scripts
-          --registry https://registry.npmjs.org/ --userconfig /dev/null @openai/codex@0.163.0
+          --registry https://registry.npmjs.org/ --userconfig /dev/null @openai/codex@0.170.0
       - name: Enable sandbox namespaces on this credential-free ephemeral runner
         run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - name: Prove private file, symlink, proc and network denial

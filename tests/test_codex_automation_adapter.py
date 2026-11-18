@@ -155,7 +155,7 @@ def test_unknown_transport_outcome_is_not_replayed(mounted, monkeypatch):
 def test_real_guest_unix_seam_ignores_ambient_legacy_credentials(mounted, monkeypatch, tmp_path):
     # The HTTP peer is a fixture, not an authenticated provider or qualified host.
     requests = []
-    response = {"object": "response", "status": "completed", "model": "gpt-6.1-sol", "output": [{
+    response = {"object": "response", "status": "completed", "model": "gpt-6.2-sol", "output": [{
         "type": "message", "role": "assistant", "status": "completed",
         "content": [{"type": "output_text", "text": "complete fixture result"}]}],
         "usage": {"input_tokens": 12, "output_tokens": 7, "total_tokens": 19}}
@@ -186,7 +186,7 @@ def test_real_guest_unix_seam_ignores_ambient_legacy_credentials(mounted, monkey
             thread.join(timeout=2)
     assert len(requests) == 1
     path, headers, body = requests[0]
-    assert path == "/v1/responses" and body["model"] == "gpt-6.1-sol"
+    assert path == "/v1/responses" and body["model"] == "gpt-6.2-sol"
     assert body["tools"] == [] and body["input"][0]["content"][0]["text"] == "complete untrusted input"
     assert not {"authorization", "x-api-key"} & {k.lower() for k in headers}
 

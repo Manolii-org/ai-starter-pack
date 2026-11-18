@@ -159,7 +159,7 @@ inspection instead of restarting the worker/recovery cycle.
 
 ## Limits and operating checks
 
-The code CLI is pinned to 0.163.0. Security CLI 0.2.0 retains its exact embedded
+The code CLI is pinned to 0.170.0. Security CLI 0.2.0 retains its exact embedded
 Codex/SDK 0.162.0-alpha.15 closure. Do not force the standalone code CLI version
 into the Security SDK or assume one runtime's probe certifies the other.
 
@@ -188,7 +188,7 @@ existing deployment/promotion/merge controls and entity isolation.
 
 ## Subscription protocol compatibility
 
-Both pinned executables explicitly use `gpt-6.1-sol`; the trusted broker rejects
+Both pinned executables explicitly use `gpt-6.2-sol`; the trusted broker rejects
 other model names and the tool receipt records the model. The subscription
 service may label a completed Responses SSE body `text/plain`. The broker
 normalizes that label only after validating a completed Responses event stream;
