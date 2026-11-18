@@ -566,7 +566,7 @@ def destination(root: Path, logical: str, layout: bool) -> Path:
     return root / logical
 
 
-def validate_provenance(value: dict):
+def validate_provenance(value: dict, root: Path):
     if (not isinstance(value, dict) or set(value) not in (
             {"schema", "source", "files", "recipes"}, {"schema", "source", "files", "recipes", "layout"})
             or value.get("schema") != "agent-validation-source/v1"
@@ -599,14 +599,10 @@ def validate_provenance(value: dict):
         raise ValueError("malformed alias provenance")
     for alias, entry in record["aliases"].items():
         raw = b"../.github/skills"
-        # The blob id uses the repository's object format: 40 hex digits for
-        # SHA-1 repositories, 64 for SHA-256. Integrity also binds SHA-256.
-        blob = entry.get("blob") if isinstance(entry, dict) else None
-        header = b"blob " + str(len(raw)).encode() + b"\0" + raw
-        if isinstance(blob, str) and len(blob) == 64:
-            oid = hashlib.sha256(header).hexdigest()
-        else:
-            oid = hashlib.sha1(header, usedforsecurity=False).hexdigest()
+        # Git owns its object-format compatibility; content integrity also
+        # binds SHA-256 below. Hash raw link bytes without filters or writes.
+        oid = local_git(root, "hash-object", "--no-filters", "--stdin",
+                        input_data=raw).decode().strip()
         if entry != {"mode": "120000", "blob": oid, "target": raw.decode(), "sha256": digest(raw)}:
             raise ValueError(f"malformed alias provenance: {alias}")
     expected = {name: {"canonical": str(destination(Path("/"), name, True)).removeprefix("/"),
@@ -742,7 +738,7 @@ def _build_plan(args, plan: OutputPlan, *, requested_root: Path, recipe_path: Pa
     previous = None
     if explicit and receipt_path.exists():
         previous = strict_json(plan.read(receipt_path))
-        validate_provenance(previous)
+        validate_provenance(previous, root)
         if "layout" in previous and any(previous["layout"][key] != context[key]
                                         for key in ("layout_file", "aliases")):
             raise ValueError("installed layout provenance does not match its tracked owner contract")
@@ -775,7 +771,7 @@ def _build_plan(args, plan: OutputPlan, *, requested_root: Path, recipe_path: Pa
         context["destinations"] = {name: {"canonical": destination(root, name, True).relative_to(root).as_posix(),
                                           "sha256": value} for name, value in hashes.items()}
         provenance["layout"] = context
-    validate_provenance(provenance)
+    validate_provenance(provenance, root)
     plan.add(receipt_path, (json.dumps(provenance, indent=2) + "\n").encode(), "provenance")
     # Capture every generator input before it reads owner prose. The generator
     # retains its own narrow secondary CLAUDE file-alias exception.
