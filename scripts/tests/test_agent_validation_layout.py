@@ -413,7 +413,12 @@ def test_sha256_repository_provenance_is_accepted_on_rerun(producers, tmp_path):
 def test_alias_provenance_uses_native_raw_blob_ids(tmp_path, object_format):
     root = tmp_path / "native-objects"
     root.mkdir()
-    git(root, "init", "-q", "--object-format=" + object_format)
+    try:
+        git(root, "init", "-q", "--object-format=" + object_format)
+    except subprocess.CalledProcessError:
+        if object_format != "sha256":
+            raise
+        pytest.skip("git without SHA-256 repository support")
     marker = root / "filter-executed"
     git(root, "config", "filter.hostile.clean", "touch " + str(marker))
     git(root, "config", "filter.hostile.required", "true")
