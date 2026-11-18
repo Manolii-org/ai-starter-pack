@@ -168,20 +168,13 @@ def test_snapshot_loader_rejects_another_module_name(tmp_path):
         loader.get_code("another")
 
 
-def test_alias_git_identity_declares_nonsecurity_sha1(producers, consumer, monkeypatch):
+def test_alias_git_identity_works_without_python_sha1(producers, consumer, monkeypatch):
     module = imported(producers["source"][0])
-    original = module.hashlib.sha1
-    calls = []
-
-    def fips_sha1(data, **kwargs):
-        if kwargs.get("usedforsecurity") is not False:
-            raise ValueError("security SHA-1 unavailable in synthetic FIPS host")
-        calls.append(kwargs)
-        return original(data, **kwargs)
+    def fips_sha1(*args, **kwargs):
+        raise ValueError("Python SHA-1 unavailable in synthetic FIPS host")
 
     monkeypatch.setattr(module.hashlib, "sha1", fips_sha1)
     assert module.main(["--repo-root", str(consumer), "--layout", LAYOUT_NAME]) == 0
-    assert calls and all(value == {"usedforsecurity": False} for value in calls)
     record = json.loads((consumer / RECEIPT).read_text())
     raw = b"../.github/skills"
     expected = subprocess.check_output(["git", "hash-object", "--stdin"], cwd=consumer,
@@ -414,6 +407,45 @@ def test_sha256_repository_provenance_is_accepted_on_rerun(producers, tmp_path):
     commit(root, "install")
     result = invoke(source, root)
     assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("object_format", ["sha1", "sha256"])
+def test_alias_provenance_uses_native_raw_blob_ids(tmp_path, object_format):
+    root = tmp_path / "native-objects"
+    root.mkdir()
+    try:
+        git(root, "init", "-q", "--object-format=" + object_format)
+    except subprocess.CalledProcessError:
+        if object_format != "sha256":
+            raise
+        pytest.skip("git without SHA-256 repository support")
+    marker = root / "filter-executed"
+    git(root, "config", "filter.hostile.clean", "touch " + str(marker))
+    git(root, "config", "filter.hostile.required", "true")
+    (root / ".gitattributes").write_text("* filter=hostile\n")
+    module = imported(ROOT)
+    raw = b"../.github/skills"
+    oid = subprocess.check_output(
+        ["git", "hash-object", "--no-filters", "--stdin"], cwd=root, env=ENV, input=raw
+    ).decode().strip()
+    value = {"schema": "agent-validation-source/v1", "source": "ai-starter-pack",
+             "files": {name: "a" * 64 for name in NAMES}, "recipes": "repository-owned"}
+    value["layout"] = {
+        "schema": "agent-validation-layout-record/v1",
+        "source": {"commit": "b" * len(oid), "subdir": ".",
+                   "bundle_sha256": module.digest(module.encoded(value["files"]))},
+        "layout_file": {"path": LAYOUT_NAME, "mode": "100644", "blob": oid, "sha256": "c" * 64},
+        "aliases": {name: {"mode": "120000", "blob": oid, "target": raw.decode(),
+                           "sha256": module.digest(raw)} for name in LAYOUT["aliases"]},
+        "destinations": {name: {"canonical": str(module.destination(Path("/"), name, True)).removeprefix("/"),
+                                "sha256": value["files"][name]} for name in NAMES}}
+    objects = snapshot(root / ".git/objects")
+    module.validate_provenance(value, root)
+    assert not marker.exists()
+    assert snapshot(root / ".git/objects") == objects
+    value["layout"]["aliases"][".cursor/skills"]["blob"] = "0" * len(oid)
+    with pytest.raises(ValueError, match="malformed alias provenance"):
+        module.validate_provenance(value, root)
 
 
 def test_conflicting_output_plan_refuses_before_writes(producers, consumer, monkeypatch):
