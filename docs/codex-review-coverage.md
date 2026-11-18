@@ -69,7 +69,7 @@ The dormant default uses `personal_profiles`: each team member authorises their
 own account. Protected host policy selects repo first, then organisation, with
 no cross-organisation/default account fallback. See
 [owner onboarding, nomination and activation](codex-personal-review-profiles.md).
-The pinned code CLI uses GPT-6.1-Sol at medium for ordinary code, xhigh for
+The pinned code CLI uses GPT-6.2-Sol at medium for ordinary code, xhigh for
 escalated code and every security review. Account changes preserve completed
 review evidence; queued work rechecks its reserved consent and assignment.
 
