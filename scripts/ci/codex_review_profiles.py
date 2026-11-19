@@ -208,7 +208,7 @@ def private_home(account):
     return home
 
 
-def read_auth(home, assignment):
+def read_auth(home, assignment, *, require_refresh=True):
     path = home / "auth.json"
     info = path.lstat()
     if (
@@ -222,12 +222,16 @@ def read_auth(home, assignment):
     if not isinstance(auth, dict) or not isinstance(auth.get("tokens"), dict):
         raise ProfileError("profile_account_mismatch")
     tokens = auth.get("tokens") or {}
+    required = ("account_id", "access_token", "id_token")
+    if require_refresh:
+        required += ("refresh_token",)
     if (
         auth.get("auth_mode") != "chatgpt"
         or auth.get("OPENAI_API_KEY")
+        or (not require_refresh and tokens.get("refresh_token"))
         or not all(
             isinstance(tokens.get(key), str) and tokens[key]
-            for key in ("account_id", "access_token", "refresh_token", "id_token")
+            for key in required
         )
         or hashlib.sha256(tokens["account_id"].encode()).hexdigest()
         != assignment["account_sha256"]
@@ -422,10 +426,10 @@ def access_expiry(auth):
     return expiry if type(expiry) is int else None
 
 
-def require_session_lifetime(auth):
-    """The refreshed access token must outlive one bounded run (25 minutes)."""
+def require_session_lifetime(auth, *, seconds=1500):
+    """The access token must outlive the bounded run."""
     expiry = access_expiry(auth)
-    if expiry is None or expiry < int(time.time()) + 1500:
+    if expiry is None or expiry < int(time.time()) + seconds:
         raise ProfileError("profile_session_expiry_unverified")
 
 
