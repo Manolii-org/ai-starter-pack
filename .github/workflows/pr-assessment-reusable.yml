@@ -733,7 +733,7 @@ jobs:
               if (not all(isinstance(v, str) and v for v in [rule, file, message, severity])
                       or type(line) is not int or line < 1):
                   raise ValueError(f'{scanner}: malformed finding')
-              return {'finding_id': f'{scanner}-{rule}-{file}', 'rule': rule,
+              return {'finding_id': f'{scanner}-{rule}-{file}-{line}', 'rule': rule,
                       'file': file, 'line': line, 'message': message, 'severity': severity.upper()}
 
           findings = []
