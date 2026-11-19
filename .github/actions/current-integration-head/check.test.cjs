@@ -7,9 +7,9 @@ const sha = '1'.repeat(40);
 const observed = (value, ref = 'refs/heads/staging', type = 'commit') => ({
   data: { ref, object: { type, sha: value } },
 });
-function github(result) {
+function github(result, ref = 'heads/staging') {
   return { rest: { git: { getRef: async (args) => {
-    assert.deepEqual(args, { ...repo, ref: 'heads/staging' });
+    assert.deepEqual(args, { ...repo, ref });
     if (result instanceof Error) throw result;
     return result;
   } } } };
@@ -17,6 +17,11 @@ function github(result) {
 test('observes the exact current and superseded candidate', async () => {
   assert.equal(await check(github(observed(sha)), repo, 'staging', sha), 'current');
   assert.equal(await check(github(observed('2'.repeat(40))), repo, 'staging', sha), 'superseded');
+});
+test('permits Git integration branch punctuation', async () => {
+  const branch = 'integration/qa+prod';
+  const ref = `heads/${branch}`;
+  assert.equal(await check(github(observed(sha, `refs/${ref}`), ref), repo, branch, sha), 'current');
 });
 test('unavailable and malformed refs cannot select a candidate', async () => {
   for (const result of [

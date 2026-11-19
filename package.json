@@ -31,7 +31,7 @@
     "prepare": "npm run build",
     "typecheck": "tsc -p packages/feature-controls/tsconfig.json --noEmit",
     "lint": "eslint .",
-    "test": "npm run build && node --test tests/feature_controls/*.test.mjs"
+    "test": "npm run build && node --test tests/feature_controls/*.test.mjs .github/actions/current-integration-head/check.test.cjs"
   },
   "dependencies": {
     "@growthbook/growthbook": "1.8.0",
