@@ -60,6 +60,23 @@ def test_generated_header_preserves_raw_body_provenance():
     assert not module.coderabbit_clean_summary([wrapped], SHA, REPO, 201)
 
 
+def test_generated_status_block_and_separate_review_details():
+    status = BODY.replace("recent_review_", "recent_review_status_")
+    details = "\n<!-- recent_review_start -->\nReview information.\n<!-- recent_review_end -->"
+    assert verdict([dict(COMMENT, body=status + details)])
+
+    # Only the first, top-level status can certify a completed review.
+    assert not verdict([dict(COMMENT, body=status.replace("No actionable comments", "One actionable comment") + details)])
+    ambiguous = status.replace("<!-- recent_review_status_end -->", "Additional findings pending.\n<!-- recent_review_status_end -->")
+    assert not verdict([dict(COMMENT, body=ambiguous + details)])
+    mixed = status.replace("<!-- walkthrough_start -->", details + "\n<!-- walkthrough_start -->")
+    assert not verdict([dict(COMMENT, body=mixed)])
+    swapped = status.replace("<!-- recent_review_status_start -->", "<!-- absent -->")
+    assert not verdict([dict(COMMENT, body=swapped + details)])
+    duplicated = status.replace("<!-- recent_review_status_start -->", "<!-- recent_review_status_start -->\n<!-- recent_review_status_start -->")
+    assert not verdict([dict(COMMENT, body=duplicated + details)])
+
+
 @pytest.mark.parametrize("body", [
     module.GENERATED_HEADER + BODY.replace(SHA, "b" * 40),
     module.GENERATED_HEADER + BODY.replace("No actionable", "Review in progress. No actionable"),
