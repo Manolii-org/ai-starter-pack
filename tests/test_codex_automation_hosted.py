@@ -157,7 +157,7 @@ def test_session_probes_the_account_then_persists_the_refresh(monkeypatch, tmp_p
 
 
 def test_access_only_worker_reloads_current_login_without_a_refresh_token(monkeypatch, tmp_path, controller):
-    fake = FakeDoppler(login("old", exp=int(time.time()) + 60))
+    fake = FakeDoppler(login("old"))
     monkeypatch.setattr(hosted, "_request", fake)
     value = {**policy(), "credential_mode": "access_only"}
     home = tmp_path / "home"
@@ -174,6 +174,7 @@ def test_access_only_worker_reloads_current_login_without_a_refresh_token(monkey
 
     monkeypatch.setattr(profiles, "account_probe", probe)
     monkeypatch.setattr(profiles, "capacity", lambda *_: {"windows": {}})
+    fake.stored = json.dumps(login("expiring", exp=int(time.time()) + 60))
     with pytest.raises(profiles.ProfileError, match="profile_session_expiry_unverified"):
         with hosted.session(assignment, REPO, "assessment"):
             pytest.fail("short-lived login reached the broker")
@@ -187,6 +188,15 @@ def test_access_only_worker_reloads_current_login_without_a_refresh_token(monkey
     assert probes == [renewed["tokens"]["access_token"]]
     assert hosted.persist() == "access_only" and fake.writes == []
     assert hosted.select(REPO, "assessment", policy())["assignment_sha256"] != assignment["assignment_sha256"]
+
+
+def test_access_only_worker_rejects_insufficient_lifetime_at_configuration(monkeypatch, tmp_path):
+    fake = FakeDoppler(login(exp=int(time.time()) + 1600))
+    monkeypatch.setattr(hosted, "_request", fake)
+    value = {**policy(), "credential_mode": "access_only", "max_seconds": 1800}
+    with pytest.raises(profiles.ProfileError, match="profile_session_expiry_unverified"):
+        hosted.configure(value, tmp_path / "home", "dp.st.fixture")
+    assert fake.writes == []
 
 
 def test_unrecognized_credential_mode_is_refused_before_reading_doppler(monkeypatch, tmp_path):

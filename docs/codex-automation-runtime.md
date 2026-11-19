@@ -361,9 +361,12 @@ a read/write token and the default `credential_mode` of `refresh`.
 Additional consumers of the same login use `"credential_mode": "access_only"`
 and a config-scoped read-only token. They load the current login before each
 pass, remove the refresh token before the CLI starts, and require access-token
-lifetime for the full run budget with a 25-minute minimum. If it is too close to expiry,
-the worker holds until the refresh owner supplies a fresh login. Each consumer
-still requires its own repository grant in the reviewed consent policy.
+lifetime for the full run budget with a 25-minute minimum. A credential that is
+already too short-lived ends the attempt before custody is claimed. If a later
+pass rejects the credential after custody was claimed, the attempt ends with
+`blocked_credentials` and the existing claim stays in effect. A renewal alone
+cannot retry that claimed revision. Each consumer still requires its own
+repository grant in the reviewed consent policy.
 
 An account that holds purchased credits is refused (`profile_funding_unverified`)
 unless the consent adds `"credit_balance_allowed": true`. With that grant a run

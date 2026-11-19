@@ -153,7 +153,11 @@ def configure(policy: dict, home: Path, token: str) -> None:
     if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o077:
         raise ProfileError("profile_session_unprotected")
     auth = _load_login(home, token, coords, mode)
-    _state.update(home=home, coords=coords, token=token, start=fingerprint(auth), policy=policy, mode=mode)
+    seconds = max(1500, policy.get("max_seconds", 1500))
+    if mode == "access_only":
+        profiles.require_session_lifetime(auth, seconds=seconds)
+    _state.update(home=home, coords=coords, token=token, start=fingerprint(auth),
+                  policy=policy, mode=mode, seconds=seconds)
 
 
 def select(repository: str, role: str, policy: dict) -> dict:
@@ -257,7 +261,7 @@ def session(assignment, repository, role, *, wait_seconds=0):
         # A different worker may have refreshed since this run was admitted.
         _load_login(home, _state["token"], assignment["credential"], "access_only")
         auth = profiles.read_auth(home, assignment, require_refresh=False)
-        seconds = max(1500, _state["policy"].get("max_seconds", 1500))
+        seconds = _state["seconds"]
         profiles.require_session_lifetime(auth, seconds=seconds)
         account, limits = profiles.account_probe(home, refresh=False)
         snapshot = profiles.capacity(account, limits, assignment)
