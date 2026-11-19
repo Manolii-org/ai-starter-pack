@@ -10,7 +10,11 @@ module.exports = async function currentIntegrationHead(github, repo, branch, sha
   const ref = `heads/${branch}`;
   // GitHub validates branch syntax; the returned ref must match the requested
   // one exactly, including case and punctuation.
-  const { data } = await github.rest.git.getRef({ ...repo, ref });
+  const { data } = await github.rest.git.getRef({
+    ...repo,
+    ref,
+    request: { signal: AbortSignal.timeout(15_000) },
+  });
   if (data.ref !== `refs/${ref}` || data.object?.type !== 'commit' ||
       !SHA.test(data.object?.sha) || data.object.sha === '0'.repeat(40)) {
     throw new Error('Could not verify the exact integration branch ref');
