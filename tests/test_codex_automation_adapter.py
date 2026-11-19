@@ -429,7 +429,11 @@ def guest_judge(mounted, monkeypatch, tmp_path):
     git("init")
     git("config", "user.email", "offline@example.invalid")
     git("config", "user.name", "Offline fixture")
-    (root / "policy.py").write_text("# null intentionally allowed\ndef allowed(origin):\n    return origin == 'null'\n")
+    field = "_".join(("api", "key"))
+    (root / "policy.py").write_text(
+        "# null intentionally allowed\ndef allowed(origin):\n    return origin == 'null'\n"
+        f'{field} = os.getenv("SERVICE_API_KEY")\n'
+    )
     (root / "test_policy.py").write_text("def test_denial():\n    assert allowed('tenant-b') is False\n")
     git("add", ".")
     git("commit", "-m", "Synthetic source")
@@ -461,7 +465,16 @@ def test_guest_judge_uses_actual_immutable_evidence_and_existing_decision_parser
     assert result["complete"] and result["surviving"][0]["finding_id"] == finding.finding_id
     assert len(calls) == 1 and calls[0][2]["role"] == "judge"
     assert "null intentionally allowed" in calls[0][1]
+    assert "SERVICE_API_KEY" in calls[0][1]
     assert result["review_action"] == "REQUEST_CHANGES"
+
+
+def test_guest_refuses_credential_literals_before_transport(mounted, monkeypatch):
+    monkeypatch.setattr(adapter.transport, "invoke", lambda *a, **k: pytest.fail("unsafe input reached transport"))
+    field = "_".join(("API", "KEY"))
+    with pytest.raises(adapter.AutomationHold, match="unsafe_review_input"):
+        adapter.complete("Review", f"{field} = 'privacy-fixture-literal'", role="assessment",
+                         data_sensitivity="internal", max_tokens=1000)
 
 
 @pytest.mark.parametrize("failure", ["unknown", "invalid_json", "protected", "invalid_evidence"])
