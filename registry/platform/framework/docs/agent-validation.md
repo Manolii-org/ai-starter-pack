@@ -15,7 +15,10 @@ Keep owner `config/agent-checks.json` aligned with CI/toolchains.
 Missing tools or failed installs mean incomplete validation. Run explicitly
 until this host has a hook-execution receipt; files alone prove no hook ran.
 
-Batch fixes with focused tests; add regression tests for recurring defects.
+Keep intermediate commits local when the task does not need a remote preview,
+an independent review or an explicit checkpoint. Validate the affected candidate
+against its owning integration base, then batch fixes into one push. Run focused
+tests after edits and add regression tests for recurring defects.
 Independently review settled diffs,
 contracts, generated files and seams once at required scope/tier. Open ready only
 with a passing exact-head `agent-check` receipt, no expected pushes and no
@@ -26,7 +29,13 @@ Local receipts are reusable only for matching inputs, commands and tools;
 they grant no merge or protected-path authority. Run any additional owning
 preflight/review gate. Classify recurring infrastructure failures separately
 from source defects; use one owning incident and bounded recovery rather
-than repeated code pushes. Measure total agent, workspace and CI cost.
+than repeated code pushes. The originating task owns the PR through review and
+merge. A qualified wake re-reads the current head and collects failed checks and
+unresolved findings once. Batch the repair locally, then validate and publish
+that head once. If a handoff is necessary, require an accepted continuation
+receipt before a second owner acts. Recheck the candidate when its base or
+inputs change. Measure time to first green and merge, pushes per PR, and total
+agent, workspace and CI cost.
 
 Reusable results also bind the effective execution environment without recording
 its values. Keep the ignored private cache key and dependency state local; do
