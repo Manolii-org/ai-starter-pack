@@ -281,24 +281,47 @@ def clean_coderabbit_body(body, head):
         return False
     # Remove fenced examples before recognizing generated top-level markers.
     body = re.sub(r"^(```|~~~)[^\n]*\n.*?^\1[ \t]*$", "", body, flags=re.MULTILINE | re.DOTALL)
-    markers = ("recent_review_start", "recent_review_end", "walkthrough_start", "walkthrough_end")
-    positions = []
-    for marker in markers:
-        matches = list(re.finditer(r"^<!-- " + marker + r" -->[ \t]*$", body, re.MULTILINE))
-        if len(matches) != 1:
-            return False
-        positions.append(matches[0].start())
-    if positions != sorted(positions):
+    def markers(section, edge):
+        return list(re.finditer(rf"^<!-- {section}_{edge} -->[ \t]*$", body, re.MULTILINE))
+
+    walkthrough_start = markers("walkthrough", "start")
+    walkthrough_end = markers("walkthrough", "end")
+    if len(walkthrough_start) != 1 or len(walkthrough_end) != 1:
         return False
-    status = body[:positions[2]]
+    walk_start, walk_end = walkthrough_start[0].start(), walkthrough_end[0].start()
+    if walk_start >= walk_end:
+        return False
+    status = body[:walk_start]
     if re.search(r"review (?:in progress|skipped)|rate.?limit|limit reached", status, re.IGNORECASE):
         return False
-    recent = re.search(r"^<!-- recent_review_start -->[ \t]*$(.*?)^<!-- recent_review_end -->[ \t]*$",
-                       status, re.MULTILINE | re.DOTALL)
-    if not recent or not re.match(r"\s*No actionable comments were generated in the recent review\.", recent[1]):
-        return False
     coverage = list(re.finditer(r"^<!-- final_review_risk_coverage:(.*?) -->[ \t]*$", body, re.MULTILINE))
-    if len(coverage) != 1 or coverage[0].start() < positions[3]:
+    if len(coverage) != 1 or coverage[0].start() < walk_end:
+        return False
+
+    legacy_start = markers("recent_review", "start")
+    legacy_end = markers("recent_review", "end")
+    status_start = markers("recent_review_status", "start")
+    status_end = markers("recent_review_status", "end")
+    has_status_section = bool(status_start or status_end)
+    if has_status_section:
+        # New summaries use a top-level status and may publish the legacy
+        # details markers after the coverage record. Those details cannot
+        # provide a second verdict or stand in for the status.
+        if legacy_start or legacy_end:
+            if len(legacy_start) != 1 or len(legacy_end) != 1:
+                return False
+            if not coverage[0].end() < legacy_start[0].start() < legacy_end[0].start():
+                return False
+    else:
+        status_start, status_end = legacy_start, legacy_end
+    if len(status_start) != 1 or len(status_end) != 1:
+        return False
+    start, end = status_start[0].end(), status_end[0].start()
+    if not start < end < walk_start:
+        return False
+    verdict = body[start:end].strip()
+    clean = "No actionable comments were generated in the recent review."
+    if not (verdict == clean if has_status_section else verdict.startswith(clean)):
         return False
     try:
         value = json.loads(coverage[0][1], object_pairs_hook=unique_object)
