@@ -345,6 +345,12 @@ def test_hosted_install_pins_a_root_owned_cli_path():
     flow = yaml.safe_load((Path(__file__).resolve().parents[1]
                            / ".github/workflows/codex-automation-worker-reusable.yml").read_text())
     steps = {s.get("name"): s for s in flow["jobs"]["execute"]["steps"]}
-    run = steps["Install the pinned native Codex CLI (root-owned)"]["run"]
+    install = steps["Install the pinned native Codex CLI (root-owned)"]
+    run = install["run"]
+    gate = "steps.prepare.outputs.needed == 'true'"
+    guest = steps["Run consented, custody-fenced guest passes"]
+    assert install["if"] == guest["if"] == gate
+    order = list(steps.values())
+    assert order.index(steps["Admit exact request"]) < order.index(install) < order.index(guest)
     assert "sudo chown root:root /opt" in run and "sudo chmod go-w / /opt" in run
     assert run.index("chmod go-w") < run.index("/opt/codex-review/bin/codex --version")

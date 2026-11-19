@@ -93,7 +93,16 @@ jobs:
           sparse-checkout-cone-mode: false
           sparse-checkout: |
             /${{ inputs.policy_path }}
+      - name: Admit exact request
+        id: prepare
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CODEX_AUTOMATION_ENABLED: "true"
+          CODEX_AUTOMATION_HOSTED: "1"
+          CODEX_AUTOMATION_POLICY: ${{ github.workspace }}/consumer/${{ inputs.policy_path }}
+        run: python3 -I trusted/scripts/ci/codex_automation_worker.py prepare
       - name: Install the pinned native Codex CLI (root-owned)
+        if: steps.prepare.outputs.needed == 'true'
         # Exact pinned version from the public registry with scripts disabled;
         # only its verified native ELF is installed (same as codex-review-isolation-proof).
         run: | # zizmor: ignore[adhoc-packages]
@@ -115,14 +124,6 @@ jobs:
           sudo install -o root -g root -m 0755 "$binary" /opt/codex-review/bin/codex
           stat -c '%U:%G %a %n' / /opt /opt/codex-review /opt/codex-review/bin /opt/codex-review/bin/codex
           /opt/codex-review/bin/codex --version
-      - name: Admit exact request
-        id: prepare
-        env:
-          GH_TOKEN: ${{ github.token }}
-          CODEX_AUTOMATION_ENABLED: "true"
-          CODEX_AUTOMATION_HOSTED: "1"
-          CODEX_AUTOMATION_POLICY: ${{ github.workspace }}/consumer/${{ inputs.policy_path }}
-        run: python3 -I trusted/scripts/ci/codex_automation_worker.py prepare
       - name: Run consented, custody-fenced guest passes
         id: worker
         if: steps.prepare.outputs.needed == 'true'
