@@ -316,7 +316,7 @@ jobs:
       enabled: ${{ vars.CODEX_AUTOMATION_ENABLED != 'false' }}
       publish: ${{ vars.CODEX_AUTOMATION_PUBLISH == 'true' }}
     secrets:
-      CODEX_AUTOMATION_DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN_CODEX }}
+      CODEX_AUTOMATION_DOPPLER_TOKEN: ${{ secrets.CODEX_AUTOMATION_DOPPLER_TOKEN }}
       CODEX_AUTOMATION_PUBLISH_TOKEN: ${{ secrets.CODEX_AUTOMATION_PUBLISH_TOKEN }}
 ```
 
