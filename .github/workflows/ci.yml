@@ -96,8 +96,10 @@ jobs:
           key: nm-v2-${{ runner.os }}-${{ runner.arch }}-node-${{ steps.node-runtime.outputs.version }}-abi-${{ steps.node-runtime.outputs.abi }}-${{ hashFiles('package-lock.json', 'pnpm-lock.yaml', 'yarn.lock', 'bun.lockb', 'bun.lock') }}
       - name: Install dependencies
         id: dependencies
+        env:
+          DEPENDENCIES_CACHED: ${{ steps.cache-node-modules.outputs.cache-hit }}
         run: |
-          if [ "${{ steps.cache-node-modules.outputs.cache-hit }}" != true ]; then
+          if [ "$DEPENDENCIES_CACHED" != true ]; then
             npm ci
           fi
       - name: Security audit
