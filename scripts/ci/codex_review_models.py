@@ -2,7 +2,7 @@
 
 from fnmatch import fnmatch
 
-MODEL = "gpt-6.1-sol"
+MODEL = "gpt-6.2-sol"
 ESCALATION = (
     "**/*.sql",
     "**/auth/**",

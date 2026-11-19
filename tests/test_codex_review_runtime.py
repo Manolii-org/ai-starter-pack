@@ -146,7 +146,7 @@ text('SYNTHETIC_WORKBENCH_OK');
             "object": "response",
             "created_at": 1,
             "status": "completed",
-            "model": "gpt-6.1-sol",
+            "model": "gpt-6.2-sol",
             "output": output,
             "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
         }

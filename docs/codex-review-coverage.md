@@ -69,7 +69,7 @@ The dormant default uses `personal_profiles`: each team member authorises their
 own account. Protected host policy selects repo first, then organisation, with
 no cross-organisation/default account fallback. See
 [owner onboarding, nomination and activation](codex-personal-review-profiles.md).
-The pinned code CLI uses GPT-6.1-Sol at medium for ordinary code, xhigh for
+The pinned code CLI uses GPT-6.2-Sol at medium for ordinary code, xhigh for
 escalated code and every security review. Account changes preserve completed
 review evidence; queued work rechecks its reserved consent and assignment.
 
@@ -159,7 +159,7 @@ inspection instead of restarting the worker/recovery cycle.
 
 ## Limits and operating checks
 
-The code CLI is pinned to 0.163.0. Security CLI 0.2.0 retains its exact embedded
+The code CLI is pinned to 0.170.0. Security CLI 0.2.0 retains its exact embedded
 Codex/SDK 0.162.0-alpha.15 closure. Do not force the standalone code CLI version
 into the Security SDK or assume one runtime's probe certifies the other.
 
@@ -188,8 +188,11 @@ existing deployment/promotion/merge controls and entity isolation.
 
 ## Subscription protocol compatibility
 
-Both pinned executables explicitly use `gpt-6.1-sol`; the trusted broker rejects
-other model names and the tool receipt records the model. The subscription
+Both pinned executables explicitly use `gpt-6.2-sol`; the trusted broker rejects
+other model names and the tool receipt records the model. The container gives the
+embedded Security SDK that model's bundled profile from the pinned standalone CLI.
+The profile is read locally with refresh disabled. This keeps the embedded SDK on
+the code-mode tool protocol already enforced by the broker. The subscription
 service may label a completed Responses SSE body `text/plain`. The broker
 normalizes that label only after validating a completed Responses event stream;
 arbitrary text, HTML and partial/error streams do not qualify. Provider retries

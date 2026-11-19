@@ -40,7 +40,7 @@ separate qualification. Do not copy personal sessions into public CI secrets.
 
 ## Owner login and consent
 
-1. Install the pinned official **native ELF** code CLI, version **0.163.0**, at
+1. Install the pinned official **native ELF** code CLI, version **0.170.0**, at
    `/opt/codex-review/bin/codex`. Keep its lexical and resolved installation
    paths administrator-owned. The npm Node launcher is refused: killing it
    does not reliably terminate the Rust refresh writer before the lock releases.

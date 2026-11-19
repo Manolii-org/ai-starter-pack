@@ -485,7 +485,7 @@ def test_probe_owns_and_reaps_native_child(tmp_path, monkeypatch):
     monkeypatch.setattr(
         profiles.subprocess,
         "run",
-        lambda *a, **k: SimpleNamespace(returncode=0, stdout=b"codex-cli 0.163.0\n"),
+        lambda *a, **k: SimpleNamespace(returncode=0, stdout=b"codex-cli 0.170.0\n"),
     )
     (tmp_path / "app-server").write_text("""import json,os,sys,time
 from pathlib import Path
@@ -535,7 +535,7 @@ from types import SimpleNamespace
 sys.path.insert(0,sys.argv[1])
 import codex_review_profiles as p
 p.CODEX="/usr/bin/python3"
-p.subprocess.run=lambda *a,**k:SimpleNamespace(returncode=0,stdout=b"codex-cli 0.163.0\\n")
+p.subprocess.run=lambda *a,**k:SimpleNamespace(returncode=0,stdout=b"codex-cli 0.170.0\\n")
 p.account_probe(Path(sys.argv[2]))
 """
     with subprocess.Popen(

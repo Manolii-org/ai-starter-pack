@@ -101,7 +101,7 @@ jobs:
           install -d -m 700 "$RUNNER_TEMP/codex-npm"
           cd "$RUNNER_TEMP/codex-npm"
           npm install --no-save --ignore-scripts --registry https://registry.npmjs.org/ \
-            --userconfig /dev/null @openai/codex@0.163.0 >/dev/null
+            --userconfig /dev/null @openai/codex@0.170.0 >/dev/null
           binary="$RUNNER_TEMP/codex-npm/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex"
           test "$(head -c4 "$binary" | od -An -c | tr -d ' ')" = '177ELF'
           # The controller refuses a CLI with any ancestor that is not root-owned

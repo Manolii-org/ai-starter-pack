@@ -278,7 +278,7 @@ def account_probe(home, *, seconds=30, refresh=True):
         timeout=10,
         check=False,
     )
-    if version.returncode or version.stdout.strip() != b"codex-cli 0.163.0":
+    if version.returncode or version.stdout.strip() != b"codex-cli 0.170.0":
         raise ProfileError("profile_cli_unqualified")
     requests = [
         {
