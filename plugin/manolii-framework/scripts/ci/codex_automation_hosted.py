@@ -120,22 +120,40 @@ def _parse(raw: str) -> dict:
     return auth
 
 
+def credential_mode(policy: dict) -> str:
+    mode = policy.get("credential_mode", "refresh")
+    if mode not in ("refresh", "access_only"):
+        raise ProfileError("hosted_credential_mode_invalid")
+    return mode
+
+
+def _load_login(home: Path, token: str, coords: dict, mode: str) -> dict:
+    raw = _read_stored(token, coords)
+    auth = _parse(raw)
+    if mode == "access_only":
+        # The CLI's private copy cannot consume the real refresh token even
+        # if a provider request tries to retry authentication internally.
+        auth["tokens"]["refresh_token"] = ""
+        raw = json.dumps(auth)
+    path = home / "auth.json"
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+        stream.write(raw)
+    return auth
+
+
 def configure(policy: dict, home: Path, token: str) -> None:
     """Materialize the stored login privately for this run only."""
     coords = coordinates(policy)
+    mode = credential_mode(policy)
     if not token:
         raise ProfileError("hosted_credential_unavailable")
     home.mkdir(mode=0o700, parents=True, exist_ok=True)
     info = home.lstat()
     if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o077:
         raise ProfileError("profile_session_unprotected")
-    raw = _read_stored(token, coords)
-    auth = _parse(raw)
-    path = home / "auth.json"
-    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
-    with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
-        stream.write(raw)
-    _state.update(home=home, coords=coords, token=token, start=fingerprint(auth), policy=policy)
+    auth = _load_login(home, token, coords, mode)
+    _state.update(home=home, coords=coords, token=token, start=fingerprint(auth), policy=policy, mode=mode)
 
 
 def select(repository: str, role: str, policy: dict) -> dict:
@@ -177,6 +195,7 @@ def select(repository: str, role: str, policy: dict) -> dict:
         "consent_sha256": profiles.digest(consent),
         "controller_workflow": workflow,
         "credential": coordinates(policy),
+        "credential_mode": credential_mode(policy),
     }
     if consent.get("credit_balance_allowed") is True:
         # The owner admits an account that holds purchased credits; capacity()
@@ -191,6 +210,8 @@ def persist() -> str:
     home, coords, token, start = (_state.get(k) for k in ("home", "coords", "token", "start"))
     if home is None:
         raise ProfileError("hosted_credential_unavailable")
+    if _state.get("mode") == "access_only":
+        return "access_only"
     raw = (home / "auth.json").read_text(encoding="utf-8")
     current = _parse(raw)
     if fingerprint(current) == start:
@@ -232,6 +253,19 @@ def session(assignment, repository, role, *, wait_seconds=0):
     # session; re-check it before the login is probed and again before it is
     # handed to the caller.
     _recheck(assignment, repository, role)
+    if assignment["credential_mode"] == "access_only":
+        # A different worker may have refreshed since this run was admitted.
+        _load_login(home, _state["token"], assignment["credential"], "access_only")
+        auth = profiles.read_auth(home, assignment, require_refresh=False)
+        seconds = max(1500, _state["policy"].get("max_seconds", 1500))
+        profiles.require_session_lifetime(auth, seconds=seconds)
+        account, limits = profiles.account_probe(home, refresh=False)
+        snapshot = profiles.capacity(account, limits, assignment)
+        profiles.require_session_lifetime(auth, seconds=seconds)
+        snapshot["credential"] = "access_only"
+        _recheck(assignment, repository, role)
+        yield auth, snapshot
+        return
     initial = profiles.read_auth(home, assignment)
     # Refresh only when the stored access token is near expiry. Every
     # consumer of a login reads the same stored copy, so refreshing on every

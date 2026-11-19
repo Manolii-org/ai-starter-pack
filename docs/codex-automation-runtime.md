@@ -354,13 +354,16 @@ jobs:
 }
 ```
 
-`CODEX_AUTOMATION_DOPPLER_TOKEN` is a read/write Doppler service token scoped
-to exactly that config, which should hold only the login (not a branch of a
-config holding other secrets: a branch inherits them all). It makes the run the
-refresh writer under the lineage guard. Do not use a read-only token: a run
-that refreshes spends the stored refresh token and cannot save its replacement,
-so the stored login dies at the next refresh (`refresh_token_reused`). For the
-same reason, nothing else may read and refresh the same stored login.
+Scope `CODEX_AUTOMATION_DOPPLER_TOKEN` to a config that holds only the login.
+A branch of a config with other secrets inherits them. The refresh owner uses
+a read/write token and the default `credential_mode` of `refresh`.
+
+Additional consumers of the same login use `"credential_mode": "access_only"`
+and a config-scoped read-only token. They load the current login before each
+pass, remove the refresh token before the CLI starts, and require access-token
+lifetime for the full run budget with a 25-minute minimum. If it is too close to expiry,
+the worker holds until the refresh owner supplies a fresh login. Each consumer
+still requires its own repository grant in the reviewed consent policy.
 
 An account that holds purchased credits is refused (`profile_funding_unverified`)
 unless the consent adds `"credit_balance_allowed": true`. With that grant a run
@@ -389,8 +392,8 @@ Hosted-mode limits (accepted):
   on its own refreshed copy), but because the read and the write are separate
   requests, two writers that both read the original login can still both
   write, and the slower one wins. Refresh near expiry keeps that window rare.
-- Several consumers may read one Doppler login (for example, an account that
-  funds more than one repository). Only a read/write token writes back.
+- Repositories can share a login by using access-only workers alongside its
+  refresh owner. Keep refresh ownership with the existing trusted writer.
 - The trusted controller is the caller `codex-automation-worker.yml` run by
   `workflow_run`, which GitHub always resolves on the default branch; custody
   re-authenticates that run. Keep `pack_sha` equal to the `uses:` SHA.

@@ -156,6 +156,45 @@ def test_session_probes_the_account_then_persists_the_refresh(monkeypatch, tmp_p
             pass
 
 
+def test_access_only_worker_reloads_current_login_without_a_refresh_token(monkeypatch, tmp_path, controller):
+    fake = FakeDoppler(login("old", exp=int(time.time()) + 60))
+    monkeypatch.setattr(hosted, "_request", fake)
+    value = {**policy(), "credential_mode": "access_only"}
+    home = tmp_path / "home"
+    hosted.configure(value, home, "dp.st.fixture")
+    assignment = hosted.select(REPO, "assessment", value)
+    probes = []
+
+    def probe(path, *, refresh):
+        assert refresh is False
+        tokens = json.loads((path / "auth.json").read_text())["tokens"]
+        assert tokens["refresh_token"] == ""
+        probes.append(tokens["access_token"])
+        return {}, {}
+
+    monkeypatch.setattr(profiles, "account_probe", probe)
+    monkeypatch.setattr(profiles, "capacity", lambda *_: {"windows": {}})
+    with pytest.raises(profiles.ProfileError, match="profile_session_expiry_unverified"):
+        with hosted.session(assignment, REPO, "assessment"):
+            pytest.fail("short-lived login reached the broker")
+    assert probes == []
+
+    renewed = login("renewed")
+    fake.stored = json.dumps(renewed)
+    with hosted.session(assignment, REPO, "assessment") as (auth, snapshot):
+        assert auth["tokens"]["refresh_token"] == ""
+        assert snapshot["credential"] == "access_only"
+    assert probes == [renewed["tokens"]["access_token"]]
+    assert hosted.persist() == "access_only" and fake.writes == []
+    assert hosted.select(REPO, "assessment", policy())["assignment_sha256"] != assignment["assignment_sha256"]
+
+
+def test_unrecognized_credential_mode_is_refused_before_reading_doppler(monkeypatch, tmp_path):
+    monkeypatch.setattr(hosted, "_request", lambda *a, **k: pytest.fail("bad policy must not reach Doppler"))
+    with pytest.raises(profiles.ProfileError, match="hosted_credential_mode_invalid"):
+        hosted.configure({**policy(), "credential_mode": "rotate"}, tmp_path / "home", "dp.st.fixture")
+
+
 def test_a_login_for_another_account_is_refused(monkeypatch, tmp_path, controller):
     other = login()
     other["tokens"]["account_id"] = "someone-else"
