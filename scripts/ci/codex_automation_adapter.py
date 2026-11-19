@@ -62,9 +62,10 @@ def _admit(system: str, user: str) -> None:
         except (OSError, ImportError, SyntaxError):
             raise AutomationHold("unsafe_review_input") from None
         _ADMISSION = module
-    payload = json.dumps({"system": system, "messages": [{"role": "user", "content": user}]}).encode("utf-8")
+    request = {"system": system, "messages": [{"role": "user", "content": user}]}
+    payload = json.dumps(request).encode("utf-8")
     try:
-        _ADMISSION.admit_review_wire(payload)
+        _ADMISSION.admit_review_wire(payload, proved_value=request)
     except _ADMISSION.ReviewInputError:
         raise AutomationHold("unsafe_review_input") from None
 

@@ -127,17 +127,18 @@ def normalize(name: str, raw: bytes, exit_code: int | None, version: str | None)
         for row in rows:
             try:
                 if name == "semgrep":
-                    finding = dict(finding_id=f"semgrep-{row['check_id']}-{row['path']}", rule=row["check_id"],
+                    finding = dict(rule=row["check_id"],
                                    file=row["path"], line=row["start"]["line"], message=row["extra"]["message"],
                                    severity=row["extra"]["severity"].upper())
                 else:
-                    finding = dict(finding_id=f"bandit-{row['test_id']}-{row['filename']}", rule=row["test_id"],
+                    finding = dict(rule=row["test_id"],
                                    file=row["filename"], line=row["line_number"], message=row["issue_text"],
                                    severity=row["issue_severity"].upper())
                 if (any(not isinstance(finding[k], str) or not finding[k].strip()
-                        for k in ("finding_id", "rule", "file", "message", "severity"))
+                        for k in ("rule", "file", "message", "severity"))
                         or type(finding["line"]) is not int or finding["line"] < 1):
                     raise ValueError("malformed scanner finding")
+                finding["finding_id"] = f"{name}-{finding['rule']}-{finding['file']}-{finding['line']}"
                 findings.append(finding)
             except (ValueError, KeyError, TypeError, AttributeError):
                 malformed = True

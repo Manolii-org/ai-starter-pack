@@ -56,7 +56,7 @@ SAFE_SLUG = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\Z")
 SHA = re.compile(r"[0-9a-f]{40}\Z")
 TOOLS = {
     "model": REVIEW_MODEL,
-    "code": "0.163.0",
+    "code": "0.170.0",
     "security": "0.2.0",
     "security_codex": "0.162.0-alpha.15",
     "security_sdk": "0.162.0-alpha.15",

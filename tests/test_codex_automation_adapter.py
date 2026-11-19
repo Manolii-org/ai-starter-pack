@@ -155,7 +155,7 @@ def test_unknown_transport_outcome_is_not_replayed(mounted, monkeypatch):
 def test_real_guest_unix_seam_ignores_ambient_legacy_credentials(mounted, monkeypatch, tmp_path):
     # The HTTP peer is a fixture, not an authenticated provider or qualified host.
     requests = []
-    response = {"object": "response", "status": "completed", "model": "gpt-6.1-sol", "output": [{
+    response = {"object": "response", "status": "completed", "model": "gpt-6.2-sol", "output": [{
         "type": "message", "role": "assistant", "status": "completed",
         "content": [{"type": "output_text", "text": "complete fixture result"}]}],
         "usage": {"input_tokens": 12, "output_tokens": 7, "total_tokens": 19}}
@@ -186,7 +186,7 @@ def test_real_guest_unix_seam_ignores_ambient_legacy_credentials(mounted, monkey
             thread.join(timeout=2)
     assert len(requests) == 1
     path, headers, body = requests[0]
-    assert path == "/v1/responses" and body["model"] == "gpt-6.1-sol"
+    assert path == "/v1/responses" and body["model"] == "gpt-6.2-sol"
     assert body["tools"] == [] and body["input"][0]["content"][0]["text"] == "complete untrusted input"
     assert not {"authorization", "x-api-key"} & {k.lower() for k in headers}
 
@@ -429,7 +429,11 @@ def guest_judge(mounted, monkeypatch, tmp_path):
     git("init")
     git("config", "user.email", "offline@example.invalid")
     git("config", "user.name", "Offline fixture")
-    (root / "policy.py").write_text("# null intentionally allowed\ndef allowed(origin):\n    return origin == 'null'\n")
+    field = "_".join(("api", "key"))
+    (root / "policy.py").write_text(
+        "# null intentionally allowed\ndef allowed(origin):\n    return origin == 'null'\n"
+        f'{field} = os.getenv("SERVICE_API_KEY")\n'
+    )
     (root / "test_policy.py").write_text("def test_denial():\n    assert allowed('tenant-b') is False\n")
     git("add", ".")
     git("commit", "-m", "Synthetic source")
@@ -461,7 +465,16 @@ def test_guest_judge_uses_actual_immutable_evidence_and_existing_decision_parser
     assert result["complete"] and result["surviving"][0]["finding_id"] == finding.finding_id
     assert len(calls) == 1 and calls[0][2]["role"] == "judge"
     assert "null intentionally allowed" in calls[0][1]
+    assert "SERVICE_API_KEY" in calls[0][1]
     assert result["review_action"] == "REQUEST_CHANGES"
+
+
+def test_guest_refuses_credential_literals_before_transport(mounted, monkeypatch):
+    monkeypatch.setattr(adapter.transport, "invoke", lambda *a, **k: pytest.fail("unsafe input reached transport"))
+    field = "_".join(("API", "KEY"))
+    with pytest.raises(adapter.AutomationHold, match="unsafe_review_input"):
+        adapter.complete("Review", f"{field} = 'privacy-fixture-literal'", role="assessment",
+                         data_sensitivity="internal", max_tokens=1000)
 
 
 @pytest.mark.parametrize("failure", ["unknown", "invalid_json", "protected", "invalid_evidence"])

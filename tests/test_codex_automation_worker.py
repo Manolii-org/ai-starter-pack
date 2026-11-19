@@ -27,7 +27,7 @@ TARGET = {"repository": "example/automation", "pull_request": 7, "base_sha": "b"
           "head_sha": "a" * 40, "operation": "assessment", "request_run_id": 11,
           "request_run_attempt": 1, "request_workflow_id": 5, "request_artifact_id": 9,
           "head_ref": "feature"}
-COMPLETION = {"model": "gpt-6.1-sol", "model_verification": "provider_reported",
+COMPLETION = {"model": "gpt-6.2-sol", "model_verification": "provider_reported",
               "usage": {"input_tokens": 10, "output_tokens": 2, "cached_input_tokens": 0},
               "input_chars": 40, "observed_at": "2026-11-14T03:30:00Z"}
 

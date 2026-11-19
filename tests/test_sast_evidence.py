@@ -53,6 +53,20 @@ def report(scanner, findings=False):
             'metrics': {'_totals': {'loc': 2}, './app.py': {'loc': 1}, './scripts/lib/sast_evidence.py': {'loc': 1}}}
 
 
+@pytest.mark.parametrize('scanner', ['semgrep', 'bandit'])
+def test_repeated_rule_at_distinct_source_lines_has_distinct_ids(scanner):
+    module = load()
+    data = report(scanner, True)
+    if scanner == 'semgrep':
+        data['results'][1]['start']['line'] = 20
+    else:
+        data['results'][1]['line_number'] = 20
+    state, rows = module.normalize(scanner, module.encoded(data), 0, module.SCANNER_VERSIONS[scanner])
+    assert state['status'] == 'complete'
+    assert [row['line'] for row in rows] == [1, 20]
+    assert len({row['finding_id'] for row in rows}) == 2
+
+
 
 @pytest.mark.parametrize('scanner', ['semgrep', 'bandit'])
 @pytest.mark.parametrize('exit_code,has_findings,complete', [(0, False, True), (0, True, True),

@@ -427,7 +427,7 @@ def test_deep_input_retains_multiplicity_full_diff_old_new_and_untrusted_bytes(r
     assert packet['provenance'] == 'caller-bound; producer authenticity not established'
 
 
-def test_actual_sast_normalizer_preserves_duplicate_bandit_ids(runner, deep_repo, tmp_path):
+def test_actual_sast_normalizer_preserves_distinct_bandit_locations(runner, deep_repo, tmp_path):
     """Execute the published normalizer with complete offline scanner reports."""
     import copy
     import os
@@ -453,7 +453,9 @@ def test_actual_sast_normalizer_preserves_duplicate_bandit_ids(runner, deep_repo
     args['sast_binding']['sast_sha256'] = __import__('hashlib').sha256(args['sast']).hexdigest()
     packet = runner.build_security_deep_dive_input(deep_repo[0], **args)
     assert len(packet['entries']) == 2
-    assert packet['entries'][0]['finding']['finding_id'] == packet['entries'][1]['finding']['finding_id']
+    assert [row['finding']['finding_id'] for row in packet['entries']] == [
+        'bandit-B101-./flow.py-1', 'bandit-B101-./flow.py-2',
+    ]
     assert packet['entries'][0]['entry_id'] != packet['entries'][1]['entry_id']
 
 

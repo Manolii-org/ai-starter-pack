@@ -14,6 +14,7 @@ import threading
 import time
 
 LIMIT = 1024 * 1024
+REVIEW_MODEL = "gpt-6.2-sol"
 
 
 class Relay(http.server.BaseHTTPRequestHandler):
@@ -177,8 +178,8 @@ def main():
     relay = http.server.HTTPServer(("127.0.0.1", 8123), Relay)
     threading.Thread(target=relay.serve_forever, daemon=True).start()
     config = [
-        'model="gpt-6.1-sol"',
-        'review_model="gpt-6.1-sol"',
+        f"model={json.dumps(REVIEW_MODEL)}",
+        f"review_model={json.dumps(REVIEW_MODEL)}",
         'model_reasoning_effort="' + reasoning + '"',
         'model_provider="review"',
         'model_providers.review={name="review",base_url="http://127.0.0.1:8123/v1",wire_api="responses",requires_openai_auth=false,supports_websockets=false,request_max_retries=0,stream_max_retries=0}',
@@ -234,6 +235,18 @@ def main():
             "--output-dir",
             "/state/results",
         ]
+        # Qualify the embedded CLI with the pinned code CLI's local profile.
+        # Its generic fallback sends a tool protocol the broker rejects.
+        model_catalog = json.loads(subprocess.check_output(
+            ["/opt/code/node_modules/.bin/codex", "debug", "models", "--bundled"],
+            cwd=state, timeout=20,
+        ))
+        models = [model for model in model_catalog["models"] if model["slug"] == REVIEW_MODEL]
+        if len(models) != 1:
+            raise SystemExit("bundled review model missing or ambiguous")
+        catalog_path = home / "review-model-catalog.json"
+        catalog_path.write_text(json.dumps({"models": models}))
+        command.extend(["--codex", f"model_catalog_json={json.dumps(str(catalog_path))}"])
         # The Security wrapper enables V2 independently of embedded CLI defaults.
         # Disable V1 and bound V2 to its documented parent-only fallback.
         for item in config + [
