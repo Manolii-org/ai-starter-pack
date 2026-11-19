@@ -20,7 +20,8 @@ jobs:
   owner_recipe:
     if: github.repository == 'Manolii-org/ai-starter-pack'
     name: Owning agent-check recipe
-    runs-on: ubuntu-latest
+    # Keep signed system prerequisites on a known Ubuntu release.
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
