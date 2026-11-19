@@ -244,3 +244,23 @@ fail that suite.
   `scripts/gha-cost-sample.py` cross-checked against the billing API in
   `scripts/gha-billing-assert.py` (master repo)); estimates in design docs
   are not claims.
+
+## Release work admission
+
+Publish a settled, locally validated candidate through the owning integration
+lane. Release-intent workflows may run full qualification after selection of a
+candidate. Keep product staging feedback and weekly full-suite canaries,
+and alert when a candidate needs qualification.
+
+Use the pinned `current-integration-head` action in an integration workflow
+before starting expensive preparation. The action reads the exact branch ref
+in the owning repository. A superseded candidate should produce an explicit
+outcome and skip unused work. A denied or malformed observation fails the
+action. Repeat the freshness check immediately before starting staging writes
+when the workflow has a long preparation phase. This is admission control
+for pending builds. Keep immutable source and artifact identities, writer
+serialization, evidence freshness, and rollback protection during mutation.
+
+Release and CI events should wake the existing owner. Keep a bounded
+reconciliation backstop for missed events. A wake cannot grant an approval,
+establish qualification, or replace a check on the synthetic merge candidate.

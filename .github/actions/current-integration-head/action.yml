@@ -1,0 +1,31 @@
+name: Current integration head
+description: Check whether an immutable candidate still matches an integration branch in the owning repository.
+inputs:
+  branch:
+    description: Owning integration branch, without refs/heads/.
+    required: true
+  sha:
+    description: Exact candidate commit from the trusted workflow event.
+    required: true
+outputs:
+  state:
+    description: current or superseded. An unavailable or invalid ref fails the action.
+    value: ${{ steps.current.outputs.result }}
+runs:
+  using: composite
+  steps:
+    - name: Check the owning integration ref
+      id: current
+      uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+      env:
+        CHECK_ACTION_PATH: ${{ github.action_path }}
+        CANDIDATE_BRANCH: ${{ inputs.branch }}
+        CANDIDATE_SHA: ${{ inputs.sha }}
+      with:
+        result-encoding: string
+        script: |
+          const check = require(process.env.CHECK_ACTION_PATH + '/check.cjs');
+          const state = await check(github, context.repo,
+            process.env.CANDIDATE_BRANCH, process.env.CANDIDATE_SHA);
+          core.notice(`Integration candidate is ${state}`);
+          return state;
