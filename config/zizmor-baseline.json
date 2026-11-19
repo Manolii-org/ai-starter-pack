@@ -44,36 +44,6 @@
       "severity": "Medium"
     },
     {
-      "fingerprint": "da48c475396d6d06",
-      "ident": "artipacked",
-      "path": ".github/workflows/ci.yml",
-      "severity": "Medium"
-    },
-    {
-      "fingerprint": "da48c475396d6d06",
-      "ident": "artipacked",
-      "path": ".github/workflows/ci.yml",
-      "severity": "Medium"
-    },
-    {
-      "fingerprint": "da48c475396d6d06",
-      "ident": "artipacked",
-      "path": ".github/workflows/ci.yml",
-      "severity": "Medium"
-    },
-    {
-      "fingerprint": "da48c475396d6d06",
-      "ident": "artipacked",
-      "path": ".github/workflows/ci.yml",
-      "severity": "Medium"
-    },
-    {
-      "fingerprint": "da48c475396d6d06",
-      "ident": "artipacked",
-      "path": ".github/workflows/ci.yml",
-      "severity": "Medium"
-    },
-    {
       "fingerprint": "6dd3493bc751aed5",
       "ident": "artipacked",
       "path": ".github/workflows/claude-md-contract-reusable.yml",

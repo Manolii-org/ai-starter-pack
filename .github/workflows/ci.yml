@@ -64,11 +64,11 @@ jobs:
         # silently skipping the whole pipeline.
         run: echo "has_pkg=$({ [ -f package.json ] || [ -f package-lock.json ] || [ -f pnpm-lock.yaml ] || [ -f yarn.lock ] || [ -f bun.lockb ] || [ -f bun.lock ]; } && echo true || echo false)" >> "$GITHUB_OUTPUT"
 
-  install:
-    name: Install Dependencies
+  validate:
+    name: Validate project
     if: needs.detect.outputs.has_pkg == 'true'
-    # npm ci scales with the consumer dependency graph — unverifiable from the
-    # template, so hosted by default; slim via explicit LIGHT_RUNNER opt-in.
+    # One install serves the validation commands. Build keeps its own runner
+    # selector and runs only after validation succeeds.
     runs-on: >-
       ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
           && fromJSON(vars.LIGHT_RUNNER || '["ubuntu-latest"]')
@@ -77,6 +77,8 @@ jobs:
     needs: [detect]
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
           node-version: ${{ env.NODE_VERSION }}
@@ -92,128 +94,35 @@ jobs:
         with:
           path: node_modules
           key: nm-v2-${{ runner.os }}-${{ runner.arch }}-node-${{ steps.node-runtime.outputs.version }}-abi-${{ steps.node-runtime.outputs.abi }}-${{ hashFiles('package-lock.json', 'pnpm-lock.yaml', 'yarn.lock', 'bun.lockb', 'bun.lock') }}
-      - if: steps.cache-node-modules.outputs.cache-hit != 'true'
-        run: npm ci        # Replace with: pnpm install --frozen-lockfile
-
-  # Downstream jobs skip automatically when install is skipped (via needs).
-  security-audit:
-    name: Security Audit
-    needs: [install]
-    # Cache-miss arm runs npm ci — consumer-scale, so hosted by default.
-    runs-on: >-
-      ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
-          && fromJSON(vars.LIGHT_RUNNER || '["ubuntu-latest"]')
-          || 'ubuntu-latest' }}
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-      - name: Identify runtime for dependency cache
-        id: node-runtime
-        shell: bash
-        run: node -e 'require("node:fs").appendFileSync(process.env.GITHUB_OUTPUT, `version=${process.versions.node}\nabi=${process.versions.modules}\n`)'
-      - uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
-        with:
-          path: node_modules
-          key: nm-v2-${{ runner.os }}-${{ runner.arch }}-node-${{ steps.node-runtime.outputs.version }}-abi-${{ steps.node-runtime.outputs.abi }}-${{ hashFiles('package-lock.json', 'pnpm-lock.yaml', 'yarn.lock', 'bun.lockb', 'bun.lock') }}
-      - name: Fallback install if cache miss
-        run: test -d node_modules || npm ci
-      - name: Check for known vulnerabilities
+      - name: Install dependencies
+        id: dependencies
+        env:
+          DEPENDENCIES_CACHED: ${{ steps.cache-node-modules.outputs.cache-hit }}
+        run: |
+          if [ "$DEPENDENCIES_CACHED" != true ]; then
+            npm ci
+          fi
+      - name: Security audit
         run: npm audit --audit-level=high
-
-  lint:
-    name: Lint
-    needs: [install]
-    # Template file — consumer suite size is unverifiable, so the default stays
-    # hosted; slim is an explicit opt-in via LIGHT_RUNNER (REUSABLE-WORKFLOWS.md:
-    # slim only for verified sub-10-min jobs). Fork guard as elsewhere.
-    runs-on: >-
-      ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
-          && fromJSON(vars.LIGHT_RUNNER || '["ubuntu-latest"]')
-          || 'ubuntu-latest' }}
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-      - name: Identify runtime for dependency cache
-        id: node-runtime
-        shell: bash
-        run: node -e 'require("node:fs").appendFileSync(process.env.GITHUB_OUTPUT, `version=${process.versions.node}\nabi=${process.versions.modules}\n`)'
-      - uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
-        with:
-          path: node_modules
-          key: nm-v2-${{ runner.os }}-${{ runner.arch }}-node-${{ steps.node-runtime.outputs.version }}-abi-${{ steps.node-runtime.outputs.abi }}-${{ hashFiles('package-lock.json', 'pnpm-lock.yaml', 'yarn.lock', 'bun.lockb', 'bun.lock') }}
-      - name: Fallback install if cache miss
-        run: test -d node_modules || npm ci
-      - run: npx eslint .
-
-  typecheck:
-    name: Type Check
-    needs: [install]
-    # Template file — consumer suite size is unverifiable, so the default stays
-    # hosted; slim is an explicit opt-in via LIGHT_RUNNER (REUSABLE-WORKFLOWS.md:
-    # slim only for verified sub-10-min jobs). Fork guard as elsewhere.
-    runs-on: >-
-      ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
-          && fromJSON(vars.LIGHT_RUNNER || '["ubuntu-latest"]')
-          || 'ubuntu-latest' }}
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-      - name: Identify runtime for dependency cache
-        id: node-runtime
-        shell: bash
-        run: node -e 'require("node:fs").appendFileSync(process.env.GITHUB_OUTPUT, `version=${process.versions.node}\nabi=${process.versions.modules}\n`)'
-      - uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
-        with:
-          path: node_modules
-          key: nm-v2-${{ runner.os }}-${{ runner.arch }}-node-${{ steps.node-runtime.outputs.version }}-abi-${{ steps.node-runtime.outputs.abi }}-${{ hashFiles('package-lock.json', 'pnpm-lock.yaml', 'yarn.lock', 'bun.lockb', 'bun.lock') }}
-      - name: Fallback install if cache miss
-        run: test -d node_modules || npm ci
-      - run: npx tsc --noEmit
-
-  test:
-    name: Test
-    needs: [install]
-    # Template file — consumer suite size is unverifiable, so the default stays
-    # hosted; slim is an explicit opt-in via LIGHT_RUNNER (REUSABLE-WORKFLOWS.md:
-    # slim only for verified sub-10-min jobs). Fork guard as elsewhere.
-    runs-on: >-
-      ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
-          && fromJSON(vars.LIGHT_RUNNER || '["ubuntu-latest"]')
-          || 'ubuntu-latest' }}
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-      - name: Identify runtime for dependency cache
-        id: node-runtime
-        shell: bash
-        run: node -e 'require("node:fs").appendFileSync(process.env.GITHUB_OUTPUT, `version=${process.versions.node}\nabi=${process.versions.modules}\n`)'
-      - uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
-        with:
-          path: node_modules
-          key: nm-v2-${{ runner.os }}-${{ runner.arch }}-node-${{ steps.node-runtime.outputs.version }}-abi-${{ steps.node-runtime.outputs.abi }}-${{ hashFiles('package-lock.json', 'pnpm-lock.yaml', 'yarn.lock', 'bun.lockb', 'bun.lock') }}
-      - name: Fallback install if cache miss
-        run: test -d node_modules || npm ci
-      - run: npm test -- --coverage
+      - name: Lint
+        if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
+        run: npx eslint .
+      - name: Type check
+        if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
+        run: npx tsc --noEmit
+      - name: Unit tests with coverage
+        id: unit-tests
+        if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
+        run: npm test -- --coverage
       - name: Feature-control Python and cross-language conformance
-        if: hashFiles('packages/feature-controls/python/pyproject.toml') != ''
+        id: conformance
+        if: ${{ !cancelled() && steps.unit-tests.outcome == 'success' && hashFiles('packages/feature-controls/python/pyproject.toml') != '' }}
         run: |
           python3 -m venv "$RUNNER_TEMP/feature-control-conformance"
           "$RUNNER_TEMP/feature-control-conformance/bin/pip" install --quiet -e ./packages/feature-controls/python pytest==8.3.5
           "$RUNNER_TEMP/feature-control-conformance/bin/python" -m pytest -q tests/feature_controls/provider_conformance.py tests/feature_controls/release_policy_conformance.py tests/feature_controls/release_policy_tool_conformance.py
       - name: Feature release source declaration
-        if: hashFiles('packages/feature-controls/python/pyproject.toml') != ''
+        if: ${{ !cancelled() && steps.conformance.outcome == 'success' }}
         run: |
           "$RUNNER_TEMP/feature-control-conformance/bin/python" scripts/feature-release-check.py \
             --repo-root "$GITHUB_WORKSPACE" --mode source --summary "$GITHUB_STEP_SUMMARY"
@@ -225,7 +134,7 @@ jobs:
 
   build:
     name: Build
-    needs: [security-audit, lint, typecheck, test]
+    needs: [validate]
     # This file is a starter-pack template: non-fleet consumers have no Fly
     # pool, so the default must stay hosted — fleet tenants opt in by setting
     # CI_RUNNER_OVERRIDE (fly-runner-setup.md). Fork PRs always fall back to
