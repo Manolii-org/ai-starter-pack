@@ -115,18 +115,20 @@ def test_finding_exits_keep_all_entries_and_schema(tmp_path, workflow):
          'extra': {'message': 'Synthetic finding', 'severity': 'WARNING'}}
     b = {'test_id': 'B101', 'filename': 'fixture.py', 'line_number': 3,
          'issue_text': 'Synthetic assertion', 'issue_severity': 'LOW'}
-    semgrep['results'] = [s, s]
-    bandit['results'] = [b, b]
+    semgrep['results'] = [s, dict(s, start={'line': 7}), s]
+    bandit['results'] = [b, dict(b, line_number=7), b]
     for scanner, data in [('semgrep', semgrep), ('bandit', bandit)]:
         (tmp_path / (scanner + '-results.json')).write_text(json.dumps(data))
     result = run_step(workflow, 'Merge SAST findings', tmp_path, SEMGREP_EXIT='1', BANDIT_EXIT='1')
     assert result.returncode == 0, result.stderr
     rows = json.loads((tmp_path / '.ai/sast-findings.json').read_text())
-    assert len(rows) == 4
-    assert rows[0] == rows[1] and rows[2] == rows[3]
-    assert rows[0] == {'finding_id': 'semgrep-fixture.rule-fixture.py', 'rule': 'fixture.rule',
+    assert len(rows) == 6
+    assert rows[0] == rows[2] and rows[3] == rows[5]
+    assert rows[0] == {'finding_id': 'semgrep-fixture.rule-fixture.py-3', 'rule': 'fixture.rule',
                        'file': 'fixture.py', 'line': 3, 'message': 'Synthetic finding', 'severity': 'WARNING'}
-    assert rows[2]['finding_id'] == 'bandit-B101-fixture.py'
+    assert rows[1]['finding_id'] == 'semgrep-fixture.rule-fixture.py-7'
+    assert rows[3]['finding_id'] == 'bandit-B101-fixture.py-3'
+    assert rows[4]['finding_id'] == 'bandit-B101-fixture.py-7'
 
 
 @pytest.mark.parametrize('workflow', WORKFLOWS)
