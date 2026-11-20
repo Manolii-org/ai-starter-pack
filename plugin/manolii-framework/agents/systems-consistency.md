@@ -40,8 +40,11 @@ Bash("mkdir -p .ai/candidates")
 
 ## Checks
 
-Identify the deployment lane from the changed workflow, its commands and its
-referenced actions, scripts and configuration. Apply the checks to that lane.
+Identify the deployment lane from the workflow, its commands and its referenced
+actions, scripts and configuration. For an input-only change, look for workflows
+under `.github/workflows/` that consume the changed inputs and check each such
+lane. In API sessions use the supplied workflow evidence. If that evidence
+cannot establish the affected lanes, report `"skipped": "missing_context"`.
 For example, an Azure CLI and OIDC workflow can deploy without `fly.toml`,
 `deploy/deploy.sh` or `config.yaml`. A repository may have more than one provider.
 Review each affected lane using its actual inputs.
@@ -49,8 +52,10 @@ Review each affected lane using its actual inputs.
 ### 1. Secret hard-fail coverage
 
 Every secret required by the selected deployment must fail closed before it
-mutates the target. For a Fly lane that uses `fly.toml` and `deploy.sh`, a
-required `FOO` in the configuration needs an equivalent guard in the script:
+mutates the target. Check the whole invocation path. A guard in the calling
+workflow counts when it covers every path to the mutation and checks the same
+value the deployment receives. For example, a Fly lane requiring `FOO` can check
+it in the workflow or deployment script:
 
 ```bash
 : "${FOO:?FOO is required}"

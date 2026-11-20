@@ -320,7 +320,8 @@ def test_api_prompt_adaptation_preserves_all_checks_and_interactive_source(runne
     checks = agent.instructions.split('## Checks', 1)[1]
     assert checks in rendered
     for required in ('Azure CLI and OIDC', 'fly.toml', 'deploy.sh', 'config.yaml',
-                     'exit 1', 'configuration that its deployment',
+                     'input-only change', 'supplied workflow evidence',
+                     'every path to the mutation', 'exit 1', 'configuration that its deployment',
                      'Anchor a missing-file finding', 'that requires the file',
                      'Provider conventions alone',
                      'advisor_confidence', 'missing_context'):
