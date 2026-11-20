@@ -1,0 +1,24 @@
+[
+  {
+    "id": "release-green-summary-skipped-deploy",
+    "prompt": "The staging workflow is green after reusing a test receipt. The deployment jobs were all skipped. Did the release ship?",
+    "expectedBehaviors": [
+      "Distinguish the test receipt and workflow status from deployment",
+      "Read the exact protected deployment job and environment artifact identity",
+      "Keep release acceptance open when deployment is unverified"
+    ],
+    "category": "edge_case",
+    "tags": ["deployment"]
+  },
+  {
+    "id": "release-no-change-plan-with-live-acceptance-hold",
+    "prompt": "The latest plan had zero changes and skipped apply. An older approved apply succeeded. Public smoke checks pass, but required synthetic completion has no approved fixture.",
+    "expectedBehaviors": [
+      "Keep exact run and attempt identities separate and look for live release readback",
+      "Report the completed read-only checks and name the missing fixture",
+      "Preserve the approval and hold the dependent transition"
+    ],
+    "category": "edge_case",
+    "tags": ["deployment", "compatibility"]
+  }
+]
