@@ -319,8 +319,11 @@ def test_api_prompt_adaptation_preserves_all_checks_and_interactive_source(runne
     assert 'Bash("mkdir' in agent.instructions and 'Bash("mkdir' not in rendered
     checks = agent.instructions.split('## Checks', 1)[1]
     assert checks in rendered
-    for required in ('fly.toml', 'deploy.sh', '.github/workflows/**', 'config.yaml',
-                     'exit 1', 'ALL config files', 'advisor_confidence', 'missing_context'):
+    for required in ('Azure CLI and OIDC', 'fly.toml', 'deploy.sh', 'config.yaml',
+                     'exit 1', 'configuration that its deployment',
+                     'Anchor a missing-file finding', 'that requires the file',
+                     'Provider conventions alone',
+                     'advisor_confidence', 'missing_context'):
         assert required in rendered
     sent = replies(monkeypatch, runner, [response()])
     result = runner.invoke_agent(agent, '', 'FULL_SOURCE_TAIL')
