@@ -99,6 +99,37 @@ def test_continuation_installs_and_cannot_be_silently_removed(consumer, entrypoi
     assert files(root) == before
 
 
+def test_operational_skills_use_selected_host_paths(consumer):
+    root, source = continuation_consumer(consumer)
+    manifest = root / "ai-manifest.yaml"
+    manifest.write_text(manifest.read_text().replace(
+        "native_guidance_continuation: true", "native_guidance_operational_skills: true"))
+    for leaf in ("SKILL.md", "evals/cases.json"):
+        path = f"skills/{native.RELEASE_VERIFICATION}/{leaf}"
+        target = source / "registry/platform/framework" / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes((REPO / ".claude" / path).read_bytes())
+
+    assert run(consumer, "--apply").returncode == 0
+    paths = (".claude/skills", ".agents/skills", ".cursor/skills")
+    lock = json.loads((root / native.LOCK).read_text())
+    for directory in paths:
+        for skill in (native.CONTINUATION, native.RELEASE_VERIFICATION):
+            path = f"{directory}/{skill}/SKILL.md"
+            assert (root / path).read_bytes() == (
+                source / "registry/platform/framework/skills" / skill / "SKILL.md").read_bytes()
+            assert lock["files"][path]["sha256"] == native.digest((root / path).read_bytes())
+        assert (root / directory / native.CONTINUATION / "review-evidence.md").is_file()
+    assert "release-verification" not in (root / "AGENTS.md").read_text()
+    assert run(consumer, "--check").returncode == 0
+
+    drifted = root / ".cursor/skills/release-verification/SKILL.md"
+    drifted.write_text("curated content")
+    before = files(root)
+    assert run(consumer, "--apply").returncode == 1
+    assert files(root) == before
+
+
 def test_missing_continuation_source_refuses_the_whole_install(consumer):
     root, source = continuation_consumer(consumer)
     (source / "registry/platform/framework/skills/autonomy-follow-through/evals/cases.json").unlink()

@@ -1,6 +1,6 @@
 ---
 name: operational-readiness
-version: 1.0.0
+version: 1.0.1
 description: "Checks PRs adding scheduled workflows, cron jobs, or new infrastructure for missing alerting, dead man's switch, runbook reference, and explicit ownership."
 type: skill
 model: haiku
@@ -122,3 +122,11 @@ Merge Phase 1 and Phase 2 results:
 **Task:** "Is this workflow safe?"
 **What's missing:** No diff provided, no file path, no context about which workflow changed.
 **Result:** Skill cannot determine which schedules exist or which alerting mechanisms are present.
+
+## Existing automation recovery
+
+For a stale wake, missing producer receipt, or partial startup, use
+[Recover an existing unattended run](../autonomy-follow-through/SKILL.md#recover-an-existing-unattended-run).
+Use the owner's existing receipt, deduplication and bounded readiness helpers.
+For a green run that may have skipped deployment, apply
+[release verification](../release-verification/SKILL.md) when installed.

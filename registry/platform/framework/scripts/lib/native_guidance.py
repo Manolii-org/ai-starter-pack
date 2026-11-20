@@ -17,6 +17,8 @@ from time import monotonic
 
 NAMES = ("adaptable-development", "design-feature-adoption", "compatibility-improvement")
 CONTINUATION = "autonomy-follow-through"
+RELEASE_VERIFICATION = "release-verification"
+OPERATIONAL_SURFACE_ROOTS = {"codex": ".agents/skills", "cursor": ".cursor/skills"}
 LOCK = ".ai/native-guidance-lock.json"
 BEGIN = b"<!-- ai-starter-pack:development-policy:begin -->"
 END = b"<!-- ai-starter-pack:development-policy:end -->"
@@ -283,7 +285,14 @@ def _resolve(args, root, resolver, manifest, registry, index):
     continuation = flags.get("native_guidance_continuation", False)
     if type(continuation) is not bool:
         raise ValueError("native_guidance_continuation must be boolean")
-    names = NAMES + (CONTINUATION,) if continuation else NAMES
+    operational = flags.get("native_guidance_operational_skills", False)
+    if type(operational) is not bool:
+        raise ValueError("native_guidance_operational_skills must be boolean")
+    names = NAMES
+    if continuation or operational:
+        names += (CONTINUATION,)
+    if operational:
+        names += (RELEASE_VERIFICATION,)
     sources, evals, companions = {}, {}, {}
     for name in names:
         assets = [("SKILL.md", sources), ("evals/cases.json", evals)]
@@ -359,6 +368,14 @@ def _resolve(args, root, resolver, manifest, registry, index):
         add(f"{skill_root}/{name}/evals/cases.json", evals[name])
     for rel, data in companions.items():
         add(f"{skill_root}/{rel}", data)
+    if operational:
+        for surface, native_root in OPERATIONAL_SURFACE_ROOTS.items():
+            if surface not in surfaces:
+                continue
+            for name in (CONTINUATION, RELEASE_VERIFICATION):
+                add(f"{native_root}/{name}/SKILL.md", sources[name])
+            for rel, data in companions.items():
+                add(f"{native_root}/{rel}", data)
     # Never silently abandon a surface that a previous install managed.
     if set(records) - set(outputs):
         raise ValueError("surface selection removes managed files; revert their owning commit explicitly")

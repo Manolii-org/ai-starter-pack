@@ -65,5 +65,16 @@
     ],
     "category": "edge_case",
     "tags": []
+  },
+  {
+    "id": "continuation-stale-wake-terminal-first",
+    "prompt": "An hourly monitor resumes with a pre-merge CI error in its old prompt. The current PR has merged, but post-merge staging evidence is still missing.",
+    "expectedBehaviors": [
+      "Re-read authoritative terminal state before historical repairs",
+      "Retain the owner and verify the outstanding staging commitment",
+      "Avoid replaying the stale repair or starting another monitor"
+    ],
+    "category": "edge_case",
+    "tags": []
   }
 ]
