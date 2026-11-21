@@ -149,11 +149,11 @@ def test_generic_model_override_does_not_select_this_surface(tmp_path):
         **_workspace(tmp_path, {"a": "post"}),
         pr_number=7,
         head_sha=SHA,
-        env=_env(JEV_MODEL="jev-1.14.0"),
+        env=_env(JEV_MODEL="jev-1.13.0"),
         opener=_opener(ALL_HIGH, sink=calls),
     )
-    assert json.loads(calls[0].data)["model"] == "jev-1.13.0"
-    assert receipts[0]["pinned_model"] == "jev-1.13.0"
+    assert json.loads(calls[0].data)["model"] == "jev-1.14.0"
+    assert receipts[0]["pinned_model"] == "jev-1.14.0"
 
 
 def test_surface_model_pin_overrides_generic_model_when_both_are_set(tmp_path):
@@ -263,7 +263,7 @@ def test_classification_and_payload_free_receipts(tmp_path):
     blob = json.dumps(receipts)
     assert SECRET_MESSAGE not in blob and KEY not in blob and "src.py" not in blob
     assert all(
-        r["pinned_model"] == "jev-1.13.0" and r["entity"] == "example" for r in receipts
+        r["pinned_model"] == "jev-1.14.0" and r["entity"] == "example" for r in receipts
     )
     state = json.loads(sent[0].data)["state"]
     assert "hunter2hunter2" not in state and "[REDACTED]" in state
