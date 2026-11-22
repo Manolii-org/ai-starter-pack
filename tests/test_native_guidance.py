@@ -743,6 +743,40 @@ def test_rollback_revalidates_after_preparing_recovery(tmp_path, monkeypatch):
     assert not list(root.glob(".*.tmp"))
 
 
+def test_rollback_continues_after_individual_recovery_failures(tmp_path, monkeypatch):
+    root = tmp_path
+    first, blocked, concurrent = (root / name for name in ("first.md", "blocked.md", "concurrent.md"))
+    for path in (first, blocked, concurrent):
+        path.write_bytes(b"Original")
+    resolver = load_script("native_rollback_batch_resolver", "scripts/ai-resolve.py")
+    outputs = {path.name: b"Updated" for path in (first, blocked, concurrent)}
+    outputs["lock.json"] = b"Owned"
+    snapshots = {rel: native.file_snapshot(root, rel, resolver) for rel in outputs}
+    atomic = resolver.atomic_replace
+
+    def fail_then_recover(dst, fill, **kwargs):
+        if dst.name == "lock.json":
+            concurrent.write_bytes(b"Concurrent edit")
+            raise OSError("Cannot publish ownership lock")
+        if dst == blocked and blocked.read_bytes() == b"Updated":
+            raise OSError("Cannot restore file")
+        return atomic(dst, fill, **kwargs)
+
+    monkeypatch.setattr(resolver, "atomic_replace", fail_then_recover)
+    with resolver._repo_apply_mutex(root):
+        with pytest.raises(ValueError, match="2 recoveries failed") as error:
+            native.apply_outputs(root, outputs, snapshots, resolver)
+
+    assert "concurrent.md" in str(error.value)
+    assert "blocked.md" in str(error.value)
+    assert "first.md" not in str(error.value)
+    assert str(error.value.__context__) == "Cannot publish ownership lock"
+    assert first.read_bytes() == b"Original"
+    assert blocked.read_bytes() == b"Updated"
+    assert concurrent.read_bytes() == b"Concurrent edit"
+    assert not (root / "lock.json").exists()
+
+
 @pytest.mark.parametrize("descriptor_relative", [False, True])
 def test_atomic_replace_guard_runs_after_preparation_without_publishing(tmp_path, descriptor_relative):
     resolver = load_script("native_guard_order_resolver", "scripts/ai-resolve.py")
