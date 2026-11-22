@@ -1,7 +1,7 @@
 ---
 name: systems-consistency
-version: 1.2.0
-description: "Broad agent: reads the full deployment surface together (fly.toml + deploy.sh + CD workflows + config.yaml) and checks cross-file invariants."
+version: 1.2.1
+description: "Broad agent: reads a deployment workflow and its referenced configuration together and checks cross-file invariants."
 type: agent
 model: sonnet
 tier: tier-2-agentic
@@ -40,9 +40,22 @@ Bash("mkdir -p .ai/candidates")
 
 ## Checks
 
+Identify the deployment lane from the workflow, its commands and its referenced
+actions, scripts and configuration. For an input-only change, look for workflows
+under `.github/workflows/` that consume the changed inputs and check each such
+lane. In API sessions use the supplied workflow evidence. If that evidence
+cannot establish the affected lanes, report `"skipped": "missing_context"`.
+For example, an Azure CLI and OIDC workflow can deploy without `fly.toml`,
+`deploy/deploy.sh` or `config.yaml`. A repository may have more than one provider.
+Review each affected lane using its actual inputs.
+
 ### 1. Secret hard-fail coverage
 
-Every secret referenced **unconditionally** in `fly.toml` must have a corresponding `exit 1` provision in `deploy.sh`. Pattern: if `fly.toml` sets `[env] FOO = "${FOO}"` or `secrets = ["FOO"]`, then `deploy.sh` must contain:
+Every secret required by the selected deployment must fail closed before it
+mutates the target. Check the whole invocation path. A guard in the calling
+workflow counts when it covers every path to the mutation and checks the same
+value the deployment receives. For example, a Fly lane requiring `FOO` can check
+it in the workflow or deployment script:
 
 ```bash
 : "${FOO:?FOO is required}"
@@ -50,15 +63,18 @@ Every secret referenced **unconditionally** in `fly.toml` must have a correspond
 if [ -z "$FOO" ]; then echo "ERROR: FOO not set"; exit 1; fi
 ```
 
-Flag as ERROR if a secret is referenced in `fly.toml` with no hard-fail guard in `deploy.sh`. A warn-and-continue is insufficient.
+Flag a missing hard-fail guard as ERROR. A warn-and-continue is insufficient.
 
 ### 2. CD workflow completeness
 
-Every CD workflow step in `.github/workflows/**` that invokes a deploy script or config tool must cover ALL config files changed in this PR. If a workflow deploys `config.yaml` but this PR also changed `fly.toml`, and the workflow doesn't handle `fly.toml`, flag it.
+Each CD workflow must account for changed configuration that its deployment
+consumes. If two changed configuration files serve separate deployment lanes,
+check each against its own workflow.
 
 ### 3. Sibling config parameter consistency
 
-When the same logical parameter (e.g. `timeout`, `max_retries`, `region`) appears in both `fly.toml` and `config.yaml`, verify they are consistent. Flag if they diverge.
+When the same logical parameter (e.g. `timeout`, `max_retries`, `region`) applies
+to the same deployment in more than one file, verify the values are consistent.
 
 ## Phase 1: Executor
 
@@ -74,7 +90,7 @@ Review each draft finding:
 2. **Intent check:** Is there a comment explaining why the inconsistency is acceptable?
 3. **Severity check:** Does the confidence match the actual deployment risk?
 
-Escalation trigger: secret referenced in fly.toml with no exit-1 guard in deploy.sh.
+Escalation trigger: a required secret can be absent when deployment mutates the target.
 
 Output: confirmed findings only, each with `advisor_confidence: high|medium|low`.
 
@@ -84,8 +100,11 @@ Return every confirmed finding in the following JSON structure. In interactive
 tool-enabled sessions, write it to `.ai/candidates/systems-consistency.json`.
 In API sessions, return the JSON response directly; the caller writes that file.
 Use all supplied diff and context; do not omit findings to fit an output budget.
-If required evidence is unavailable, retain the missing-file finding and add
-`"skipped": "missing_context"` so absence cannot become a clean result:
+Anchor a missing-file finding at the workflow, script or configuration line
+that requires the file. For example, a Fly deploy command that references a
+deleted `fly.toml` is a finding on that command. If an input required by the
+selected deployment is unavailable for inspection, add
+`"skipped": "missing_context"`. Cite the requiring reference for any finding:
 
 ```json
 {
@@ -93,7 +112,7 @@ If required evidence is unavailable, retain the missing-file finding and add
   "findings": [
     {
       "file": "deploy/deploy.sh",
-      "line": null,
+      "line": 24,
       "severity": "ERROR|WARNING",
       "confidence": "high|medium",
       "message": "fly.toml references secret DATABASE_URL but deploy.sh only WARNs (no exit 1) when it is absent",
@@ -109,6 +128,7 @@ completed and no issues were found.
 ## Stop Conditions
 
 - Return findings after checking the declared deployment surface — do NOT expand to adjacent repos.
-- If a required file (fly.toml, deploy.sh, config.yaml) is missing, note its absence as a finding.
+- Report an absent file only when a specific deploy command, action or repository
+  contract requires it. Provider conventions alone are insufficient evidence.
 - Interactive sessions: maximum 15 file reads per run. API sessions have no tools;
   assess the complete supplied diff/context and report missing required context.
