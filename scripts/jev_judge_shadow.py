@@ -32,9 +32,9 @@ from pathlib import Path
 from typing import Any
 
 FLAG_NAME = "JEV_ENABLED_JUDGE_FINDING_SHADOW"
-MODEL = "jev-1.13.0"
+MODEL = "jev-1.14.0"
 MODEL_ENV = "JEV_JUDGE_FINDING_SHADOW_MODEL"
-SUPPORTED_MODELS = frozenset({MODEL, "jev-1.14.0"})
+SUPPORTED_MODELS = frozenset({MODEL, "jev-1.13.0"})
 POLICY_VERSION = "pack-judge-shadow-v1"
 SCHEMA_VERSION = 1
 SURFACE = "pack_judge_finding_shadow"
