@@ -50,7 +50,8 @@ def _policy_resolver():
     return sys.modules[name]
 
 
-def refresh_policy(target: Path, check: bool = False, include_continuation: bool = False) -> int:
+def refresh_policy(target: Path, check: bool = False, include_continuation: bool = False,
+                   include_operational: bool = False) -> int:
     """Generate only public policy assets, preserving a mirror's other content.
 
     The selected authored skills are scope-neutral and contain no Jinja. A
@@ -69,17 +70,26 @@ def refresh_policy(target: Path, check: bool = False, include_continuation: bool
         outputs, snapshots = {}, {}
         # Validate and capture ALL selected sources and destinations before any
         # materialisation. A late conflict must leave earlier assets untouched.
-        names = POLICY_SKILLS + ("autonomy-follow-through",) if include_continuation else POLICY_SKILLS
+        names = POLICY_SKILLS
+        if include_continuation or include_operational:
+            names += (native.CONTINUATION,)
+        if include_operational:
+            names += (native.RELEASE_VERIFICATION, "operational-readiness")
         for name in names:
-            leaves = ("SKILL.md", "evals/cases.json", "review-evidence.md") if name == "autonomy-follow-through" else ("SKILL.md", "evals/cases.json")
+            leaves = ("SKILL.md", "evals/cases.json")
+            if name == native.CONTINUATION:
+                leaves += ("review-evidence.md",)
+            if name == "operational-readiness":
+                leaves = ("SKILL.md",)
             for leaf in leaves:
                 rel = f"platform/framework/skills/{name}/{leaf}"
-                source = resolver._read_source(REPO, f".claude/skills/{name}/{leaf}")
+                source_leaf = "CLAUDE.md" if name == "operational-readiness" else leaf
+                source = resolver._read_source(REPO, f".claude/skills/{name}/{source_leaf}")
                 if source is None:
                     raise ValueError(f"unsafe or unreadable policy source: {name}/{leaf}")
                 outputs[rel] = source[0]
                 snapshots[rel] = native.file_snapshot(target, rel, resolver)
-        if include_continuation:
+        if include_continuation or include_operational:
             # The policy/companion contract needs its matching checked writer.
             rel = 'platform/framework/scripts/lib/native_guidance.py'
             source = resolver._read_source(REPO, 'scripts/lib/native_guidance.py')
@@ -148,15 +158,19 @@ def main() -> None:
                     help="with --policy-only, an established private mirror's registry directory")
     ap.add_argument("--include-continuation", action="store_true",
                     help="with --policy-only, refresh continuation policy, companion, cases and matched native writer")
+    ap.add_argument("--include-operational", action="store_true",
+                    help="with --policy-only, refresh operational skills and the matched native writer")
     args = ap.parse_args()
     if args.registry_root and not args.policy_only:
         ap.error("--registry-root requires --policy-only")
     if args.include_continuation and not args.policy_only:
         ap.error("--include-continuation requires --policy-only")
+    if args.include_operational and not args.policy_only:
+        ap.error("--include-operational requires --policy-only")
     if args.policy_only:
         try:
             status = refresh_policy((args.registry_root or REGISTRY).absolute(), args.check,
-                                    args.include_continuation)
+                                    args.include_continuation, args.include_operational)
         except (OSError, ValueError) as exc:
             ap.error(str(exc))
         sys.exit(status)

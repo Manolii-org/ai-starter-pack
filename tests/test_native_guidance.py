@@ -99,6 +99,37 @@ def test_continuation_installs_and_cannot_be_silently_removed(consumer, entrypoi
     assert files(root) == before
 
 
+def test_operational_skills_use_selected_host_paths(consumer):
+    root, source = continuation_consumer(consumer)
+    manifest = root / "ai-manifest.yaml"
+    manifest.write_text(manifest.read_text().replace(
+        "native_guidance_continuation: true", "native_guidance_operational_skills: true"))
+    for leaf in ("SKILL.md", "evals/cases.json"):
+        path = f"skills/{native.RELEASE_VERIFICATION}/{leaf}"
+        target = source / "registry/platform/framework" / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes((REPO / ".claude" / path).read_bytes())
+
+    assert run(consumer, "--apply").returncode == 0
+    paths = (".claude/skills", ".agents/skills", ".cursor/skills")
+    lock = json.loads((root / native.LOCK).read_text())
+    for directory in paths:
+        for skill in (native.CONTINUATION, native.RELEASE_VERIFICATION):
+            path = f"{directory}/{skill}/SKILL.md"
+            assert (root / path).read_bytes() == (
+                source / "registry/platform/framework/skills" / skill / "SKILL.md").read_bytes()
+            assert lock["files"][path]["sha256"] == native.digest((root / path).read_bytes())
+        assert (root / directory / native.CONTINUATION / "review-evidence.md").is_file()
+    assert "release-verification" not in (root / "AGENTS.md").read_text()
+    assert run(consumer, "--check").returncode == 0
+
+    drifted = root / ".cursor/skills/release-verification/SKILL.md"
+    drifted.write_text("curated content")
+    before = files(root)
+    assert run(consumer, "--apply").returncode == 1
+    assert files(root) == before
+
+
 def test_missing_continuation_source_refuses_the_whole_install(consumer):
     root, source = continuation_consumer(consumer)
     (source / "registry/platform/framework/skills/autonomy-follow-through/evals/cases.json").unlink()
@@ -125,7 +156,8 @@ def test_continuation_selection_is_a_boolean_not_a_truthy_value(consumer, value)
     assert files(root) == before
 
 
-def test_mirror_continuation_refresh_keeps_framework_version_and_private_assets(consumer):
+@pytest.mark.parametrize("operational", [False, True])
+def test_mirror_policy_refresh_keeps_framework_version_and_private_assets(consumer, operational):
     _, source = consumer
     registry = source / "registry"
     metadata = registry / "platform/framework/.claude-plugin/plugin.json"
@@ -134,12 +166,20 @@ def test_mirror_continuation_refresh_keeps_framework_version_and_private_assets(
     private.parent.mkdir(parents=True)
     private.write_bytes(b"Keep owning universe content\n")
     builder = load_script("continuation_policy_builder", "scripts/build-registry.py")
-    assert builder.refresh_policy(registry, include_continuation=True) == 0
+    assert builder.refresh_policy(registry, include_continuation=True, include_operational=operational) == 0
     assert metadata.read_bytes() == metadata_before
     assert private.read_bytes() == b"Keep owning universe content\n"
     target = registry / "platform/framework/skills/autonomy-follow-through/SKILL.md"
     assert target.read_bytes() == (REPO / ".claude/skills/autonomy-follow-through/SKILL.md").read_bytes()
-    assert builder.refresh_policy(registry, check=True, include_continuation=True) == 0
+    readiness = registry / "platform/framework/skills/operational-readiness/SKILL.md"
+    release = registry / "platform/framework/skills/release-verification/SKILL.md"
+    if operational:
+        assert readiness.read_bytes() == (REPO / ".claude/skills/operational-readiness/CLAUDE.md").read_bytes()
+        assert release.read_bytes() == (REPO / ".claude/skills/release-verification/SKILL.md").read_bytes()
+    else:
+        assert not readiness.exists()
+        assert not release.exists()
+    assert builder.refresh_policy(registry, check=True, include_continuation=True, include_operational=operational) == 0
     assert (registry/'platform/framework/scripts/lib/native_guidance.py').read_bytes() == (REPO/'scripts/lib/native_guidance.py').read_bytes()
 
 
@@ -701,6 +741,40 @@ def test_rollback_revalidates_after_preparing_recovery(tmp_path, monkeypatch):
     assert later.read_bytes() == b"Original later"
     assert not (root / "lock.json").exists()
     assert not list(root.glob(".*.tmp"))
+
+
+def test_rollback_continues_after_individual_recovery_failures(tmp_path, monkeypatch):
+    root = tmp_path
+    first, blocked, concurrent = (root / name for name in ("first.md", "blocked.md", "concurrent.md"))
+    for path in (first, blocked, concurrent):
+        path.write_bytes(b"Original")
+    resolver = load_script("native_rollback_batch_resolver", "scripts/ai-resolve.py")
+    outputs = {path.name: b"Updated" for path in (first, blocked, concurrent)}
+    outputs["lock.json"] = b"Owned"
+    snapshots = {rel: native.file_snapshot(root, rel, resolver) for rel in outputs}
+    atomic = resolver.atomic_replace
+
+    def fail_then_recover(dst, fill, **kwargs):
+        if dst.name == "lock.json":
+            concurrent.write_bytes(b"Concurrent edit")
+            raise OSError("Cannot publish ownership lock")
+        if dst == blocked and blocked.read_bytes() == b"Updated":
+            raise OSError("Cannot restore file")
+        return atomic(dst, fill, **kwargs)
+
+    monkeypatch.setattr(resolver, "atomic_replace", fail_then_recover)
+    with resolver._repo_apply_mutex(root):
+        with pytest.raises(ValueError, match="2 recoveries failed") as error:
+            native.apply_outputs(root, outputs, snapshots, resolver)
+
+    assert "concurrent.md" in str(error.value)
+    assert "blocked.md" in str(error.value)
+    assert "first.md" not in str(error.value)
+    assert str(error.value.__context__) == "Cannot publish ownership lock"
+    assert first.read_bytes() == b"Original"
+    assert blocked.read_bytes() == b"Updated"
+    assert concurrent.read_bytes() == b"Concurrent edit"
+    assert not (root / "lock.json").exists()
 
 
 @pytest.mark.parametrize("descriptor_relative", [False, True])

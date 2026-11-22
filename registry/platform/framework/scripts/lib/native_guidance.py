@@ -17,6 +17,8 @@ from time import monotonic
 
 NAMES = ("adaptable-development", "design-feature-adoption", "compatibility-improvement")
 CONTINUATION = "autonomy-follow-through"
+RELEASE_VERIFICATION = "release-verification"
+OPERATIONAL_SURFACE_ROOTS = {"codex": ".agents/skills", "cursor": ".cursor/skills"}
 LOCK = ".ai/native-guidance-lock.json"
 BEGIN = b"<!-- ai-starter-pack:development-policy:begin -->"
 END = b"<!-- ai-starter-pack:development-policy:end -->"
@@ -144,20 +146,30 @@ def apply_outputs(root: Path, outputs: dict, snapshots: dict, resolver) -> None:
                                         rel, snapshots[rel], "before replacement"))
             written.append(rel)
     except Exception:
+        unrestored = []
         for rel in reversed(written):
-            if snapshot(rel) != (outputs[rel], snapshots[rel][1] if snapshots[rel] else 0o644):
-                raise ValueError(f"{rel}: concurrent edit during rollback; retained for manual recovery")
-            dfd = dfds[Path(rel).parent.as_posix()]
-            old = snapshots[rel]
-            if old is None:
-                require_snapshot(rel, (outputs[rel], 0o644),
-                                 "before rollback removal; retained for manual recovery")
-                os.unlink(Path(rel).name, dir_fd=dfd)
-            else:
-                expected = (outputs[rel], old[1])
-                resolver.atomic_replace(root / rel, lambda f, data=old[0]: f.write(data), mode=old[1], dfd=dfd,
-                                        before_replace=lambda rel=rel, expected=expected: require_snapshot(
-                                            rel, expected, "during rollback; retained for manual recovery"))
+            try:
+                if snapshot(rel) != (outputs[rel], snapshots[rel][1] if snapshots[rel] else 0o644):
+                    raise ValueError(f"{rel}: concurrent edit during rollback; retained for manual recovery")
+                dfd = dfds[Path(rel).parent.as_posix()]
+                old = snapshots[rel]
+                if old is None:
+                    require_snapshot(rel, (outputs[rel], 0o644),
+                                     "before rollback removal; retained for manual recovery")
+                    os.unlink(Path(rel).name, dir_fd=dfd)
+                else:
+                    expected = (outputs[rel], old[1])
+                    resolver.atomic_replace(root / rel, lambda f, data=old[0]: f.write(data), mode=old[1], dfd=dfd,
+                                            before_replace=lambda rel=rel, expected=expected: require_snapshot(
+                                                rel, expected, "during rollback; retained for manual recovery"))
+            except Exception as rollback_err:
+                unrestored.append((rel, str(rollback_err)))
+        if unrestored:
+            names = ", ".join(sorted({rel for rel, _ in unrestored}))
+            raise ValueError(
+                f"rollback left {names} with new content; {len(unrestored)} recoveries failed: "
+                + "; ".join(f"{rel}: {err}" for rel, err in unrestored)
+                + " — reconcile manually")
         raise
     finally:
         for dfd in dfds.values():
@@ -283,7 +295,14 @@ def _resolve(args, root, resolver, manifest, registry, index):
     continuation = flags.get("native_guidance_continuation", False)
     if type(continuation) is not bool:
         raise ValueError("native_guidance_continuation must be boolean")
-    names = NAMES + (CONTINUATION,) if continuation else NAMES
+    operational = flags.get("native_guidance_operational_skills", False)
+    if type(operational) is not bool:
+        raise ValueError("native_guidance_operational_skills must be boolean")
+    names = NAMES
+    if continuation or operational:
+        names += (CONTINUATION,)
+    if operational:
+        names += (RELEASE_VERIFICATION,)
     sources, evals, companions = {}, {}, {}
     for name in names:
         assets = [("SKILL.md", sources), ("evals/cases.json", evals)]
@@ -359,6 +378,14 @@ def _resolve(args, root, resolver, manifest, registry, index):
         add(f"{skill_root}/{name}/evals/cases.json", evals[name])
     for rel, data in companions.items():
         add(f"{skill_root}/{rel}", data)
+    if operational:
+        for surface, native_root in OPERATIONAL_SURFACE_ROOTS.items():
+            if surface not in surfaces:
+                continue
+            for name in (CONTINUATION, RELEASE_VERIFICATION):
+                add(f"{native_root}/{name}/SKILL.md", sources[name])
+            for rel, data in companions.items():
+                add(f"{native_root}/{rel}", data)
     # Never silently abandon a surface that a previous install managed.
     if set(records) - set(outputs):
         raise ValueError("surface selection removes managed files; revert their owning commit explicitly")

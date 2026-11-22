@@ -240,3 +240,28 @@ evidence of native policy installation.
 | `plugin/manolii-om` | `registry/platform/om` | `/manolii-om:*` → `/om:*` |
 | `.claude/` template render | `registry/platform/*` (generated from it today; generates it in P2) | none (materialise-in-place) |
 | master ring-1/ring-2/routing copies | `registry/platform/*` + universe scopes | copies freeze in P2 |
+
+## Operational skill installation
+
+Consumers can opt in with `feature_flags.native_guidance_operational_skills: true`
+in their existing manifest. Use a reviewed registry revision containing
+`autonomy-follow-through` and `release-verification`. The option installs the
+two skills in the existing repository skill root. It also writes native
+`.agents/skills` and `.cursor/skills` copies only for the selected Codex and
+Cursor surfaces. The owned copies share exact source bytes and companion
+instructions. Earlier manifests and pins retain their existing install paths.
+
+Refresh a private platform mirror with the pack's
+`build-registry.py --policy-only --include-operational --registry-root <registry>`.
+The refresh also publishes the operational-readiness recovery guidance to the mirror.
+Preview and check with the matching resolver. Reconcile any curated or
+locally generated path collision before adopting. Revert the adoption commit
+to roll back the owned files and manifest together.
+
+The existing native guidance lock records the installed file digests. In a fresh
+target session, ask whether its loader discovered the skill, then exercise a
+matching and a routine unrelated task against a non-production fixture. Record
+the observed version, target host, source digest, executed tool result and
+outcome. Use a read-only PR or deployment-status fixture for background
+schedulers. Installation and a delivered notification supply setup evidence.
+Execution, deployment and acceptance each require their own readback.
