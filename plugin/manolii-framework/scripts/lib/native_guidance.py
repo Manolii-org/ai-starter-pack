@@ -146,20 +146,30 @@ def apply_outputs(root: Path, outputs: dict, snapshots: dict, resolver) -> None:
                                         rel, snapshots[rel], "before replacement"))
             written.append(rel)
     except Exception:
+        unrestored = []
         for rel in reversed(written):
-            if snapshot(rel) != (outputs[rel], snapshots[rel][1] if snapshots[rel] else 0o644):
-                raise ValueError(f"{rel}: concurrent edit during rollback; retained for manual recovery")
-            dfd = dfds[Path(rel).parent.as_posix()]
-            old = snapshots[rel]
-            if old is None:
-                require_snapshot(rel, (outputs[rel], 0o644),
-                                 "before rollback removal; retained for manual recovery")
-                os.unlink(Path(rel).name, dir_fd=dfd)
-            else:
-                expected = (outputs[rel], old[1])
-                resolver.atomic_replace(root / rel, lambda f, data=old[0]: f.write(data), mode=old[1], dfd=dfd,
-                                        before_replace=lambda rel=rel, expected=expected: require_snapshot(
-                                            rel, expected, "during rollback; retained for manual recovery"))
+            try:
+                if snapshot(rel) != (outputs[rel], snapshots[rel][1] if snapshots[rel] else 0o644):
+                    raise ValueError(f"{rel}: concurrent edit during rollback; retained for manual recovery")
+                dfd = dfds[Path(rel).parent.as_posix()]
+                old = snapshots[rel]
+                if old is None:
+                    require_snapshot(rel, (outputs[rel], 0o644),
+                                     "before rollback removal; retained for manual recovery")
+                    os.unlink(Path(rel).name, dir_fd=dfd)
+                else:
+                    expected = (outputs[rel], old[1])
+                    resolver.atomic_replace(root / rel, lambda f, data=old[0]: f.write(data), mode=old[1], dfd=dfd,
+                                            before_replace=lambda rel=rel, expected=expected: require_snapshot(
+                                                rel, expected, "during rollback; retained for manual recovery"))
+            except Exception as rollback_err:
+                unrestored.append((rel, str(rollback_err)))
+        if unrestored:
+            names = ", ".join(sorted({rel for rel, _ in unrestored}))
+            raise ValueError(
+                f"rollback left {names} with new content; {len(unrestored)} recoveries failed: "
+                + "; ".join(f"{rel}: {err}" for rel, err in unrestored)
+                + " — reconcile manually")
         raise
     finally:
         for dfd in dfds.values():
