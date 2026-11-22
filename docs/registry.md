@@ -241,7 +241,7 @@ evidence of native policy installation.
 | `.claude/` template render | `registry/platform/*` (generated from it today; generates it in P2) | none (materialise-in-place) |
 | master ring-1/ring-2/routing copies | `registry/platform/*` + universe scopes | copies freeze in P2 |
 
-### Operational skill installation
+## Operational skill installation
 
 Consumers can opt in with `feature_flags.native_guidance_operational_skills: true`
 in their existing manifest. Use a reviewed registry revision containing
@@ -253,6 +253,7 @@ instructions. Earlier manifests and pins retain their existing install paths.
 
 Refresh a private platform mirror with the pack's
 `build-registry.py --policy-only --include-operational --registry-root <registry>`.
+The refresh also publishes the operational-readiness recovery guidance to the mirror.
 Preview and check with the matching resolver. Reconcile any curated or
 locally generated path collision before adopting. Revert the adoption commit
 to roll back the owned files and manifest together.

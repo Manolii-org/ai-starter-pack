@@ -156,7 +156,8 @@ def test_continuation_selection_is_a_boolean_not_a_truthy_value(consumer, value)
     assert files(root) == before
 
 
-def test_mirror_continuation_refresh_keeps_framework_version_and_private_assets(consumer):
+@pytest.mark.parametrize("operational", [False, True])
+def test_mirror_policy_refresh_keeps_framework_version_and_private_assets(consumer, operational):
     _, source = consumer
     registry = source / "registry"
     metadata = registry / "platform/framework/.claude-plugin/plugin.json"
@@ -165,12 +166,20 @@ def test_mirror_continuation_refresh_keeps_framework_version_and_private_assets(
     private.parent.mkdir(parents=True)
     private.write_bytes(b"Keep owning universe content\n")
     builder = load_script("continuation_policy_builder", "scripts/build-registry.py")
-    assert builder.refresh_policy(registry, include_continuation=True) == 0
+    assert builder.refresh_policy(registry, include_continuation=True, include_operational=operational) == 0
     assert metadata.read_bytes() == metadata_before
     assert private.read_bytes() == b"Keep owning universe content\n"
     target = registry / "platform/framework/skills/autonomy-follow-through/SKILL.md"
     assert target.read_bytes() == (REPO / ".claude/skills/autonomy-follow-through/SKILL.md").read_bytes()
-    assert builder.refresh_policy(registry, check=True, include_continuation=True) == 0
+    readiness = registry / "platform/framework/skills/operational-readiness/SKILL.md"
+    release = registry / "platform/framework/skills/release-verification/SKILL.md"
+    if operational:
+        assert readiness.read_bytes() == (REPO / ".claude/skills/operational-readiness/CLAUDE.md").read_bytes()
+        assert release.read_bytes() == (REPO / ".claude/skills/release-verification/SKILL.md").read_bytes()
+    else:
+        assert not readiness.exists()
+        assert not release.exists()
+    assert builder.refresh_policy(registry, check=True, include_continuation=True, include_operational=operational) == 0
     assert (registry/'platform/framework/scripts/lib/native_guidance.py').read_bytes() == (REPO/'scripts/lib/native_guidance.py').read_bytes()
 
 

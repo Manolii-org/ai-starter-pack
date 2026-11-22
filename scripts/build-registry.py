@@ -74,14 +74,17 @@ def refresh_policy(target: Path, check: bool = False, include_continuation: bool
         if include_continuation or include_operational:
             names += (native.CONTINUATION,)
         if include_operational:
-            names += (native.RELEASE_VERIFICATION,)
+            names += (native.RELEASE_VERIFICATION, "operational-readiness")
         for name in names:
             leaves = ("SKILL.md", "evals/cases.json")
             if name == native.CONTINUATION:
                 leaves += ("review-evidence.md",)
+            if name == "operational-readiness":
+                leaves = ("SKILL.md",)
             for leaf in leaves:
                 rel = f"platform/framework/skills/{name}/{leaf}"
-                source = resolver._read_source(REPO, f".claude/skills/{name}/{leaf}")
+                source_leaf = "CLAUDE.md" if name == "operational-readiness" else leaf
+                source = resolver._read_source(REPO, f".claude/skills/{name}/{source_leaf}")
                 if source is None:
                     raise ValueError(f"unsafe or unreadable policy source: {name}/{leaf}")
                 outputs[rel] = source[0]
