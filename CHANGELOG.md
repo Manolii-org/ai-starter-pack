@@ -101,6 +101,10 @@
 
 ### Security
 
+- Refreshed the feature-controls and exploratory-bug-bash harness lockfiles
+  to pick up patched transitive dependencies. Updated the exact ESLint and
+  TypeScript-ESLint pins for patched minimatch resolution, and regenerated
+  the plugin and platform registry harness copies.
 - **Production identifier removed; leak lint widened.** A production Supabase
   project ref was shipped in the `migration-drift` skill examples because
   `PACK-SURFACE` only matched the `db.<ref>.supabase.co` host form. The example
