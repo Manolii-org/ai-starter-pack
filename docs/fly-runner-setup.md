@@ -182,8 +182,10 @@ share the same GitHub owner (the part before `/`) — the checker correlates the
 wake with the consumer organization — and the operator must use an identity
 able to read Actions in both repositories.
 For a scheduled wake, omit `--wake-job`. Use `--scenario missed-event` and the
-declared backstop target for the fallback drill. Manually started capacity is
-diagnostic evidence. Synthetic wakes verify startup and registration. The
+declared backstop target for the fallback drill. Automatic wake qualification
+uses the original attempts of the fleet scale and consumer wake jobs. Manually
+started capacity and manually rerun wake jobs provide diagnostic evidence.
+Synthetic wakes verify startup and registration. The
 cutover check requires actual queued work and assignment to a newly started
 Machine. Use ordinary jobs in a quiet, owner-approved window and keep all
 tenant credentials in their existing scopes.

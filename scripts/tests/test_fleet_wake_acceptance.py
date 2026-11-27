@@ -15,7 +15,7 @@ class WakeEvidenceTest(unittest.TestCase):
     def setUp(self):
         self.job = {"run_id": 10, "id": 11, "labels": ["FLY"], "runner_name": "fly-abc123", "conclusion": "success",
                     "created_at": "2026-11-27T00:00:00Z", "started_at": "2026-11-27T00:00:20Z"}
-        self.scale = {"run_id": 12, "id": 13, "name": "Scale sample", "conclusion": "success",
+        self.scale = {"run_id": 12, "run_attempt": 1, "id": 13, "name": "Scale sample", "conclusion": "success",
                       "started_at": "2026-11-27T00:00:10Z", "completed_at": "2026-11-27T00:00:30Z"}
         self.scale_run = {"path": ".github/workflows/fleet-scale.yml", "event": "schedule", "head_branch": "main",
                           "created_at": "2026-11-27T00:00:09Z"}
@@ -34,6 +34,12 @@ class WakeEvidenceTest(unittest.TestCase):
         self.assertEqual(receipt["wake_source"], "scheduled")
         self.assertEqual(receipt["wait_seconds"], 20)
 
+    def test_manual_retry_of_schedule_is_diagnostic(self):
+        self.scale["run_attempt"] = 2
+        with self.assertRaisesRegex(ValueError, "first attempt"):
+            self.evidence()
+        self.assertEqual(self.evidence("busy")["wake_source"], "manual")
+
     def test_cold_event_wake(self):
         self.scale_run["event"] = "workflow_dispatch"
         self.logs = self.logs.replace("busy=1", "busy=0").replace(" started=1", " started=0")
@@ -46,6 +52,11 @@ class WakeEvidenceTest(unittest.TestCase):
             self.evidence("cold", ("Other/broker", *wake[1:]))
         with self.assertRaisesRegex(ValueError, "selected fleet run"):
             self.evidence("cold", (*wake[:3], wake[3].replace('"run_id": 12', '"run_id": 99')))
+        with self.assertRaisesRegex(ValueError, "first attempts"):
+            self.evidence("cold", (wake[0], {**wake[1], "run_attempt": 2}, *wake[2:]))
+        self.scale["run_attempt"] = 2
+        with self.assertRaisesRegex(ValueError, "first attempts"):
+            self.evidence("cold", wake)
 
     def test_needs_real_compatible_assignment_and_complete_demand(self):
         original = copy.deepcopy(self.job)

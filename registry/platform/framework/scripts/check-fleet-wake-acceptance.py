@@ -88,13 +88,15 @@ def validate(repo, fleet_repo, tenant, scenario, target, job, scale, scale_run, 
     need(0 <= wait <= target, f"pickup took {wait}s against a {target}s target")
 
     wake_source = "manual"
-    if scale_run.get("event") == "schedule":
+    if scale_run.get("event") == "schedule" and scale.get("run_attempt") == 1:
         wake_source = "scheduled"
     if scenario == "missed-event":
-        need(wake_source == "scheduled", "the fallback test must be picked up by a scheduled fleet run")
+        need(wake_source == "scheduled", "the fallback test needs the first attempt of a scheduled fleet run")
     if wake is not None:
         wake_repo, wake_job, wake_run, wake_logs = wake
         need(wake_source != "scheduled" and action == "up: start-only", "consumer wake must drive start-only scale")
+        need(scale.get("run_attempt") == 1 and wake_job.get("run_attempt") == 1,
+             "event qualification needs the first attempts of the consumer wake and fleet scale")
         need(wake_repo.split("/", 1)[0].casefold() == repo.split("/", 1)[0].casefold(),
              "consumer wake and demand must belong to the same organization")
         need(wake_job.get("conclusion") == "success" and wake_run.get("path") == WAKE_WORKFLOW
