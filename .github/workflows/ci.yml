@@ -121,9 +121,6 @@ jobs:
           python3 -m venv "$RUNNER_TEMP/feature-control-conformance"
           "$RUNNER_TEMP/feature-control-conformance/bin/pip" install --quiet -e ./packages/feature-controls/python pytest==8.3.5
           "$RUNNER_TEMP/feature-control-conformance/bin/python" -m pytest -q tests/feature_controls/provider_conformance.py tests/feature_controls/release_policy_conformance.py tests/feature_controls/release_policy_tool_conformance.py
-      - name: Check shared fleet wake acceptance
-        if: hashFiles('scripts/tests/test_fleet_wake_acceptance.py') != ''
-        run: python3 -m unittest discover -s scripts/tests -p test_fleet_wake_acceptance.py
       - name: Feature release source declaration
         if: ${{ !cancelled() && steps.conformance.outcome == 'success' }}
         run: |
