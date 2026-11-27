@@ -167,7 +167,8 @@ evidence it also checks the consumer dispatch in the same time window.
 
 ```bash
 python3 scripts/check-fleet-wake-acceptance.py \
-  --tenant TENANT --repository OWNER/REPO --scenario busy \
+  --tenant TENANT --repository OWNER/REPO --fleet-repository FLEET_OWNER/FLEET_REPO \
+  --scenario busy \
   --job PRODUCT_JOB_ID --scale-job FLEET_JOB_ID \
   --wake-job CONSUMER_WAKE_JOB_ID --target-seconds 300
 ```

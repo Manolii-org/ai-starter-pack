@@ -8,7 +8,6 @@ import subprocess
 import sys
 from datetime import datetime
 
-FLEET = "Manolii-org/actions-runner-fleet"
 RECONCILERS = {".github/workflows/fleet-scale.yml", ".github/workflows/fleet-monitor.yml"}
 WAKE_WORKFLOW = ".github/workflows/fleet-scale-wake.yml"
 ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
@@ -33,7 +32,7 @@ def relative_job(job):
     return f"actions/runs/{job['run_id']}/job/{job['id']}"
 
 
-def validate(repo, tenant, scenario, target, job, scale, scale_run, logs, wake=None):
+def validate(repo, fleet_repo, tenant, scenario, target, job, scale, scale_run, logs, wake=None):
     """Return a receipt only after matching queue pressure, Machine and GitHub job."""
     need(job.get("conclusion") == "success", "the consumer job must pass")
     need("fly" in {label.casefold() for label in job["labels"]}, "the consumer job must request the fly label")
@@ -95,7 +94,7 @@ def validate(repo, tenant, scenario, target, job, scale, scale_run, logs, wake=N
     receipt = {
         "tenant": tenant, "repository": repo, "scenario": scenario, "wake_source": wake_source,
         "job": f"https://github.com/{repo}/{relative_job(job)}",
-        "scale_job": f"https://github.com/{FLEET}/{relative_job(scale)}",
+        "scale_job": f"https://github.com/{fleet_repo}/{relative_job(scale)}",
         "started_before": started, "wait_seconds": wait,
     }
     if wake is not None:
@@ -122,6 +121,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--tenant", required=True)
     parser.add_argument("--repository", required=True)
+    parser.add_argument("--fleet-repository", required=True, help="owning fleet controller repository (OWNER/REPO)")
     parser.add_argument("--scenario", choices=["busy", "cold", "missed-event"], required=True)
     parser.add_argument("--job", type=int, required=True, help="completed consumer job database ID")
     parser.add_argument("--scale-job", type=int, required=True, help="fleet scale/monitor job database ID")
@@ -132,20 +132,20 @@ def main():
     try:
         need(re.fullmatch(r"[a-z0-9][a-z0-9-]*", args.tenant), "invalid tenant name")
         wake_repo = args.wake_repository or args.repository
-        for repo in (args.repository, wake_repo):
+        for repo in (args.repository, args.fleet_repository, wake_repo):
             need(re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo), "expected owner/repository")
         need(args.job > 0 and args.scale_job > 0 and args.target_seconds > 0, "positive job IDs and target required")
         need(args.wake_job is not None or args.wake_repository is None, "--wake-repository requires --wake-job")
         job = github_job(args.repository, args.job)
-        scale = github_job(FLEET, args.scale_job)
-        scale_run, logs = run_and_log(FLEET, scale)
+        scale = github_job(args.fleet_repository, args.scale_job)
+        scale_run, logs = run_and_log(args.fleet_repository, scale)
         wake = None
         if args.wake_job is not None:
             need(args.wake_job > 0, "positive wake job ID required")
             wake_job = github_job(wake_repo, args.wake_job)
             wake_run, wake_logs = run_and_log(wake_repo, wake_job)
             wake = (wake_repo, wake_job, wake_run, wake_logs)
-        print(json.dumps(validate(args.repository, args.tenant, args.scenario, args.target_seconds,
+        print(json.dumps(validate(args.repository, args.fleet_repository, args.tenant, args.scenario, args.target_seconds,
                                   job, scale, scale_run, logs, wake), indent=2))
     except (KeyError, ValueError, TypeError, OSError, subprocess.SubprocessError) as exc:
         print(f"Wake acceptance: {exc}", file=sys.stderr)

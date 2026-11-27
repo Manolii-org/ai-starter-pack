@@ -26,7 +26,7 @@ class WakeEvidenceTest(unittest.TestCase):
         )
 
     def evidence(self, scenario="missed-event", wake=None, target=300):
-        return wake_acceptance.validate("Example/product", "sample", scenario, target, self.job,
+        return wake_acceptance.validate("Example/product", "Platform/fleet", "sample", scenario, target, self.job,
                                         self.scale, self.scale_run, self.logs, wake)
 
     def test_scheduled_fallback(self):
