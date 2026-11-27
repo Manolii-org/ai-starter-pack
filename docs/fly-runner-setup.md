@@ -87,7 +87,7 @@ primary_region = "lax"
 
 ### 4. Point heavy CI jobs at Fly (house-guard — not Autofix)
 
-For fleet tenants (Manolii / Impaktful / Buro), heavy **product CI** must use the
+For fleet tenants, heavy **product CI** must use the
 house-guard expression — **not** a static label list. Static labels have no
 kill-switch; inverting the fallback to `ubuntu-latest` while
 `CI_RUNNER_OVERRIDE` is deleted is the Impaktful #1737 regression
@@ -141,6 +141,43 @@ flyctl deploy --app {YOUR_ORG}-gh-runner
 ```
 
 The runner will register with GitHub automatically and appear under Settings → Actions → Runners.
+
+### 6. Qualify demand-driven job pickup
+
+In the owning fleet wake policy, record the consumer repositories, event
+triggers, scheduled backstop, and pickup targets. Run the owning fleet's live
+wiring check with the tenant's GitHub identity. If relying on scheduled scaling,
+link the owner's approval of that policy and its pickup target.
+
+Before switching heavy CI to Fly or allowing capacity to park faster, collect
+successful, representative jobs for these cases under the proposed floor:
+
+1. All started general runners are busy and another real job starts a parked
+   Machine and picks up on it.
+2. A scheduled fleet run starts capacity and the job picks up after an event
+   was missed or is outside the configured event coverage.
+3. For a zero-warm pool, a real queued job wakes a Machine from zero started
+   and runs on it.
+
+Use `scripts/check-fleet-wake-acceptance.py` with an identity permitted to read
+Actions in the consumer and fleet repositories. Record the JSON in the owning
+fleet policy and run its cutover check before switching routing. The tool
+correlates the actual job with the Machine start and pickup time. For event
+evidence it also checks the consumer dispatch in the same time window.
+
+```bash
+python3 scripts/check-fleet-wake-acceptance.py \
+  --tenant TENANT --repository OWNER/REPO --scenario busy \
+  --job PRODUCT_JOB_ID --scale-job FLEET_JOB_ID \
+  --wake-job CONSUMER_WAKE_JOB_ID --target-seconds 300
+```
+
+For a scheduled wake, omit `--wake-job`. Use `--scenario missed-event` and the
+declared backstop target for the fallback drill. Manually started capacity is
+diagnostic evidence. Synthetic wakes verify startup and registration. The
+cutover check requires actual queued work and assignment to a newly started
+Machine. Use ordinary jobs in a quiet, owner-approved window and keep all
+tenant credentials in their existing scopes.
 
 ## Runner version policy
 
