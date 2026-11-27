@@ -39,10 +39,13 @@ class WakeEvidenceTest(unittest.TestCase):
         self.logs = self.logs.replace("busy=1", "busy=0").replace(" started=1", " started=0")
         wake = ("Example/broker", {**self.scale, "started_at": "2026-11-27T00:00:04Z"},
                 {"path": wake_acceptance.WAKE_WORKFLOW, "event": "workflow_run"},
-                '{"dispatched": true, "dry_run": false}')
+                'wake\tdispatch\t2026-11-27T00:00:09Z {"dispatched": true, "dry_run": false, "fleet_dispatch": '
+                '{"repository": "Platform/fleet", "tenant": "sample", "action": "up", "run_id": 12}}')
         self.assertEqual(self.evidence("cold", wake)["wake_source"], "event")
         with self.assertRaisesRegex(ValueError, "same organization"):
             self.evidence("cold", ("Other/broker", *wake[1:]))
+        with self.assertRaisesRegex(ValueError, "selected fleet run"):
+            self.evidence("cold", (*wake[:3], wake[3].replace('"run_id": 12', '"run_id": 99')))
 
     def test_needs_real_compatible_assignment_and_complete_demand(self):
         original = copy.deepcopy(self.job)

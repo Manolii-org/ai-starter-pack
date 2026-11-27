@@ -32,6 +32,22 @@ def relative_job(job):
     return f"actions/runs/{job['run_id']}/job/{job['id']}"
 
 
+def dispatch_records(log):
+    """Read exact run IDs logged by the trusted consumer dispatcher."""
+    for line in log.splitlines():
+        parts = line.split("\t", 2)
+        message = parts[-1]
+        message = re.sub(r"^\d{4}-\d{2}-\d{2}T\S+Z\s+", "", message).strip()
+        if not message.startswith("{"):
+            continue
+        try:
+            value = json.loads(message)
+        except ValueError:
+            continue
+        if isinstance(value, dict) and value.get("dispatched") is True and value.get("dry_run") is False:
+            yield value.get("fleet_dispatch")
+
+
 def validate(repo, fleet_repo, tenant, scenario, target, job, scale, scale_run, logs, wake=None):
     """Return a receipt only after matching queue pressure, Machine and GitHub job."""
     need(job.get("conclusion") == "success", "the consumer job must pass")
@@ -83,8 +99,9 @@ def validate(repo, fleet_repo, tenant, scenario, target, job, scale, scale_run, 
              "consumer wake and demand must belong to the same organization")
         need(wake_job.get("conclusion") == "success" and wake_run.get("path") == WAKE_WORKFLOW
              and wake_run.get("event") != "workflow_dispatch", "expected an event-triggered consumer wake workflow")
-        need(re.search(r'"dispatched"\s*:\s*true,\s*"dry_run"\s*:\s*false', wake_logs),
-             "consumer wake did not record a live dispatch")
+        expected_dispatch = {"repository": fleet_repo, "tenant": tenant, "action": "up", "run_id": scale["run_id"]}
+        need(scale_run.get("event") == "workflow_dispatch" and expected_dispatch in dispatch_records(wake_logs),
+             "consumer wake did not record the selected fleet run and tenant")
         fleet_created = timestamp(scale_run, "created_at")
         wake_started = timestamp(wake_job, "started_at")
         wake_finished = timestamp(wake_job, "completed_at")
@@ -99,6 +116,7 @@ def validate(repo, fleet_repo, tenant, scenario, target, job, scale, scale_run, 
     }
     if wake is not None:
         receipt["wake_job"] = f"https://github.com/{wake_repo}/{relative_job(wake_job)}"
+        receipt["dispatch_run_id"] = scale["run_id"]
     return receipt
 
 

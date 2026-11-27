@@ -159,11 +159,14 @@ successful, representative jobs for these cases under the proposed floor:
 3. For a zero-warm pool, a real queued job wakes a Machine from zero started
    and runs on it.
 
-Use `scripts/check-fleet-wake-acceptance.py` with an identity permitted to read
-Actions in the consumer and fleet repositories. Record the JSON in the owning
+This check applies to a managed fleet whose runners register as
+`fly-<Machine ID>`. The standalone Docker runner example above uses its own
+naming and lifecycle. Install the [GitHub CLI](https://cli.github.com/) and
+authenticate with `gh auth login` using an identity permitted to read Actions
+in the consumer and fleet repositories. Record the JSON in the owning
 fleet policy and run its cutover check before switching routing. The tool
 correlates the actual job with the Machine start and pickup time. For event
-evidence it also checks the consumer dispatch in the same time window.
+evidence it requires the exact fleet run ID logged by the consumer dispatcher.
 
 ```bash
 python3 scripts/check-fleet-wake-acceptance.py \
@@ -173,6 +176,8 @@ python3 scripts/check-fleet-wake-acceptance.py \
   --wake-job CONSUMER_WAKE_JOB_ID --target-seconds 300
 ```
 
+If a tenant broker dispatched from another repository, add
+`--wake-repository OWNER/BROKER` and use an identity that can read its Actions logs.
 For a scheduled wake, omit `--wake-job`. Use `--scenario missed-event` and the
 declared backstop target for the fallback drill. Manually started capacity is
 diagnostic evidence. Synthetic wakes verify startup and registration. The
