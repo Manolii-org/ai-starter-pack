@@ -171,6 +171,9 @@ jobs:
       - name: Review evidence regressions
         run: python3 -m pytest scripts/tests/test_review_evidence.py -q
 
+      - name: Fleet wake acceptance regressions
+        run: python3 -m unittest discover -s scripts/tests -p test_fleet_wake_acceptance.py
+
       - name: Release manifest and admission contracts
         run: >-
           python3 -m unittest discover -s scripts/tests
