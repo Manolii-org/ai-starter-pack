@@ -177,7 +177,10 @@ python3 scripts/check-fleet-wake-acceptance.py \
 ```
 
 If a tenant broker dispatched from another repository, add
-`--wake-repository OWNER/BROKER` and use an identity that can read its Actions logs.
+`--wake-repository OWNER/BROKER`. The broker and consumer repositories must
+share the same GitHub owner (the part before `/`) — the checker correlates the
+wake with the consumer organization — and the operator must use an identity
+able to read Actions in both repositories.
 For a scheduled wake, omit `--wake-job`. Use `--scenario missed-event` and the
 declared backstop target for the fallback drill. Manually started capacity is
 diagnostic evidence. Synthetic wakes verify startup and registration. The
