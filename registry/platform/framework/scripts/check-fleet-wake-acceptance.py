@@ -45,7 +45,9 @@ def dispatch_records(log):
         except ValueError:
             continue
         if isinstance(value, dict) and value.get("dispatched") is True and value.get("dry_run") is False:
-            yield value.get("fleet_dispatch")
+            record = value.get("fleet_dispatch")
+            if isinstance(record, dict) and isinstance(record.get("repository"), str):
+                yield {**record, "repository": record["repository"].casefold()}
 
 
 def validate(repo, fleet_repo, tenant, scenario, target, job, scale, scale_run, logs, wake=None):
@@ -58,6 +60,7 @@ def validate(repo, fleet_repo, tenant, scenario, target, job, scale, scale_run, 
          "the scale job must be successful and belong to this tenant")
     need(scale_run.get("path") in RECONCILERS and scale_run.get("head_branch") == "main",
          "the scale run must come from an owning fleet workflow on main")
+    fleet_repo = (scale_run.get("repository") or {}).get("full_name") or fleet_repo
     need(not re.search(r"^.*\[dry-run\] .*machine start ", logs, re.MULTILINE), "dry-run cannot qualify a wake")
     samples = DEMAND.findall(logs)
     need(len(samples) == 1, "expected one scaler queue observation")
@@ -102,7 +105,7 @@ def validate(repo, fleet_repo, tenant, scenario, target, job, scale, scale_run, 
         need(wake_job.get("conclusion") == "success" and wake_run.get("path") == WAKE_WORKFLOW
              and wake_run.get("event") not in {None, "schedule", "workflow_dispatch"},
              "expected an event-triggered consumer wake workflow")
-        expected_dispatch = {"repository": fleet_repo, "tenant": tenant, "action": "up", "run_id": scale["run_id"]}
+        expected_dispatch = {"repository": fleet_repo.casefold(), "tenant": tenant, "action": "up", "run_id": scale["run_id"]}
         need(scale_run.get("event") == "workflow_dispatch" and expected_dispatch in dispatch_records(wake_logs),
              "consumer wake did not record the selected fleet run and tenant")
         fleet_created = timestamp(scale_run, "created_at")

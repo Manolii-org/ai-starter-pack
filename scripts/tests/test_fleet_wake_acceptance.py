@@ -18,6 +18,7 @@ class WakeEvidenceTest(unittest.TestCase):
         self.scale = {"run_id": 12, "run_attempt": 1, "id": 13, "name": "Scale sample", "conclusion": "success",
                       "started_at": "2026-11-27T00:00:10Z", "completed_at": "2026-11-27T00:00:30Z"}
         self.scale_run = {"path": ".github/workflows/fleet-scale.yml", "event": "schedule", "head_branch": "main",
+                          "repository": {"full_name": "Platform/fleet"},
                           "created_at": "2026-11-27T00:00:09Z"}
         self.logs = (
             "demand=2 (busy=1+queued=1; probed=1, forwarded_floor=0, applied_floor=0) "
@@ -26,7 +27,7 @@ class WakeEvidenceTest(unittest.TestCase):
         )
 
     def evidence(self, scenario="missed-event", wake=None, target=300):
-        return wake_acceptance.validate("Example/product", "Platform/fleet", "sample", scenario, target, self.job,
+        return wake_acceptance.validate("Example/product", "platform/fleet", "sample", scenario, target, self.job,
                                         self.scale, self.scale_run, self.logs, wake)
 
     def test_scheduled_fallback(self):
@@ -47,7 +48,11 @@ class WakeEvidenceTest(unittest.TestCase):
                 {"path": wake_acceptance.WAKE_WORKFLOW, "event": "workflow_run"},
                 'wake\tdispatch\t2026-11-27T00:00:09Z {"dispatched": true, "dry_run": false, "fleet_dispatch": '
                 '{"repository": "Platform/fleet", "tenant": "sample", "action": "up", "run_id": 12}}')
-        self.assertEqual(self.evidence("cold", wake)["wake_source"], "event")
+        receipt = self.evidence("cold", wake)
+        self.assertEqual(receipt["wake_source"], "event")
+        self.assertIn("github.com/Platform/fleet/", receipt["scale_job"])
+        self.assertEqual(self.evidence("cold", (*wake[:3], wake[3].replace("Platform/fleet", "PLATFORM/FLEET"))),
+                         receipt)
         with self.assertRaisesRegex(ValueError, "event-triggered"):
             self.evidence("cold", (*wake[:2], {**wake[2], "event": "schedule"}, wake[3]))
         with self.assertRaisesRegex(ValueError, "same organization"):
