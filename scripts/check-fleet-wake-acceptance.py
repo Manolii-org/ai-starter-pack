@@ -100,7 +100,8 @@ def validate(repo, fleet_repo, tenant, scenario, target, job, scale, scale_run, 
         need(wake_repo.split("/", 1)[0].casefold() == repo.split("/", 1)[0].casefold(),
              "consumer wake and demand must belong to the same organization")
         need(wake_job.get("conclusion") == "success" and wake_run.get("path") == WAKE_WORKFLOW
-             and wake_run.get("event") != "workflow_dispatch", "expected an event-triggered consumer wake workflow")
+             and wake_run.get("event") not in {None, "schedule", "workflow_dispatch"},
+             "expected an event-triggered consumer wake workflow")
         expected_dispatch = {"repository": fleet_repo, "tenant": tenant, "action": "up", "run_id": scale["run_id"]}
         need(scale_run.get("event") == "workflow_dispatch" and expected_dispatch in dispatch_records(wake_logs),
              "consumer wake did not record the selected fleet run and tenant")

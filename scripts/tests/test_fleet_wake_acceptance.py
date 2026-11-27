@@ -48,6 +48,8 @@ class WakeEvidenceTest(unittest.TestCase):
                 'wake\tdispatch\t2026-11-27T00:00:09Z {"dispatched": true, "dry_run": false, "fleet_dispatch": '
                 '{"repository": "Platform/fleet", "tenant": "sample", "action": "up", "run_id": 12}}')
         self.assertEqual(self.evidence("cold", wake)["wake_source"], "event")
+        with self.assertRaisesRegex(ValueError, "event-triggered"):
+            self.evidence("cold", (*wake[:2], {**wake[2], "event": "schedule"}, wake[3]))
         with self.assertRaisesRegex(ValueError, "same organization"):
             self.evidence("cold", ("Other/broker", *wake[1:]))
         with self.assertRaisesRegex(ValueError, "selected fleet run"):
