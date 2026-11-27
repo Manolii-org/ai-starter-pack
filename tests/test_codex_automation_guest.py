@@ -77,6 +77,18 @@ def test_assessment_pass_runs_every_requested_role_and_reports_held_roster(sandb
     assert "test_policy.py" in diff and "policy.py" in diff
 
 
+def test_oversized_assessment_holds_before_invoking_classifier(sandbox, monkeypatch, capsys):
+    monkeypatch.setattr(guest, "MAX_REQUEST_CHARS", 64)
+    calls = []
+    fake_stages(monkeypatch, {"invoke_skills": [], "invoke_agents": []}, calls)
+
+    assert guest.main() == 3
+    assert json.loads(capsys.readouterr().out) == {
+        "status": "held", "reason": "subscription_text_input_exhausted",
+    }
+    assert calls == []
+
+
 @pytest.mark.parametrize("manifest", [
     {"invoke_skills": [1]}, {"invoke_skills": ["a,b"]}, {"invoke_agents": [None]},
 ])

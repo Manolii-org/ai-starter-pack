@@ -208,7 +208,9 @@ runtime image. Do not enable it by setting a flag on a legacy secret-bearing job
 
 The classifier, specialist, broad-agent and Judge integrations bypass legacy credential guards and HTTP resolution
 only inside the isolated guest. It sends complete supplied diff, path inventory
-and metadata, or holds when the bounded transport cannot accept them. Unknown
+and metadata, or holds when the bounded transport cannot accept them. A diff
+that alone exceeds the transport limit is held with
+`subscription_text_input_exhausted` before the classifier starts. Unknown
 outcomes, invalid manifests and unsupported policies do not become the legacy
 fallback manifest. Ordinary default consumers retain their existing transport
 and limits. Explicit direct/client-model policies and no-AI sensitivity remain

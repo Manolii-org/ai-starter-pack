@@ -39,6 +39,7 @@ PR_META = Path("/input/pr-meta.json")
 MAX_PR_META_BYTES = 2 * (1024 + 64 * 1024) + 4096
 STATE = Path("/state")
 MAX_CANDIDATE_BYTES = 512 * 1024
+MAX_REQUEST_CHARS = 180000  # codex_subscription_text.MAX_INPUT_CHARS
 STAGE_SECONDS = 900
 # Total guest budget; the host passes its own deadline minus a margin.
 DEADLINE = time.monotonic() + int(os.environ.get("CODEX_AUTOMATION_GUEST_SECONDS", "1400"))
@@ -220,6 +221,11 @@ def _candidates(directory):
 def assessment(value):
     work = _workspace()
     diff = _diff(value, work)
+    # Subscription classification requires the complete diff. A diff alone
+    # over the request limit cannot fit once the prompt and metadata are added.
+    if (diff.stat().st_size > MAX_REQUEST_CHARS
+            and len(diff.read_text(encoding="utf-8", errors="replace")) > MAX_REQUEST_CHARS):
+        raise GuestHold("subscription_text_input_exhausted")
     _workflow_heads(value, work)
     manifest = work / "classifier-output.json"
     candidates = work / ".ai/candidates"
@@ -298,7 +304,6 @@ AUTOFIX_SYSTEM = (
     "{\"summary\": \"no safe fix\", \"patch\": \"\"}."
 )
 MAX_CONTEXT_BYTES = 120 * 1024
-MAX_REQUEST_CHARS = 180000  # codex_subscription_text.MAX_INPUT_CHARS
 MAX_BUNDLE_BYTES = 1024 * 1024
 
 
