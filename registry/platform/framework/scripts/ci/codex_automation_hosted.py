@@ -366,7 +366,11 @@ def _prepare_session(assignment: dict, home: Path, *, backup=False) -> tuple[dic
         # (capacity, account, lifetime) refuses this run; never drop it.
         try:
             outcome = persist()
-        except ProfileError:
+        except ProfileError as exc:
+            # A changed account takes precedence over an unavailable probe or
+            # quota error, neither of which can authorize the backup in this case.
+            if str(exc) == "profile_account_mismatch":
+                raise
             outcome = "writeback_failed"
     snapshot["credential"] = outcome
     return auth, snapshot

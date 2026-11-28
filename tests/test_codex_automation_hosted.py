@@ -186,6 +186,30 @@ def test_credential_mismatch_does_not_activate_backup(two_accounts):
     assert reads == [value["credential"]["secret"]]
 
 
+@pytest.mark.parametrize("error_source", ["probe", "capacity"])
+def test_account_change_disallows_backup_even_when_primary_is_unavailable(two_accounts, monkeypatch, error_source):
+    value, _, reads, _ = two_accounts
+
+    def probe(path, *, refresh):
+        auth = login("changed")
+        auth["tokens"]["account_id"] = "unexpected-account"
+        (path / "auth.json").write_text(json.dumps(auth))
+        if error_source == "probe":
+            raise profiles.ProfileError("profile_probe_unavailable")
+        return {}, {}
+
+    def capacity(*args):
+        raise profiles.ProfileError("profile_capacity_exhausted")
+
+    monkeypatch.setattr(profiles, "account_probe", probe)
+    monkeypatch.setattr(profiles, "capacity", capacity)
+    with pytest.raises(profiles.ProfileError, match="profile_account_mismatch"):
+        with hosted.session(hosted.select(REPO, "assessment", value), REPO, "assessment"):
+            pytest.fail("a changed account is a policy failure, not a fallback")
+    assert reads == [value["credential"]["secret"]]
+    assert hosted.account_selection() == {}
+
+
 def test_no_fallback_after_primary_session_is_admitted(two_accounts, monkeypatch):
     value, _, reads, _ = two_accounts
     with hosted.session(hosted.select(REPO, "assessment", value), REPO, "assessment"):
