@@ -76,7 +76,7 @@ def coordinates(policy: dict) -> dict:
         or not SECRET_NAME.fullmatch(value["secret"])
     ):
         raise ProfileError("hosted_credential_coordinates_invalid")
-    return value
+    return dict(value)
 
 
 def _request(token: str, url: str, data: dict | None = None) -> dict:

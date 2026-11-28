@@ -234,6 +234,17 @@ def test_revoked_backup_does_not_interrupt_primary(two_accounts):
     assert reads == [value["credential"]["secret"]] and probes == [ACCOUNT]
 
 
+def test_backup_coordinates_are_bound_before_primary_attempt(two_accounts):
+    value, logins, reads, _ = two_accounts
+    assignment = hosted.select(REPO, "assessment", value)
+    value["backup"]["credential"]["secret"] = "UPDATED_BACKUP"
+    del logins[value["credential"]["secret"]]
+    with pytest.raises(profiles.ProfileError, match="profile_assignment_changed"):
+        with hosted.session(assignment, REPO, "assessment"):
+            pytest.fail("an updated backup secret needs a new assignment")
+    assert reads == [value["credential"]["secret"]]
+
+
 def test_login_is_materialized_privately_and_unchanged_logins_are_not_written(monkeypatch, tmp_path, controller):
     fake = FakeDoppler(login())
     monkeypatch.setattr(hosted, "_request", fake)
