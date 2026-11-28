@@ -370,6 +370,21 @@ pass rejects the credential after custody was claimed, the attempt ends with
 cannot retry that claimed revision. Each consumer still requires its own
 repository grant in the reviewed consent policy.
 
+For an independently entitled backup account, add a top-level `backup` object
+with its own `consent`, `credential`, and `"credential_mode": "access_only"`.
+Keep the backup access payload under a different secret name in the same scoped
+Doppler config. Publish the access and identity tokens with an empty refresh
+token. The two accounts must have distinct bindings and each account must
+independently authorize the repository and role.
+
+The worker tries the primary first. It can select the backup on an unavailable
+credential or probe, insufficient session lifetime, or an exhausted allowance.
+The chosen account serves the whole assessment and judge. The backup cannot
+run autofix. A denied primary consent or account binding fails the run. An
+unusable backup grant leaves the primary eligible. When backup is configured,
+the result records the selected slot and the reason for any fallback without
+publishing account identifiers.
+
 An account that holds purchased credits is refused (`profile_funding_unverified`)
 unless the consent adds `"credit_balance_allowed": true`. With that grant a run
 is admitted only while included usage remains: it is refused when a usage
