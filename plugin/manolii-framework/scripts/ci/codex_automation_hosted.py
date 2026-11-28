@@ -47,6 +47,11 @@ SECRET_NAME = re.compile(r"[A-Z][A-Z0-9_]{0,99}\Z")
 WORKER = ".github/workflows/codex-automation-worker.yml@refs/heads/"
 MAX_AUTH_BYTES = 65536
 REFRESH_WINDOW = 3600
+BACKUP_ROLES = frozenset({"assessment", "judge"})
+BACKUP_REASONS = frozenset({
+    "hosted_credential_unavailable", "profile_probe_unavailable",
+    "profile_session_expiry_unverified", "profile_capacity_exhausted",
+})
 
 _state: dict = {}
 
@@ -71,7 +76,7 @@ def coordinates(policy: dict) -> dict:
         or not SECRET_NAME.fullmatch(value["secret"])
     ):
         raise ProfileError("hosted_credential_coordinates_invalid")
-    return value
+    return dict(value)
 
 
 def _request(token: str, url: str, data: dict | None = None) -> dict:
@@ -127,10 +132,12 @@ def credential_mode(policy: dict) -> str:
     return mode
 
 
-def _load_login(home: Path, token: str, coords: dict, mode: str) -> dict:
+def _load_login(home: Path, token: str, coords: dict, mode: str, *, backup=False) -> dict:
     raw = _read_stored(token, coords)
     auth = _parse(raw)
     if mode == "access_only":
+        if backup and auth["tokens"].get("refresh_token"):
+            raise ProfileError("profile_backup_refresh_material")
         # The CLI's private copy cannot consume the real refresh token even
         # if a provider request tries to retry authentication internally.
         auth["tokens"]["refresh_token"] = ""
@@ -144,6 +151,7 @@ def _load_login(home: Path, token: str, coords: dict, mode: str) -> dict:
 
 def configure(policy: dict, home: Path, token: str) -> None:
     """Materialize the stored login privately for this run only."""
+    _state.clear()
     coords = coordinates(policy)
     mode = credential_mode(policy)
     if not token:
@@ -152,11 +160,14 @@ def configure(policy: dict, home: Path, token: str) -> None:
     info = home.lstat()
     if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o077:
         raise ProfileError("profile_session_unprotected")
-    auth = _load_login(home, token, coords, mode)
     seconds = max(1500, policy.get("max_seconds", 1500))
-    if mode == "access_only":
-        profiles.require_session_lifetime(auth, seconds=seconds)
-    _state.update(home=home, coords=coords, token=token, start=fingerprint(auth),
+    start = None
+    if "backup" not in policy:
+        auth = _load_login(home, token, coords, mode)
+        if mode == "access_only":
+            profiles.require_session_lifetime(auth, seconds=seconds)
+        start = fingerprint(auth)
+    _state.update(home=home, coords=coords, token=token, start=start,
                   policy=policy, mode=mode, seconds=seconds)
 
 
@@ -173,6 +184,32 @@ def select(repository: str, role: str, policy: dict) -> dict:
         workflow = pieces[0].lower() + "/" + pieces[1].lower() + "/" + pieces[2]
     if not workflow.startswith(repository + "/" + WORKER):
         raise ProfileError("profile_host_access_unverified")
+    assignment = _assignment(repository, role, policy, workflow)
+    assignment["assignment_sha256"] = profiles.digest(assignment)
+    if "backup" in policy and role in BACKUP_ROLES:
+        try:
+            assignment["backup"] = _backup_assignment(assignment, policy["backup"])
+        except ProfileError as exc:
+            # A denied backup grant cannot invalidate the primary's grant.
+            assignment["backup_unavailable"] = str(exc)
+    return assignment
+
+
+def _backup_assignment(primary: dict, backup: object) -> dict:
+    if (not isinstance(backup, dict)
+            or set(backup) != {"credential", "credential_mode", "consent"}
+            or backup["credential_mode"] != "access_only"):
+        raise ProfileError("profile_backup_policy_invalid")
+    secondary = _assignment(primary["repository"], primary["role"], backup, primary["controller_workflow"])
+    primary_coords, backup_coords = primary["credential"], secondary["credential"]
+    if (primary["account_sha256"] == secondary["account_sha256"]
+            or primary_coords["secret"] == backup_coords["secret"]
+            or any(primary_coords[key] != backup_coords[key] for key in ("doppler_project", "doppler_config"))):
+        raise ProfileError("profile_backup_not_distinct")
+    return secondary
+
+
+def _assignment(repository: str, role: str, policy: dict, workflow: str) -> dict:
     consent = policy.get("consent")
     now = int(time.time())
     if (
@@ -205,7 +242,6 @@ def select(repository: str, role: str, policy: dict) -> dict:
         # The owner admits an account that holds purchased credits; capacity()
         # still keeps every run on included usage.
         assignment["credit_balance_allowed"] = True
-    assignment["assignment_sha256"] = profiles.digest(assignment)
     return assignment
 
 
@@ -220,6 +256,7 @@ def persist() -> str:
     current = _parse(raw)
     if fingerprint(current) == start:
         return "unchanged"
+    profiles.read_auth(home, {"account_sha256": (_state["policy"].get("consent") or {}).get("account_sha256")})
     stored = _parse(_read_stored(token, coords))
     if fingerprint(stored) != start:
         # Another writer already advanced the login; never restore over it.
@@ -239,10 +276,22 @@ def persist() -> str:
     return "persisted"
 
 
-def _recheck(assignment: dict, repository: str, role: str) -> None:
+def _recheck(assignment: dict, repository: str, role: str, *, backup=False) -> None:
     current = select(repository, role, _state.get("policy") or {})
-    if current["assignment_sha256"] != assignment.get("assignment_sha256"):
+    if (current["assignment_sha256"] != assignment.get("assignment_sha256")
+            or (backup and current.get("backup") != assignment.get("backup"))):
         raise ProfileError("profile_assignment_changed")
+
+
+def account_selection() -> dict:
+    if "backup" not in _state.get("policy", {}) or _state.get("account_slot") is None:
+        return {}
+    selection = {"slot": _state["account_slot"]}
+    if _state.get("primary_reason"):
+        selection["primary_reason"] = _state["primary_reason"]
+    if _state.get("backup_unavailable"):
+        selection["backup_unavailable"] = _state["backup_unavailable"]
+    return selection
 
 
 @contextmanager
@@ -257,19 +306,48 @@ def session(assignment, repository, role, *, wait_seconds=0):
     # session; re-check it before the login is probed and again before it is
     # handed to the caller.
     _recheck(assignment, repository, role)
+    backup = assignment.get("backup")
+    selected = _state.get("account_slot")
+    if selected == "backup":
+        if backup is None:
+            raise ProfileError("profile_backup_role_unavailable")
+        _recheck(assignment, repository, role, backup=True)
+        auth, snapshot = _prepare_session(backup, home / "backup", backup=True)
+    else:
+        try:
+            auth, snapshot = _prepare_session(assignment, home)
+        except ProfileError as exc:
+            if selected or backup is None or str(exc) not in BACKUP_REASONS:
+                raise
+            _recheck(assignment, repository, role, backup=True)
+            auth, snapshot = _prepare_session(backup, home / "backup", backup=True)
+            _state.update(account_slot="backup", primary_reason=str(exc))
+        else:
+            _state["account_slot"] = "primary"
+            if assignment.get("backup_unavailable"):
+                _state["backup_unavailable"] = assignment["backup_unavailable"]
+    _recheck(assignment, repository, role, backup=_state["account_slot"] == "backup")
+    yield auth, snapshot
+
+
+def _prepare_session(assignment: dict, home: Path, *, backup=False) -> tuple[dict, dict]:
     if assignment["credential_mode"] == "access_only":
+        if backup:
+            home.mkdir(mode=0o700, exist_ok=True)
         # A different worker may have refreshed since this run was admitted.
-        _load_login(home, _state["token"], assignment["credential"], "access_only")
+        _load_login(home, _state["token"], assignment["credential"], "access_only", backup=backup)
         auth = profiles.read_auth(home, assignment, require_refresh=False)
         seconds = _state["seconds"]
         profiles.require_session_lifetime(auth, seconds=seconds)
         account, limits = profiles.account_probe(home, refresh=False)
         snapshot = profiles.capacity(account, limits, assignment)
+        auth = profiles.read_auth(home, assignment, require_refresh=False)
         profiles.require_session_lifetime(auth, seconds=seconds)
         snapshot["credential"] = "access_only"
-        _recheck(assignment, repository, role)
-        yield auth, snapshot
-        return
+        return auth, snapshot
+    if _state["start"] is None:
+        auth = _load_login(home, _state["token"], assignment["credential"], "refresh")
+        _state["start"] = fingerprint(auth)
     initial = profiles.read_auth(home, assignment)
     # Refresh only when the stored access token is near expiry. Every
     # consumer of a login reads the same stored copy, so refreshing on every
@@ -288,8 +366,11 @@ def session(assignment, repository, role, *, wait_seconds=0):
         # (capacity, account, lifetime) refuses this run; never drop it.
         try:
             outcome = persist()
-        except ProfileError:
+        except ProfileError as exc:
+            # A changed account takes precedence over an unavailable probe or
+            # quota error, neither of which can authorize the backup in this case.
+            if str(exc) == "profile_account_mismatch":
+                raise
             outcome = "writeback_failed"
     snapshot["credential"] = outcome
-    _recheck(assignment, repository, role)
-    yield auth, snapshot
+    return auth, snapshot

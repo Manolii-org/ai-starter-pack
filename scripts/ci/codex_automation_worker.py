@@ -365,6 +365,8 @@ def execute(github, target, directory, *, run_id, run_attempt, workflow_sha, gue
     # Every exit after broker execution keeps the unknown-outcome accounting,
     # not only the adjudicated one (failed/held/blocked passes most need it).
     result["unmeasured_requests"] = unmeasured
+    if hosted.enabled() and (selection := hosted.account_selection()):
+        result["subscription_account"] = selection
     return result, rows
 
 

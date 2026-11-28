@@ -277,7 +277,12 @@ def test_absent_pr_metadata_is_empty_not_an_error(sandbox, monkeypatch):
     assert env["PR_TITLE"] == "" and env["PR_BODY"] == ""
 
 
-@pytest.mark.parametrize("body", ["界" * 30000, "\U0001F600" * 20000, '"\\' * 40000, "\n\t" * 40000])
+@pytest.mark.parametrize("body", [
+    pytest.param("界" * 30000, id="three-byte-unicode"),
+    pytest.param("\U0001F600" * 20000, id="four-byte-unicode"),
+    pytest.param('"\\' * 40000, id="quotes-and-backslashes"),
+    pytest.param("\n\t" * 40000, id="newlines-and-tabs"),
+])
 def test_worst_case_bodies_written_by_the_host_are_accepted_by_the_guest(sandbox, monkeypatch, body):
     """Independent review P1: JSON escaping of a bounded body must stay within the
     guest's file bound (non-ASCII is written raw; quotes/backslashes at most double)."""
